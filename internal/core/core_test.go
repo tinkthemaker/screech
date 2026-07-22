@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -96,6 +97,23 @@ func TestListenLoveRoundtrip(t *testing.T) {
 	lovedKeys, err := c.store.LovedArtistKeys()
 	if err != nil || !lovedKeys["stellardrone"] {
 		t.Fatalf("loved not persisted: %v %v", lovedKeys, err)
+	}
+}
+
+func TestLoggerSurfacesSwallowedPersistenceErrors(t *testing.T) {
+	c := openTestCore(t)
+	var logged []string
+	c.SetLogger(func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	})
+	// Close the store out from under the core: every subsequent best-effort
+	// write now fails. Before, these vanished silently; now they must log.
+	if err := c.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	c.MarkStationFailed(c.stations[0].UUID)
+	if len(logged) == 0 {
+		t.Fatal("persistence failure was swallowed; expected a log line")
 	}
 }
 

@@ -18,12 +18,14 @@ type Core struct {
 	rb    *RadioBrowser
 	rng   *rand.Rand
 
+	logf func(string, ...any) // non-fatal error sink; nil = drop (tests)
+
 	stations []Station
 	bandit   map[string]map[string]banditRow // station -> daypart -> row
 	tags     map[string]banditRow            // tag -> weight row (Alpha=weight)
 	loved    map[string]bool                 // loved artist keys
 	fp       *fingerprints
-	presets  map[int]string                  // slot 1-9 -> station uuid
+	presets  map[int]string // slot 1-9 -> station uuid
 
 	currentUUID  string
 	previousUUID string
@@ -98,6 +100,26 @@ func (c *Core) Close() error {
 	return c.store.Close()
 }
 
+// SetLogger installs a sink for non-fatal errors that would otherwise be
+// swallowed — chiefly best-effort persistence writes. Playback never depends
+// on these succeeding, but a silently failing store means the taste model
+// stops learning with no trace, so we leave a breadcrumb in the run log. Safe
+// to leave unset (tests do): errors are then dropped as before.
+func (c *Core) SetLogger(logf func(string, ...any)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.logf = logf
+}
+
+// warn reports a non-fatal error under op if a logger is installed. Callers
+// must hold c.mu (all current callers do) since it reads c.logf.
+func (c *Core) warn(op string, err error) {
+	if err == nil || c.logf == nil {
+		return
+	}
+	c.logf("core: %s: %v", op, err)
+}
+
 func (c *Core) StationCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -125,7 +147,7 @@ func (c *Core) Sync(ctx context.Context, limit int) (int, error) {
 	if err := c.reload(); err != nil {
 		return 0, err
 	}
-	_ = c.store.SetMeta("last_sync", fmt.Sprint(time.Now().Unix()))
+	c.warn("set last_sync meta", c.store.SetMeta("last_sync", fmt.Sprint(time.Now().Unix())))
 	return len(sts), nil
 }
 
@@ -174,14 +196,14 @@ func (c *Core) TogglePreset(now time.Time) (slot int, saved bool, full bool) {
 	for s, u := range c.presets {
 		if u == c.currentUUID {
 			delete(c.presets, s)
-			_ = c.store.DeletePreset(s)
+			c.warn("delete preset", c.store.DeletePreset(s))
 			return s, false, false
 		}
 	}
 	for s := 1; s <= 9; s++ {
 		if _, used := c.presets[s]; !used {
 			c.presets[s] = c.currentUUID
-			_ = c.store.SetPreset(s, c.currentUUID, now)
+			c.warn("save preset", c.store.SetPreset(s, c.currentUUID, now))
 			return s, true, false
 		}
 	}
@@ -227,10 +249,14 @@ func (c *Core) StartListen(uuid string, now time.Time) {
 	c.everTrack = false
 	c.suspectAd = false
 	id, err := c.store.InsertListen(uuid, now, DaypartFor(now))
-	if err == nil {
+	if err != nil {
+		// listenID stays 0, so endListenLocked won't record a reward for this
+		// listen. Non-fatal, but the taste signal is lost — say so.
+		c.warn("insert listen", err)
+	} else {
 		c.listenID = id
 	}
-	_ = c.store.SetMeta("last_station", uuid)
+	c.warn("set last_station meta", c.store.SetMeta("last_station", uuid))
 	c.rb.Click(uuid)
 }
 
@@ -249,7 +275,7 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 	dur := now.Sub(c.listenStart)
 	skipFast := userSkip && dur < fastSkipWindow
 	duringAd := skipFast && c.suspectAd
-	_ = c.store.FinishListen(c.listenID, now, skipFast, duringAd)
+	c.warn("finish listen", c.store.FinishListen(c.listenID, now, skipFast, duringAd))
 
 	daypart := DaypartFor(c.listenStart)
 	switch {
@@ -301,7 +327,7 @@ func (c *Core) NoteTitle(raw string, now time.Time) (Track, bool, bool) {
 		c.curTrack = tr
 		c.hasTrack = true
 		c.everTrack = true
-		_ = c.store.InsertTrack(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, raw, now)
+		c.warn("insert track", c.store.InsertTrack(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, raw, now))
 		c.fp.note(c.currentUUID, tr.ArtistKey)
 	} else {
 		c.hasTrack = false
@@ -329,7 +355,7 @@ func (c *Core) Love(now time.Time) (Track, bool) {
 		return Track{}, false
 	}
 	tr := c.curTrack
-	_ = c.store.InsertLoved(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, now)
+	c.warn("insert loved", c.store.InsertLoved(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, now))
 	if tr.ArtistKey != "" {
 		c.loved[tr.ArtistKey] = true
 	}
@@ -341,7 +367,7 @@ func (c *Core) Love(now time.Time) (Track, bool) {
 func (c *Core) MarkStationFailed(uuid string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_ = c.store.BumpFailCount(uuid, 1)
+	c.warn("bump fail count", c.store.BumpFailCount(uuid, 1))
 	if st := c.stationByUUIDLocked(uuid); st != nil {
 		st.FailCount++
 	}
@@ -351,7 +377,7 @@ func (c *Core) MarkStationFailed(uuid string) {
 func (c *Core) MarkStationHealthy(uuid string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_ = c.store.BumpFailCount(uuid, -maxFailCount)
+	c.warn("reset fail count", c.store.BumpFailCount(uuid, -maxFailCount))
 	if st := c.stationByUUIDLocked(uuid); st != nil {
 		st.FailCount = 0
 	}
@@ -395,7 +421,7 @@ func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, no
 			c.bandit[uuid] = map[string]banditRow{}
 		}
 		c.bandit[uuid][dp] = nr
-		_ = c.store.PutBandit(uuid, dp, a, b, now)
+		c.warn("put bandit", c.store.PutBandit(uuid, dp, a, b, now))
 	}
 }
 
@@ -406,7 +432,7 @@ func (c *Core) bumpTagLocked(tag string, delta float64, now time.Time) {
 	}
 	w := decayToward(row.Alpha, row.UpdatedAt, now) + delta
 	c.tags[tag] = banditRow{Alpha: w, UpdatedAt: now}
-	_ = c.store.PutTagAffinity(tag, w, now)
+	c.warn("put tag affinity", c.store.PutTagAffinity(tag, w, now))
 }
 
 // SeedResult is what a typed seed query resolved to.
@@ -455,15 +481,15 @@ func (c *Core) Seed(ctx context.Context, query string, now time.Time) (SeedResul
 	key := NormalizeArtist(q)
 	if key != "" && !c.loved[key] {
 		c.loved[key] = true
-		_ = c.store.InsertLoved("", key, strings.TrimSpace(query), "", now)
+		c.warn("insert loved (seed)", c.store.InsertLoved("", key, strings.TrimSpace(query), "", now))
 	}
 	c.mu.Unlock()
 
 	// Directory search by name, outside the lock (network).
 	if found, err := c.rb.SearchByName(ctx, q, 20); err == nil && len(found) > 0 {
-		_ = c.store.UpsertStations(found, now)
 		c.mu.Lock()
-		_ = c.reload()
+		c.warn("upsert stations (seed)", c.store.UpsertStations(found, now))
+		c.warn("reload after seed", c.reload())
 		c.mu.Unlock()
 	}
 

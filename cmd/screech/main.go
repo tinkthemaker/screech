@@ -52,6 +52,9 @@ func main() {
 		fail("opening database: %v", err)
 	}
 	defer c.Close()
+	// Route the core's best-effort persistence failures into the run log so a
+	// silently failing store leaves a trace instead of vanishing.
+	c.SetLogger(logLine)
 	logLine("database open; %d stations cached", c.StationCount())
 
 	pl, err := player.NewMPV(cfg.MpvPath)
@@ -82,10 +85,16 @@ func logPath() string {
 // openLog starts a fresh last-run log: one launch, one file, easy to paste.
 func openLog() {
 	p := logPath()
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	if f, err := os.Create(p); err == nil {
-		logF = f
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "screech: cannot create log directory %s: %v\n", filepath.Dir(p), err)
+		return
 	}
+	f, err := os.Create(p)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "screech: cannot open log file %s: %v\n", p, err)
+		return
+	}
+	logF = f
 }
 
 func logLine(format string, args ...any) {
