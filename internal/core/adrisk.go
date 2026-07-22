@@ -1,6 +1,10 @@
 package core
 
-import "strings"
+import (
+	"strings"
+
+	"screech/internal/mathx"
+)
 
 // Commercial simulcast tells: big-network CDN hostnames.
 var adHosts = []string{
@@ -62,15 +66,5 @@ func ComputeAdRisk(st *Station) float64 {
 		}
 	}
 
-	return clamp(risk, 0, 1)
-}
-
-func clamp(x, lo, hi float64) float64 {
-	if x < lo {
-		return lo
-	}
-	if x > hi {
-		return hi
-	}
-	return x
+	return mathx.Clamp(risk, 0, 1)
 }

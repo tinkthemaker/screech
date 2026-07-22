@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"screech/internal/mathx"
 )
 
 // MPV drives a headless mpv process over its JSON IPC socket (unix socket on
@@ -221,13 +223,7 @@ func (m *MPV) handleProperty(msg mpvMsg) {
 		if err != nil {
 			return
 		}
-		lv := 1 + db/48
-		if lv < 0 {
-			lv = 0
-		}
-		if lv > 1 {
-			lv = 1
-		}
+		lv := mathx.Clamp(1+db/48, 0, 1)
 		m.lastLevelEmit = now
 		m.emit(Event{Type: EventLevel, Level: lv})
 	}

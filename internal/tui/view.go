@@ -9,6 +9,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+
+	"screech/internal/mathx"
 )
 
 const wordmark = "S C R E E C H"
@@ -177,7 +179,7 @@ func (m Model) trackRow(iw int, idle bool) string {
 // bandRow is the dial: dim band, mid ticks where presets live, accent marker
 // at the playing station's position.
 func (m Model) bandRow(iw int, idle bool) string {
-	pos := clampF(m.dial.Pos, 0, 1)
+	pos := mathx.Clamp(m.dial.Pos, 0, 1)
 	col := int(math.Round(pos * float64(iw-1)))
 	markerStyle := m.th.Accent
 	if idle {

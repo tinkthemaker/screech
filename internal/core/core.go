@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"screech/internal/mathx"
 )
 
 type Core struct {
@@ -260,7 +262,7 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 	case dur >= fastSkipWindow:
 		c.applyRewardLocked(c.currentUUID, daypart, listenAlpha(dur), 0, now)
 		if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
-			bump := clamp(dur.Minutes()/30, 0.05, 1.0)
+			bump := mathx.Clamp(dur.Minutes()/30, 0.05, 1.0)
 			for _, t := range st.TagList() {
 				c.bumpTagLocked(t, bump, now)
 			}

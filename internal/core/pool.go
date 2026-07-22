@@ -50,13 +50,7 @@ func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 	var eligible []*Station
 	for i := range c.stations {
 		st := &c.stations[i]
-		if st.UUID == c.currentUUID || st.UUID == c.previousUUID {
-			continue
-		}
-		if st.FailCount >= maxFailCount {
-			continue
-		}
-		if st.StreamURL() == "" {
+		if !c.eligibleLocked(st) {
 			continue
 		}
 		eligible = append(eligible, st)
@@ -131,17 +125,25 @@ func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 	return out
 }
 
-// candidatesFor scores every eligible station passing keep. Eligibility is
-// the shared hygiene: never the current or previous station, never repeat
-// failures, never URL-less entries.
+// eligibleLocked reports whether a station may enter a candidate pool: never
+// the current or previous station, never a repeat failure, never a URL-less
+// entry. Callers must hold c.mu.
+func (c *Core) eligibleLocked(st *Station) bool {
+	if st.UUID == c.currentUUID || st.UUID == c.previousUUID {
+		return false
+	}
+	if st.FailCount >= maxFailCount {
+		return false
+	}
+	return st.StreamURL() != ""
+}
+
+// candidatesFor scores every eligible station passing keep.
 func (c *Core) candidatesFor(now time.Time, keep func(*Station) bool) []candidate {
 	var out []candidate
 	for i := range c.stations {
 		st := &c.stations[i]
-		if st.UUID == c.currentUUID || st.UUID == c.previousUUID {
-			continue
-		}
-		if st.FailCount >= maxFailCount || st.StreamURL() == "" {
+		if !c.eligibleLocked(st) {
 			continue
 		}
 		if keep != nil && !keep(st) {

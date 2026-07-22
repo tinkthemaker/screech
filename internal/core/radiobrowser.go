@@ -95,14 +95,27 @@ type rbStation struct {
 	LastCheckOK float64 `json:"lastcheckok"` // API is loose with number types
 }
 
-// FetchTop pulls the top `limit` working stations by votes.
-func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, error) {
+// toStation converts a radio-browser API row into a Station, computing its
+// ad-risk score.
+func toStation(r rbStation) Station {
+	st := Station{
+		UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
+		Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
+		Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
+		LastCheckOK: r.LastCheckOK >= 1,
+	}
+	st.AdRisk = ComputeAdRisk(&st)
+	return st
+}
+
+// search runs a /stations/search query, always hiding broken streams and
+// ordering by votes. Callers add their own filters (name, limit) to q.
+// URL-less rows are dropped.
+func (rb *RadioBrowser) search(ctx context.Context, q url.Values) ([]Station, error) {
 	base := rb.pickServer(ctx)
-	q := url.Values{}
 	q.Set("hidebroken", "true")
 	q.Set("order", "votes")
 	q.Set("reverse", "true")
-	q.Set("limit", fmt.Sprint(limit))
 	var raw []rbStation
 	if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
 		rb.base = "" // let the next attempt pick a different server
@@ -113,49 +126,26 @@ func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, err
 		if r.URL == "" && r.URLResolved == "" {
 			continue
 		}
-		st := Station{
-			UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
-			Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
-			Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
-			LastCheckOK: r.LastCheckOK >= 1,
-		}
-		st.AdRisk = ComputeAdRisk(&st)
-		out = append(out, st)
+		out = append(out, toStation(r))
 	}
 	return out, nil
+}
+
+// FetchTop pulls the top `limit` working stations by votes.
+func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, error) {
+	q := url.Values{}
+	q.Set("limit", fmt.Sprint(limit))
+	return rb.search(ctx, q)
 }
 
 // SearchByName finds working stations whose name matches (niche internet
 // radio is full of "<artist> Radio" stations, which makes this a decent
 // artist-seeding source).
 func (rb *RadioBrowser) SearchByName(ctx context.Context, name string, limit int) ([]Station, error) {
-	base := rb.pickServer(ctx)
 	q := url.Values{}
 	q.Set("name", name)
-	q.Set("hidebroken", "true")
-	q.Set("order", "votes")
-	q.Set("reverse", "true")
 	q.Set("limit", fmt.Sprint(limit))
-	var raw []rbStation
-	if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
-		rb.base = ""
-		return nil, err
-	}
-	out := make([]Station, 0, len(raw))
-	for _, r := range raw {
-		if r.URL == "" && r.URLResolved == "" {
-			continue
-		}
-		st := Station{
-			UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
-			Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
-			Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
-			LastCheckOK: r.LastCheckOK >= 1,
-		}
-		st.AdRisk = ComputeAdRisk(&st)
-		out = append(out, st)
-	}
-	return out, nil
+	return rb.search(ctx, q)
 }
 
 // Click reports a tune-in to radio-browser (their etiquette; improves their

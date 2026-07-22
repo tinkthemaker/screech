@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/rand"
 	"time"
+
+	"screech/internal/mathx"
 )
 
 // Tuning constants. All rewards are bounded so no single session can swamp
@@ -64,7 +66,7 @@ func (r banditRow) decayed(now time.Time) (alpha, beta float64) {
 // leans on all-time; rich daypart evidence mostly ignores it.
 func blend(dpA, dpB, allA, allB float64) (a, b float64) {
 	evidence := (dpA - 1) + (dpB - 1)
-	w := clamp(1-evidence/6.0, 0.15, 0.7)
+	w := mathx.Clamp(1-evidence/6.0, 0.15, 0.7)
 	return dpA + w*(allA-1), dpB + w*(allB-1)
 }
 
@@ -74,7 +76,7 @@ func prior(tagScore, overlapScore, adRisk float64) (a, b float64) {
 	a = 1 + 2.5*tagScore + 3.0*overlapScore
 	a *= 1 - 0.55*adRisk
 	b = 1 + 1.6*adRisk
-	return clamp(a, 0.6, 6), clamp(b, 1, 4)
+	return mathx.Clamp(a, 0.6, 6), mathx.Clamp(b, 1, 4)
 }
 
 // sampleBeta draws from Beta(a, b) via two Gamma draws (Marsaglia–Tsang).
@@ -117,5 +119,5 @@ func sampleGamma(rng *rand.Rand, shape float64) float64 {
 
 // listenAlpha converts a listen duration into bounded α credit.
 func listenAlpha(dur time.Duration) float64 {
-	return clamp(dur.Minutes()/10*listenAlphaPer10Min, listenAlphaMin, listenAlphaMax)
+	return mathx.Clamp(dur.Minutes()/10*listenAlphaPer10Min, listenAlphaMin, listenAlphaMax)
 }

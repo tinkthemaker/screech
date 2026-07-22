@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/rand"
 	"strings"
+
+	"screech/internal/mathx"
 )
 
 // Wave is the fake spectrum: layered slow sines per bar, eased toward target
@@ -33,7 +35,7 @@ func NewWave(bars int) *Wave {
 // Step uses. Fresh samples drive the wave's amplitude; if they stop coming
 // (backend without astats), Step falls back to the self-animated breathing.
 func (w *Wave) SetLevel(v, t float64) {
-	w.level = clampF(v, 0, 1)
+	w.level = mathx.Clamp(v, 0, 1)
 	w.levelAt = t
 }
 
@@ -58,16 +60,16 @@ func (w *Wave) Resize(bars int) {
 	}
 }
 
-func (w *Wave) SetEnergy(e float64) { w.targetEnergy = clampF(e, 0, 1) }
+func (w *Wave) SetEnergy(e float64) { w.targetEnergy = mathx.Clamp(e, 0, 1) }
 
 // Step advances the animation. t is absolute seconds, dt frame seconds.
 func (w *Wave) Step(t, dt float64) {
-	w.energy += (w.targetEnergy - w.energy) * clampF(dt*2.2, 0, 1)
+	w.energy += (w.targetEnergy - w.energy) * mathx.Clamp(dt*2.2, 0, 1)
 
 	// Amplitude: real loudness when fresh, self-animated breathing otherwise.
 	live := t-w.levelAt < 3.0
 	if live {
-		w.levelDisp += (w.level - w.levelDisp) * clampF(dt*10, 0, 1)
+		w.levelDisp += (w.level - w.levelDisp) * mathx.Clamp(dt*10, 0, 1)
 	}
 	for i := 0; i < w.bars; i++ {
 		x := float64(i)
@@ -82,8 +84,8 @@ func (w *Wave) Step(t, dt float64) {
 			}
 		}
 		target := w.energy * (0.5 + 0.5*s) * amp
-		target = clampF(target, 0, 1)
-		w.disp[i] += (target - w.disp[i]) * clampF(dt*9, 0, 1)
+		target = mathx.Clamp(target, 0, 1)
+		w.disp[i] += (target - w.disp[i]) * mathx.Clamp(dt*9, 0, 1)
 		w.peak[i] -= dt * 0.22
 		if w.disp[i] > w.peak[i] {
 			w.peak[i] = w.disp[i]
@@ -110,14 +112,4 @@ func (w *Wave) Render(t Theme) string {
 		}
 	}
 	return b.String()
-}
-
-func clampF(x, lo, hi float64) float64 {
-	if x < lo {
-		return lo
-	}
-	if x > hi {
-		return hi
-	}
-	return x
 }
