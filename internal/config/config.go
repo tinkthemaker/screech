@@ -15,13 +15,15 @@ type Config struct {
 	MpvPath    string `toml:"mpv_path"`
 	DataDir    string `toml:"data_dir"`
 	AutoHopAds bool   `toml:"auto_hop_ads"`
+	SyncLimit  int    `toml:"sync_limit"`
 }
 
 func defaults() Config {
 	return Config{
-		Accent:  "#FFB000",
-		ASCII:   false,
-		MpvPath: "mpv",
+		Accent:    "#FFB000",
+		ASCII:     false,
+		MpvPath:   "mpv",
+		SyncLimit: 20000,
 	}
 }
 
@@ -42,6 +44,10 @@ data_dir = ""
 # Auto-hop away from suspected ad breaks. Off by default: detection is
 # conservative and DJs legitimately trip it. (Not yet wired in v1.)
 auto_hop_ads = false
+
+# How many stations to cache from the directory (top slice by votes).
+# The directory refreshes in the background weekly.
+sync_limit = 20000
 `
 
 // Load reads (creating if needed) the config and returns it plus the

@@ -31,21 +31,37 @@ two controls:
 - **next** (`space` or `n`) — pressed fast (<90s) it's a skip (negative). Pressed
   after a long listen it's a variety request (listen credit already banked, no penalty).
 - **love** (`l`) — strong positive on the track's artist + station + tags.
+  Toggle: loving the same track (or, trackless, the same station) a second
+  time returns the exact boosts — a bounded dose, not a permanent scar.
+- **dead streams** (`TuneDead`) — a stream that fails to lock closes its
+  listen with no skip semantics and no bandit reward; fail_count is the
+  whole penalty. Network trouble is not dislike.
 
 Shipped in v0.2, still within the austerity budget:
 
 - **presets** (`f` save/unsave, digits 1-9 recall): deterministic *recall*, the one
   job the bandit can't do. Deliberately zero effect on the taste model — love
   teaches, presets remember. Saved stations render as ticks on the band line.
-- **seeding** (`/`): type a genre or artist; screech bumps the matching tag
-  affinity (or pseudo-loves the artist), tunes a matching station, and lets the
-  bias decay like every other signal. First run opens on this prompt instead of
-  auto-tuning a wildcard; every later launch keeps zero-press resume.
+  Nine slots stay nine: presets are muscle memory, not a list. Everything past
+  that lives in the library's saved-stations view (below).
+- **seeding** (`/`): type a genre or artist. Genres resolve strongest: a tag
+  in the local cache tunes instantly, and a tag the cache doesn't carry
+  (e.g. "corridos" on a thin global-pop cache) is searched against the
+  directory, upserted, and tuned. Artists are honest-best-effort: the name
+  is pseudo-loved so fingerprints catch it later, stations *named* for the
+  artist are tuned when they exist, and when they don't (the common case) a
+  small curated artist→genre map finds a station in the family that plays
+  their music. The reason line always says which path fired —
+  `seeded: corridos` vs `seeded genre: corridos` — so a genre guess is
+  never silent. A genre seed also echoes through the next four picks. First
+  run plays from embedded stations while directory sync runs in the
+  background; every later launch keeps zero-press resume.
+- **volume** (`v`, then arrows or `-`/`+`): application-only mpv volume,
+  persisted in SQLite. It appears as a temporary instrument slider rather
+  than occupying permanent space in the idle display.
 
 `q` quits. Launch resumes the last station and plays immediately — zero-press startup,
 like a physical radio. Everything else is automatic or read-only.
-
-Still demoted (hidden): `h`/`L` heard/loved read-only views.
 
 ## Architecture
 
@@ -80,11 +96,20 @@ fallback; watch `core-idle` / `paused-for-cache` for the connect spinner.
 
 radio-browser.info API, cached in SQLite. Etiquette: resolve a server from the
 `all.api.radio-browser.info` pool, send a real User-Agent (`screech/x.y`), hit the
-click endpoint on tune (fire-and-forget). Sync top stations by votes with
-`hidebroken=true`. Use **`url_resolved`**, never raw `url` (raw may be a .pls/.m3u —
-mpv copes, `<audio>` won't). Track `fail_count` per station; three consecutive
-failures removes it from candidate pools (the directory is full of corpses;
-`lastcheckok` alone isn't enough). Self-reported tags are weak signal only.
+click endpoint on tune (fire-and-forget). Sync the top `sync_limit` stations
+(default 20,000) by votes with `hidebroken=true`, paged 5,000 at a time with
+dedupe; a partial slice beats none. Use **`url_resolved`**, never raw `url` (raw
+may be a .pls/.m3u — mpv copes, `<audio>` won't). Self-reported tags are weak
+signal only.
+
+**Dead-station lifecycle (v0.3):** the cache refreshes weekly in the background
+(staleness = last_sync older than 7 days, or cache under half the limit after
+the knob grows). On each sync: stations absent from the fresh slice with no user
+history (no listens, no bandit counts, no loves, not preset, not the resume
+station, not a seed) are pruned; re-vouched stations heal one local `fail_count`
+strike, so temporary outages rehabilitate. Locally, three consecutive play
+failures still bench a station immediately — `lastcheckok` alone was never
+enough.
 
 A small embedded seed list (SomaFM, Radio Paradise, WFMU, KEXP, NTS, WWOZ…) covers
 first-run when the API is unreachable and gives cold start a decent floor.
@@ -128,6 +153,11 @@ play the argmax. Uncertainty handles explore/exploit with no knobs.
 pull (α, β) toward the (1, 1) prior by `0.5^(Δt/half-life)`. No cron, no
 background decay pass. Same treatment for tag affinities.
 
+**Open-listen hygiene:** screech is single-instance against its database, so
+any listen still open at startup belongs to a dead process (window close,
+SIGKILL, power loss) and is reaped: closed at its start time, no bandit
+credit. Clean quits end the listen first, banking the dwell-time credit.
+
 ### 3. Daypart context
 
 Four dayparts (morning/day/evening/night, local time). Bandit reads the daypart row
@@ -169,7 +199,10 @@ Curation does the real work; runtime detection is a bonus, and expectations stay
 - `stations` — radio-browser cache + ad_risk + fail_count + fetched_at
 - `listens` — station, start/end, daypart, skip_fast, during_ad
 - `tracks_heard` — station, artist_key, artist, title, raw, heard_at
-- `loved` — artist_key, artist, title, station, loved_at
+  (indexed on station, artist, and heard_at — the recent-history sort key)
+- `loved` — artist_key, artist, title, station, loved_at. A row with empty
+  artist/title is a trackless station love; the `l` toggle reads these rows
+  as ground truth.
 - `bandit` — (station, daypart) → alpha, beta, updated_at  (daypart 'all' = all-time row)
 - `tag_affinity` — tag → weight, updated_at
 - `meta` — key/value (schema version, last station, last sync)
@@ -179,21 +212,64 @@ Curation does the real work; runtime detection is a bonus, and expectations stay
 Screech is an ambient object: on screen for hours, touched twice an hour. The
 visual budget goes to the idle state and the two touch moments.
 
-**Materials.** No boxes — horizontal rules, whitespace, small glyph clusters
-(NFO austerity). Content clamped to ~64 cols, centered; never stretched. Station
-name is the hero: letterspaced caps (`S P A C E  S T A T I O N`). Four tones:
+**Materials.** The wide layout is one receiver faceplate rather than a set of
+dashboard cards: a warm-black body, quiet metal edge, raised reason readout,
+and small glyph clusters. Content is clamped to 92 columns and centered; it
+never stretches without limit. When track metadata exists, the track is the
+hero and the station becomes its broadcast source; without metadata the
+station takes the hero position. Short station names may use letterspaced caps;
+longer directory names use natural spacing and bold weight. Four core tones:
 accent (default amber `#FFB000`, TOML-overridable), bright, mid, dim — warm grays
-to match. Dither glyphs `░▒▓` allowed for faint gradients. Braille block (U+2800)
+to match. Coral is reserved for love, warnings, and destructive confirmation.
+Dither glyphs `░▒▓` are allowed for faint gradients. Braille block (U+2800) is
 allowed for fine detail.
 
-**The wave (honest amplitude, synthetic texture).** Sum of slow sines per bar,
-eased toward target each frame, eighth-block rendering (`▁▂▃▄▅▆▇█`), peak-hold
-ticks that decay slowly. Since v0.2.1 the amplitude is real: mpv runs an astats
-filter and reports RMS loudness over IPC (~20Hz, throttled), so the wave rises
-and falls with the actual audio. The per-bar texture is still synthetic — one
-loudness number can't make a spectrum. If level data stops (other backends),
-it falls back to self-animated breathing after 3s. Real FFT arrives with
-Path 2's pure-Go audio; the renderer already takes a `[]float64` either way.
+**Faceplate layout (v0.5).** The brand/status rail pins to the top and the
+stateful key strip pins to the bottom. At 78 columns and sufficient height, a
+single framed receiver body centers between them. Its left bay contains track,
+artist, and broadcast identity; its right bay contains the live signal and the
+station-memory dial. A raised full-width readout explains the current pick.
+Narrow terminals collapse to the v0.4 stacked composition. Meter columns touch
+to form a continuous signal silhouette, library selection is a full-row background bar, and
+microlabels anchor every data field. Surfaces derive from the accent hue so any
+configured color keeps its temperature. The footer exposes live state (`loved`,
+`preset 7`, `75%`) rather than acting as a static command legend.
+
+**Color material (v0.4).** The accent is no longer a garnish. Grays derive
+from the accent hue (an amber accent warms them to stone, a violet cools
+them to lavender — the fixed olive family is gone), and the dim floor is
+raised so "quiet" never means illegible. The header readout sits on the
+accent while the stream is live; buffering blinks. The dial marker carries
+a five-cell ember→accent→ember gradient. A loved track's whole row takes
+the faintest accent surface, readable from across the room. The status
+line's label carries a category glyph and weight: accent for seed/love,
+mid for recall, dim for wildcard. Still one hue — many temperatures.
+
+**Library views.** `h` opens recent tracks. `H` opens a unified library on the
+loved view; Tab cycles recent, loved, and saved stations. Loved tracks are
+deduplicated, searchable across artist/title/origin station, and
+keyboard-selectable. The selected track can seed more music from its artist,
+return to its origin station, or be removed with a guarded action.
+
+The **saved-stations view** is the full two-tier station list: presets
+(carrying their slot number) plus every station with loved tracks, unified
+and sorted most-listened first. It's unbounded — presets stay at nine for
+instant digit recall, but the library holds every station you've ever
+marked. `/` filters by name, `j`/`k` select, `enter` tunes, digits jump to a
+preset, and a guarded `x` removes the station from recall (preset slot and
+loved rows) while leaving listen history and the taste model untouched.
+Radio metadata is recall and discovery context, never presented as an
+on-demand replay URL. Esc closes.
+
+**The wave (honest amplitude, synthetic texture).** Two rows of half-blocks
+per bar, a vertical gradient from a visible ember base through the accent to
+a pale peak, peak-hold ticks that cool through the ramp as they fall. Bars
+are bass-weighted — the left end responds harder to the loudness signal — so
+the single amplitude number still reads as a spectrum, not a uniform bounce.
+Amplitude is real (mpv astats RMS over IPC ~20Hz); texture is synthetic. If
+level data stops (other backends), it falls back to self-animated breathing
+after 3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already
+takes a `[]float64` either way.
 
 **Set piece: tuning (the signature moment).** A band line under the header
 (`──────╂──────`). On next: accent marker springs to the new station's position
@@ -203,8 +279,8 @@ dissolves through random glyphs resolving left-to-right into the new name
 anywhere in the app.
 
 **Set piece: love.** One-frame inverse flash on ♥, holds accent ~2s, decays to a
-persistent dim ♥. Reason line types in at ~20ms/char, then dims. Feedback lands
-the same frame as the keypress, always; never block render on network.
+persistent dim ♥. Structured feedback (`LOVED  Track and station`) lands the
+same frame as the keypress, always; never block render on network.
 
 **Idle (the main state).** After ~3 min without keys: everything dims except track
 title and wave; the accent marker breathes (slow luminance sine, ~6s period). Any
@@ -215,8 +291,10 @@ endless loops.
 **Boot.** ~500ms: rules draw outward from center, wordmark letterspaces in, then
 content. Skippable on any key.
 
-**Texture.** Dim readout cluster top-right: `aac · 128k · 2h14m`. Instrument-panel
-credibility, zero controls.
+**Texture.** Mid-contrast readout cluster top-right: `AAC  128K  2:14:06`.
+Fixed-width clock formatting and uppercase codec labels provide
+instrument-panel credibility. The command legend sits two rows below the
+status line, keeping the whole display a single 12–14-line object.
 
 **Reality.** One `tea.Tick` heartbeat (15–20fps); every animation is a pure
 function of elapsed time; no per-effect goroutines. Fixed zone heights so frames

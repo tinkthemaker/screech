@@ -95,32 +95,51 @@ type rbStation struct {
 	LastCheckOK float64 `json:"lastcheckok"` // API is loose with number types
 }
 
-// FetchTop pulls the top `limit` working stations by votes.
+// FetchTop pulls the top `limit` working stations by votes, paging through
+// the directory 5000 at a time (gentler on their volunteer-run servers than
+// one giant request). Votes shift between pages, so results are deduped;
+// a partial slice beats no slice if a later page fails.
 func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, error) {
+	const page = 5000
 	base := rb.pickServer(ctx)
-	q := url.Values{}
-	q.Set("hidebroken", "true")
-	q.Set("order", "votes")
-	q.Set("reverse", "true")
-	q.Set("limit", fmt.Sprint(limit))
-	var raw []rbStation
-	if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
-		rb.base = "" // let the next attempt pick a different server
-		return nil, err
-	}
-	out := make([]Station, 0, len(raw))
-	for _, r := range raw {
-		if r.URL == "" && r.URLResolved == "" {
-			continue
+	seen := map[string]bool{}
+	var out []Station
+	for offset := 0; offset < limit; offset += page {
+		n := page
+		if limit-offset < page {
+			n = limit - offset
 		}
-		st := Station{
-			UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
-			Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
-			Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
-			LastCheckOK: r.LastCheckOK >= 1,
+		q := url.Values{}
+		q.Set("hidebroken", "true")
+		q.Set("order", "votes")
+		q.Set("reverse", "true")
+		q.Set("limit", fmt.Sprint(n))
+		q.Set("offset", fmt.Sprint(offset))
+		var raw []rbStation
+		if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
+			rb.base = "" // let the next attempt pick a different server
+			if len(out) > 0 {
+				return out, nil
+			}
+			return nil, err
 		}
-		st.AdRisk = ComputeAdRisk(&st)
-		out = append(out, st)
+		for _, r := range raw {
+			if r.UUID == "" || seen[r.UUID] || (r.URL == "" && r.URLResolved == "") {
+				continue
+			}
+			seen[r.UUID] = true
+			st := Station{
+				UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
+				Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
+				Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
+				LastCheckOK: r.LastCheckOK >= 1,
+			}
+			st.AdRisk = ComputeAdRisk(&st)
+			out = append(out, st)
+		}
+		if len(raw) < n {
+			break // directory exhausted before the limit
+		}
 	}
 	return out, nil
 }
@@ -129,9 +148,24 @@ func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, err
 // radio is full of "<artist> Radio" stations, which makes this a decent
 // artist-seeding source).
 func (rb *RadioBrowser) SearchByName(ctx context.Context, name string, limit int) ([]Station, error) {
-	base := rb.pickServer(ctx)
 	q := url.Values{}
 	q.Set("name", name)
+	return rb.search(ctx, q, limit)
+}
+
+// SearchByTag finds working stations carrying a genre tag. This is where
+// artist seeds land when no station is named for the artist: genre-tagged
+// stations are far more common than eponymous ones.
+func (rb *RadioBrowser) SearchByTag(ctx context.Context, tag string, limit int) ([]Station, error) {
+	q := url.Values{}
+	q.Set("tag", tag)
+	return rb.search(ctx, q, limit)
+}
+
+// search runs a station query against the directory, mapping results into
+// the cache's Station shape with ad-risk precomputed.
+func (rb *RadioBrowser) search(ctx context.Context, q url.Values, limit int) ([]Station, error) {
+	base := rb.pickServer(ctx)
 	q.Set("hidebroken", "true")
 	q.Set("order", "votes")
 	q.Set("reverse", "true")

@@ -32,6 +32,8 @@ type Player interface {
 	// Play switches to the given stream URL. Returns quickly; progress
 	// arrives as events.
 	Play(url string) error
+	// SetVolume changes this player's output only, from silent (0) to full (100).
+	SetVolume(percent int) error
 	// Events is the stream of title/state changes. Closed when the backend dies.
 	Events() <-chan Event
 	// Close shuts the backend down.

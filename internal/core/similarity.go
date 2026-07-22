@@ -6,21 +6,32 @@ import "math"
 // which artist keys each station has been observed playing, and the inverse
 // document frequency of each artist across heard stations. Sharing a chart
 // artist means nothing; sharing an obscure one means a lot.
+//
+// artistStations is the inverted index (artist -> stations observed playing
+// them). Overlap scoring walks the loved-artist set through it instead of
+// probing every candidate against every loved artist, which keeps tune-time
+// work proportional to loved artists, not to cache size.
 type fingerprints struct {
-	stationArtists map[string]map[string]bool // station uuid -> artist keys
-	artistDF       map[string]int             // artist key -> #stations observed playing it
+	stationArtists map[string]map[string]bool   // station uuid -> artist keys
+	artistStations map[string]map[string]bool   // artist key -> station uuids
+	artistDF       map[string]int               // artist key -> #stations observed playing it
 	heardStations  int
 }
 
 func newFingerprints(stationArtists map[string]map[string]bool) *fingerprints {
 	fp := &fingerprints{
 		stationArtists: stationArtists,
+		artistStations: map[string]map[string]bool{},
 		artistDF:       map[string]int{},
 		heardStations:  len(stationArtists),
 	}
-	for _, artists := range stationArtists {
+	for station, artists := range stationArtists {
 		for a := range artists {
 			fp.artistDF[a]++
+			if fp.artistStations[a] == nil {
+				fp.artistStations[a] = map[string]bool{}
+			}
+			fp.artistStations[a][station] = true
 		}
 	}
 	return fp
@@ -40,6 +51,10 @@ func (fp *fingerprints) note(station, artistKey string) {
 	if !set[artistKey] {
 		set[artistKey] = true
 		fp.artistDF[artistKey]++
+		if fp.artistStations[artistKey] == nil {
+			fp.artistStations[artistKey] = map[string]bool{}
+		}
+		fp.artistStations[artistKey][station] = true
 	}
 }
 
@@ -57,13 +72,12 @@ func (fp *fingerprints) idf(artistKey string) float64 {
 // Only heard stations can score above zero — that's the honest cold-start
 // limit of empirical fingerprints.
 func (fp *fingerprints) lovedOverlap(station string, loved map[string]bool) (score float64, matches int) {
-	artists := fp.stationArtists[station]
-	if len(artists) == 0 || len(loved) == 0 {
+	if len(loved) == 0 {
 		return 0, 0
 	}
 	sum := 0.0
 	for a := range loved {
-		if artists[a] {
+		if fp.artistStations[a][station] {
 			sum += fp.idf(a)
 			matches++
 		}

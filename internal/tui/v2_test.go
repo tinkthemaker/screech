@@ -11,12 +11,12 @@ import (
 
 func TestCleanStationName(t *testing.T) {
 	cases := map[string]string{
-		"ENERGY NRJ Bulgaria 90s Only (OGG)":  "ENERGY NRJ Bulgaria 90s Only",
-		"Some Station [128k] (AAC)":           "Some Station",
-		"Plain Name":                          "Plain Name",
-		"Trailing Dash - ":                    "Trailing Dash",
-		"(Only Parens)":                       "(Only Parens)", // never strip to empty
-		"  Spaced  (mp3)  ":                   "Spaced",
+		"ENERGY NRJ Bulgaria 90s Only (OGG)": "ENERGY NRJ Bulgaria 90s Only",
+		"Some Station [128k] (AAC)":          "Some Station",
+		"Plain Name":                         "Plain Name",
+		"Trailing Dash - ":                   "Trailing Dash",
+		"(Only Parens)":                      "(Only Parens)", // never strip to empty
+		"  Spaced  (mp3)  ":                  "Spaced",
 	}
 	for in, want := range cases {
 		if got := cleanStationName(in); got != want {
@@ -105,4 +105,60 @@ func TestDigitRecallIgnoresEmptySlot(t *testing.T) {
 	if !strings.Contains(m.note, "preset 5 is empty") {
 		t.Fatalf("note: %q", m.note)
 	}
+}
+
+func TestVolumeSliderControlsPlayerAndPersists(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 80, 24
+	m.start = m.now.Add(-time.Minute)
+	m.volume = 50
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = mm.(Model)
+	if !m.volumeOpen || !strings.Contains(m.View(), "VOLUME") {
+		t.Fatal("v should open the volume slider")
+	}
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = mm.(Model)
+	if m.volume != 55 || cmd == nil {
+		t.Fatalf("right should raise volume: %d", m.volume)
+	}
+	msg := cmd()
+	if got := m.pl.(*stubPlayer).volume; got != 55 {
+		t.Fatalf("player volume=%d, want 55", got)
+	}
+	mm, _ = m.Update(msg)
+	m = mm.(Model)
+	if got := m.core.Volume(); got != 55 {
+		t.Fatalf("persisted volume=%d, want 55", got)
+	}
+	if !strings.Contains(m.View(), "55%") {
+		t.Fatalf("slider does not show percentage:\n%s", m.View())
+	}
+
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if mm.(Model).volumeOpen {
+		t.Fatal("esc should close the volume slider")
+	}
+}
+
+func TestVolumeSliderClampsAndFitsTinyTerminals(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 20, 6
+	m.start = m.now.Add(-time.Minute)
+	m.volumeOpen = true
+	m.volume = 100
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = mm.(Model)
+	if m.volume != 100 {
+		t.Fatalf("high clamp=%d", m.volume)
+	}
+	m.volume = 0
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = mm.(Model)
+	if m.volume != 0 {
+		t.Fatalf("low clamp=%d", m.volume)
+	}
+	assertFits(t, m.View(), 20, 6)
 }

@@ -12,7 +12,7 @@ import (
 	"screech/internal/tui"
 )
 
-const version = "0.2.1"
+var version = "0.3.1"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -61,7 +61,7 @@ func main() {
 	defer pl.Close()
 	logLine("mpv connected over IPC")
 
-	if err := tui.Run(c, pl, tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII}); err != nil {
+	if err := tui.Run(c, pl, tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII, SyncLimit: cfg.SyncLimit}); err != nil {
 		fail("ui: %v", err)
 	}
 	logLine("clean exit")

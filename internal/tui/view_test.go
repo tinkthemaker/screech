@@ -13,10 +13,17 @@ import (
 	"screech/internal/player"
 )
 
-type stubPlayer struct{ ch chan player.Event }
+type stubPlayer struct {
+	ch     chan player.Event
+	volume int
+}
 
 func newStubPlayer() *stubPlayer            { return &stubPlayer{ch: make(chan player.Event, 8)} }
 func (s *stubPlayer) Play(url string) error { return nil }
+func (s *stubPlayer) SetVolume(percent int) error {
+	s.volume = percent
+	return nil
+}
 func (s *stubPlayer) Events() <-chan player.Event {
 	return s.ch
 }
@@ -133,6 +140,159 @@ func TestHeroTextFallsBack(t *testing.T) {
 	}
 	if strings.Contains(got, "A  S T A T I O N") {
 		t.Errorf("long names must not letterspace: %q", got)
+	}
+}
+
+func TestHeroTextDoesNotTrackLongStationNames(t *testing.T) {
+	got := heroText("DRGNU - Death Metal", 72, "…")
+	if got != "DRGNU - DEATH METAL" {
+		t.Fatalf("long station names should keep natural spacing: %q", got)
+	}
+}
+
+// The faceplate contract: brand bar on the first row, key strip pinned to
+// the very last row, content vertically centered between them. The app
+// claims the whole terminal instead of floating as an island.
+func TestFaceplateClaimsTheTerminal(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 110, 32
+	m.start = m.now.Add(-time.Minute)
+	m.st = core.SeedStations()[0]
+	m.haveSt = true
+	m.ph = phPlay
+	m.reason = "wildcard"
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != m.h {
+		t.Fatalf("view must fill the terminal exactly: %d lines for height %d", len(lines), m.h)
+	}
+	if !strings.Contains(lines[0], wordmark) {
+		t.Fatalf("brand bar missing from row 0: %q", lines[0])
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "SPACE") || !strings.Contains(last, "quit") {
+		t.Fatalf("key strip missing from the last row: %q", last)
+	}
+	// Content sits between the chrome, roughly centered: the hero station
+	// name should be in the middle band of the screen, not hugging an edge.
+	hero := -1
+	for i, line := range lines {
+		if strings.Contains(line, "GROOVE SALAD") {
+			hero = i
+		}
+	}
+	if hero < m.h/4 || hero > 3*m.h/4 {
+		t.Fatalf("hero not centered between chrome: row %d of %d", hero, m.h)
+	}
+}
+
+func TestWideReceiverComposition(t *testing.T) {
+	m := testModel(t)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 110, Height: 32})
+	m = mm.(Model)
+	m.start = m.now.Add(-time.Minute)
+	m.st = core.SeedStations()[0]
+	m.haveSt = true
+	m.ph = phPlay
+	m.track = "Tycho · A Walk"
+	m.haveTrack = true
+	m.trackAt = m.now.Add(-time.Minute)
+	m.reason = "plays 3 artists you love"
+
+	view := m.View()
+	for _, want := range []string{
+		"RECEIVER / NOW PLAYING", "TRACK", "SIGNAL", "A Walk", "Tycho",
+		"BROADCAST", "STATION MEMORY", "WHY THIS STATION",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("wide receiver missing %q", want)
+		}
+	}
+	assertFits(t, view, 110, 32)
+
+	// Every row of the receiver must terminate in the same column. In
+	// particular, the labeled top rail must not overhang the right edge.
+	lines := strings.Split(view, "\n")
+	start, end := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "RECEIVER / NOW PLAYING") {
+			start = i
+		}
+		if start >= 0 && strings.Contains(line, m.th.G.FrameBR) {
+			end = i
+			break
+		}
+	}
+	if start < 0 || end < start {
+		t.Fatal("could not locate receiver frame")
+	}
+	wantWidth := lipgloss.Width(lines[start])
+	for i := start + 1; i <= end; i++ {
+		if got := lipgloss.Width(lines[i]); got != wantWidth {
+			t.Errorf("receiver row %d ends at column %d; top rail ends at %d", i-start, got, wantWidth)
+		}
+	}
+}
+
+// The gray family derives from the accent: warm accents warm the grays,
+// cool accents cool them. Two different accents must produce two different
+// gray families, and the dim floor must stay legible (not near-black).
+func TestThemeGraysFollowAccent(t *testing.T) {
+	warm := NewTheme("#FFB000", false)
+	cool := NewTheme("#7D56F4", false)
+	if warm.Mid.GetForeground() == cool.Mid.GetForeground() {
+		t.Error("grays must derive from the accent, not a fixed olive")
+	}
+	if warm.Dim.GetForeground() == nil || warm.Mid.GetForeground() == nil || warm.Bright.GetForeground() == nil {
+		t.Fatal("gray styles must carry colors")
+	}
+}
+
+// The wave ramp starts at a visible ember, not near-black, and climbs.
+func TestThemeRampBaseIsVisible(t *testing.T) {
+	th := NewTheme("#FFB000", false)
+	base := th.Ramp[0].GetForeground()
+	top := th.Ramp[len(th.Ramp)-1].GetForeground()
+	if base == nil || top == nil {
+		t.Fatal("ramp steps must carry colors")
+	}
+	if base == top {
+		t.Error("ramp must climb from ember to pale, not sit flat")
+	}
+}
+
+// statusRow assigns a semantic glyph per category: accent for seed/love,
+// mid for recall, dim for wildcard.
+func TestStatusRowCategoryGlyphs(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 80, 24
+	cases := []struct {
+		reason string
+		want   string
+	}{
+		{"seeded: ambient", m.th.G.Pointer},
+		{"preset 3", m.th.G.Tick},
+		{"from your history", m.th.G.Tick},
+		{"wildcard", m.th.G.Dot},
+	}
+	for _, tc := range cases {
+		got := m.statusRow(statusReason(tc.reason), 64, false)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("reason %q should carry glyph %q: %q", tc.reason, tc.want, got)
+		}
+	}
+}
+
+func TestClockReadout(t *testing.T) {
+	cases := map[time.Duration]string{
+		0:                             "00:00",
+		42 * time.Second:              "00:42",
+		9*time.Minute + 3*time.Second: "09:03",
+		2*time.Hour + 4*time.Minute:   "2:04:00",
+	}
+	for in, want := range cases {
+		if got := fmtClock(in); got != want {
+			t.Errorf("fmtClock(%v)=%q, want %q", in, got, want)
+		}
 	}
 }
 

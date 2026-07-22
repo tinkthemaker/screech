@@ -15,13 +15,13 @@ func TestParseTitle(t *testing.T) {
 		{"Just A Title No Separator", "X", true, "", "", "Just A Title No Separator"},
 		{"", "X", false, "", "", ""},
 		{"   ", "X", false, "", "", ""},
-		{"WFMU", "WFMU", false, "", "", ""},                       // station name as title
-		{"wfmu", "WFMU", false, "", "", ""},                       // case-insensitive
-		{"Advertisement", "X", false, "", "", ""},                 // ad marker
-		{"Commercial Break - Back Soon", "X", false, "", "", ""},  // ad marker inside
-		{"Visit www.example.com now", "X", false, "", "", ""},     // promo junk
-		{"https://somewhere.com/stream", "X", false, "", "", ""},  // URL
-		{"DJ Night - ", "X", true, "", "", "DJ Night"},            // empty title side collapses
+		{"WFMU", "WFMU", false, "", "", ""},                      // station name as title
+		{"wfmu", "WFMU", false, "", "", ""},                      // case-insensitive
+		{"Advertisement", "X", false, "", "", ""},                // ad marker
+		{"Commercial Break - Back Soon", "X", false, "", "", ""}, // ad marker inside
+		{"Visit www.example.com now", "X", false, "", "", ""},    // promo junk
+		{"https://somewhere.com/stream", "X", false, "", "", ""}, // URL
+		{"DJ Night - ", "X", true, "", "", "DJ Night"},           // empty title side collapses
 	}
 	for _, tc := range cases {
 		tr, ok := ParseTitle(tc.raw, tc.station)
@@ -41,11 +41,11 @@ func TestParseTitle(t *testing.T) {
 
 func TestNormalizeArtist(t *testing.T) {
 	cases := map[string]string{
-		"The Beatles":              "beatles",
-		"  BONOBO  ":               "bonobo",
-		"Massive Attack ft. Tracey": "massive attack",
+		"The Beatles":                  "beatles",
+		"  BONOBO  ":                   "bonobo",
+		"Massive Attack ft. Tracey":    "massive attack",
 		"A Winged Victory featuring X": "a winged victory",
-		"":                         "",
+		"":                             "",
 	}
 	for in, want := range cases {
 		if got := NormalizeArtist(in); got != want {

@@ -142,3 +142,31 @@ func TestSeedArtistDashSongTakesArtist(t *testing.T) {
 		t.Fatal("artist - song input should seed the artist half")
 	}
 }
+
+func TestGenreSeedEchoesForNextFourPicks(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	res, ok := c.Seed(context.Background(), "ambient", now)
+	if !ok || res.Kind != "tag" {
+		t.Fatalf("seed failed: %+v %v", res, ok)
+	}
+	for i := 0; i < 4; i++ {
+		p, err := c.Tune(now.Add(time.Duration(i+1) * time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Reason != "seed echo: ambient" {
+			t.Fatalf("pick %d reason: %q", i+1, p.Reason)
+		}
+		found := false
+		for _, tag := range p.Station.TagList() {
+			found = found || tag == "ambient"
+		}
+		if !found {
+			t.Fatalf("pick %d ignored seed: %+v", i+1, p.Station)
+		}
+	}
+	if c.seedPicks != 0 {
+		t.Fatalf("seed echo should expire, remaining=%d", c.seedPicks)
+	}
+}

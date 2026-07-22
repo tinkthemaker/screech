@@ -90,6 +90,16 @@ func (m *MPV) Play(url string) error {
 	return m.send("loadfile", url)
 }
 
+func (m *MPV) SetVolume(percent int) error {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	return m.send("set_property", "volume", percent)
+}
+
 func (m *MPV) Close() error {
 	m.mu.Lock()
 	if m.closed {

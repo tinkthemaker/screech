@@ -39,6 +39,9 @@ func (c *Core) tagScore(st *Station, now time.Time) float64 {
 				sum += w
 			}
 		}
+		if c.seedPicks > 0 && t == c.seedTag {
+			sum += 6
+		}
 	}
 	return sum / (sum + 2.0)
 }
@@ -178,11 +181,37 @@ func (c *Core) pickFrom(cands []candidate, now time.Time, rng *rand.Rand) (candi
 
 func (c *Core) pick(now time.Time, rng *rand.Rand) (Pick, error) {
 	pool := c.buildPool(now, rng)
+	if c.seedPicks > 0 {
+		seeded := c.candidatesFor(now, func(st *Station) bool {
+			for _, tag := range st.TagList() {
+				if tag == c.seedTag {
+					return true
+				}
+			}
+			return false
+		})
+		if len(seeded) > 0 {
+			pool = seeded
+		}
+	}
 	cd, evidence, err := c.pickFrom(pool, now, rng)
 	if err != nil {
 		return Pick{}, fmt.Errorf("no eligible stations (station cache empty?)")
 	}
-	return Pick{Station: *cd.st, Reason: c.reason(cd, DaypartFor(now), evidence)}, nil
+	reason := c.reason(cd, DaypartFor(now), evidence)
+	if c.seedPicks > 0 {
+		for _, tag := range cd.st.TagList() {
+			if tag == c.seedTag {
+				reason = "seed echo: " + c.seedTag
+				break
+			}
+		}
+		c.seedPicks--
+		if c.seedPicks == 0 {
+			c.seedTag = ""
+		}
+	}
+	return Pick{Station: *cd.st, Reason: reason}, nil
 }
 
 // effectiveCounts resolves a candidate's Beta parameters: decayed daypart row
