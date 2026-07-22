@@ -84,6 +84,9 @@ func NewMPV(mpvPath string) (*MPV, error) {
 func (m *MPV) Events() <-chan Event { return m.events }
 
 func (m *MPV) Play(url string) error {
+	if err := ValidateStreamURL(url); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	m.sawIcy = false
 	m.mu.Unlock()
