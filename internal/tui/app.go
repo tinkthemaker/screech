@@ -17,11 +17,18 @@ import (
 const (
 	fps         = 20
 	frameDur    = time.Second / fps
-	bootDur     = 900 * time.Millisecond
+	bootDur     = 600 * time.Millisecond
 	idleAfter   = 3 * time.Minute
 	tuneStall   = 12 * time.Second
 	maxQuery    = 40
 	feedbackDur = 2400 * time.Millisecond
+
+	// settleAfter/settleFade drive the idle settle: five untouched minutes
+	// and the chrome eases to an ember floor over half a minute. The signal
+	// instruments (wave, dial marker, LIVE) never settle — the radio is
+	// still on, only the room lights dim.
+	settleAfter = 5 * time.Minute
+	settleFade  = 30 * time.Second
 
 	defaultSyncLimit = 20000
 	libraryLimit     = 500
@@ -72,6 +79,8 @@ type Model struct {
 	start   time.Time
 	now     time.Time
 	lastKey time.Time
+	lastAct time.Time // any sign of life: keys, overlays, tunes, player state
+	daypart string    // core daypart the current theme is tempered for
 
 	ph        phase
 	syncing   bool
@@ -155,17 +164,20 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 		sl = defaultSyncLimit
 	}
 	themeName := normalizeThemeName(c.Theme())
+	dp := core.DaypartFor(now)
 	return Model{
 		syncLimit:   sl,
 		core:        c,
 		pl:          pl,
-		th:          NewNamedTheme(themeName, opts.Accent, opts.ASCII),
+		th:          NewDaypartTheme(themeName, opts.Accent, opts.ASCII, dp),
 		themeName:   themeName,
 		themeAccent: opts.Accent,
 		themeASCII:  opts.ASCII,
 		start:       now,
 		now:         now,
 		lastKey:     now,
+		lastAct:     now,
+		daypart:     dp,
 		wave:        NewWave(32),
 		dial:        NewSpring(0.5),
 		dialTgt:     0.5,
@@ -288,6 +300,7 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	m.reason = pick.Reason
 	m.ph = phTune
 	m.tuneAt = m.now
+	m.lastAct = m.now
 	m.decrypt = NewDecrypt(heroText(cleanStationName(m.st.Name), 72, m.th.G.Ellipsis), m.now)
 	m.stDecrypt = NewDecrypt(strings.ToUpper(cleanStationName(m.st.Name)), m.now)
 	m.tw = NewTypewriter(m.reason, m.now.Add(300*time.Millisecond))
@@ -311,6 +324,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		m.lastKey = m.now
+		m.lastAct = m.now
+		// Boot is a heartbeat, not a gate: any key ends it early and still
+		// lands — the interface never swallows input.
+		if m.now.Sub(m.start) < bootDur {
+			m.start = m.now.Add(-bootDur)
+		}
 		if m.themeOpen {
 			return m.handleThemeKey(msg)
 		}
@@ -335,6 +354,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		t := m.now.Sub(m.start).Seconds()
 		m.wave.Step(t, dt)
 		m.dial.Step(m.dialTgt, dt)
+		// Daypart turns retemper the theme (brighter midday, ember night).
+		// Never while the picker is open: a preview in progress owns th.
+		if dp := core.DaypartFor(m.now); dp != m.daypart && !m.themeOpen {
+			m.daypart = dp
+			m.previewTheme(m.themeName)
+		}
 		// A station that never locks is a corpse: mark it and move on. The
 		// dead listen closes without skip semantics — a stream that never
 		// played teaches nothing about taste.
@@ -545,7 +570,9 @@ func themeChoiceIndex(name string) int {
 
 func (m *Model) previewTheme(name string) {
 	m.themeName = normalizeThemeName(name)
-	m.th = NewNamedTheme(m.themeName, m.themeAccent, m.themeASCII)
+	// Previews render under the current daypart: what you see in the picker
+	// is what the theme looks like right now, not an abstract noon version.
+	m.th = NewDaypartTheme(m.themeName, m.themeAccent, m.themeASCII, m.daypart)
 	m.wave.ResetPalette()
 }
 
@@ -1152,6 +1179,11 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
+	// Player state changes are signs of life and restore a settled room;
+	// the per-frame audio level is not — it would keep the room lit forever.
+	if ev.Type != player.EventLevel {
+		m.lastAct = m.now
+	}
 	switch ev.Type {
 	case player.EventTitle:
 		tr, ok, suspect, lovedNow := m.core.NoteTitle(ev.Title, time.Now())
@@ -1240,7 +1272,7 @@ func (m Model) innerWidth() int {
 // stacked width.
 func (m Model) waveRenderWidth() int {
 	iw := m.innerWidth()
-	if iw >= 78 && m.h >= 16 {
+	if iw >= 78 && m.h >= 14 {
 		_, _, right := receiverColumns(iw)
 		return right
 	}

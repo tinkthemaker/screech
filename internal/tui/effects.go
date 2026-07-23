@@ -83,6 +83,24 @@ func (tw Typewriter) Render(now time.Time) string {
 	return string(tw.text[:n])
 }
 
+// RenderOver types an arbitrary text on the typewriter's clock. The model
+// stores the reason token in tw, but the views render its human detail —
+// RenderOver lets any string share the same start time. Before the clock
+// starts (the deliberate post-pick delay) nothing shows; once finished, the
+// full text holds.
+func (tw Typewriter) RenderOver(now time.Time, text string) string {
+	dt := now.Sub(tw.start)
+	if dt <= 0 {
+		return ""
+	}
+	n := int(dt / (20 * time.Millisecond))
+	runes := []rune(text)
+	if n > len(runes) {
+		n = len(runes)
+	}
+	return string(runes[:n])
+}
+
 // --- marquee: long-title etiquette ---
 // Pause 2s, scroll once across, pause 2s, snap back. No endless loops.
 

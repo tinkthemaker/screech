@@ -77,10 +77,12 @@ func (m Model) headerBar() string {
 	style := m.th.AccentDim.Bold(true)
 	if m.idle() {
 		style = m.th.BreatheStyle(m.now.Sub(m.start).Seconds())
+	} else {
+		style = scaleStyle(style, m.settleScale())
 	}
 	left := style.Render(" " + wordmark)
 	if m.w >= 58 {
-		left += m.th.Dim.Render("  PERSONAL RADIO")
+		left += scaleStyle(m.th.Dim, m.settleScale()).Render("  PERSONAL RADIO")
 	}
 
 	right := ""
@@ -129,6 +131,75 @@ func (m Model) readout() string {
 	return strings.Join(parts, " "+m.th.G.Dot+" ")
 }
 
+// settleScale is the idle-settle dimmer: 1 while the room is awake, easing
+// to an ember floor over settleFade once nothing has happened for
+// settleAfter. Chrome scales its colors by this at render time — no theme
+// rebuild, just a quieter room. The signal instruments never read it.
+func (m Model) settleScale() float64 {
+	over := m.now.Sub(m.lastAct) - settleAfter
+	if over <= 0 {
+		return 1
+	}
+	k := 1 - 0.45*float64(over)/float64(settleFade)
+	if k < 0.55 {
+		k = 0.55
+	}
+	return k
+}
+
+// scaleStyle multiplies a style's foreground and background colors by k at
+// the application layer. Colors that aren't set or aren't 7-char hex pass
+// through untouched.
+func scaleStyle(s lipgloss.Style, k float64) lipgloss.Style {
+	if k >= 1 {
+		return s
+	}
+	scale := func(c lipgloss.TerminalColor) lipgloss.TerminalColor {
+		hex := fmt.Sprint(c)
+		if len(hex) != 7 || hex[0] != '#' {
+			return c
+		}
+		r, g, b := hexRGB(hex)
+		return lipgloss.Color(rgbHex(int(float64(r)*k), int(float64(g)*k), int(float64(b)*k)))
+	}
+	if fg := s.GetForeground(); fg != nil {
+		s = s.Foreground(scale(fg))
+	}
+	if bg := s.GetBackground(); bg != nil {
+		s = s.Background(scale(bg))
+	}
+	return s
+}
+
+// borderStyle is the frame metal under the idle settle.
+func (m Model) borderStyle() lipgloss.Style {
+	return scaleStyle(m.th.PanelBorder, m.settleScale())
+}
+
+// loveWash is the loved-track surface color: a coral flash at the moment of
+// love, cooling over two seconds into the permanent LoveFill wash. In the
+// austere theme LoveFill is the selection surface, so the wash stays
+// monochrome automatically.
+func (m Model) loveWash() lipgloss.TerminalColor {
+	base := m.th.LoveFill.GetBackground()
+	since := m.now.Sub(m.loveAt)
+	if base == nil || since < 0 || since >= 2*time.Second {
+		return base
+	}
+	bhex, lhex := fmt.Sprint(base), fmt.Sprint(m.th.Love.GetForeground())
+	if len(bhex) != 7 || bhex[0] != '#' || len(lhex) != 7 || lhex[0] != '#' {
+		return base
+	}
+	br, bg, bb := hexRGB(bhex)
+	lr, lg, lb := hexRGB(lhex)
+	f := float64(since) / float64(2*time.Second)
+	cool := func(lo, hi int) int {
+		start := float64(hi) * 0.45
+		return int(start + (float64(lo)-start)*f)
+	}
+	return lipgloss.Color(rgbHex(cool(br, lr), cool(bg, lg), cool(bb, lb)))
+}
+
 func (m Model) footerItems() [][2]string {
 	if m.themeOpen {
 		return [][2]string{{"J/K", "preview"}, {"ENTER", "apply"}, {"ESC", "cancel"}}
@@ -174,16 +245,26 @@ func (m Model) footerItems() [][2]string {
 // row, keys as chips, labels quiet beside them.
 func (m Model) footerBar() string {
 	items := m.footerItems()
-	sep := m.th.FootFill.Render("  ")
+	// The strip settles with the room; a loved track's L chip keeps its
+	// coral — state, like LIVE, stays readable.
+	k := m.settleScale()
+	fill := scaleStyle(m.th.FootFill, k)
+	key := scaleStyle(m.th.FootKey, k)
+	label := scaleStyle(m.th.FootLabel, k)
+	sep := fill.Render("  ")
 	var b strings.Builder
-	b.WriteString(m.th.FootFill.Render(" "))
+	b.WriteString(fill.Render(" "))
 	for i, it := range items {
 		if i > 0 {
 			b.WriteString(sep)
 		}
-		b.WriteString(m.th.FootKey.Render(" " + it[0] + " "))
+		keyStyle := key
+		if m.lovedTrack && it[0] == "L" {
+			keyStyle = keyStyle.Foreground(m.th.Love.GetForeground())
+		}
+		b.WriteString(keyStyle.Render(" " + it[0] + " "))
 		if it[1] != "" {
-			b.WriteString(m.th.FootLabel.Render(" " + it[1]))
+			b.WriteString(label.Render(" " + it[1]))
 		}
 	}
 	line := b.String()
@@ -192,10 +273,10 @@ func (m Model) footerBar() string {
 		for i, it := range items {
 			keys[i] = it[0]
 		}
-		line = m.th.FootKey.Render(runewidth.Truncate(" "+strings.Join(keys, "  "), m.w, ""))
+		line = key.Render(runewidth.Truncate(" "+strings.Join(keys, "  "), m.w, ""))
 	}
 	if gap := m.w - lipgloss.Width(line); gap > 0 {
-		line += m.th.FootFill.Render(strings.Repeat(" ", gap))
+		line += fill.Render(strings.Repeat(" ", gap))
 	}
 	return line
 }
@@ -212,7 +293,7 @@ func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 		if !m.haveSt {
 			micro = "STANDBY"
 		}
-		rows = append(rows, m.th.Dim.Render(micro))
+		rows = append(rows, scaleStyle(m.th.Dim, m.settleScale()).Render(micro))
 	}
 	rows = append(rows, m.heroRow(iw, m.idle()))
 	rows = append(rows, m.trackRow(iw, m.idle()))
@@ -391,6 +472,9 @@ func receiverColumns(iw int) (left, gap, right int) {
 func (m Model) receiverRows(iw int) []string {
 	leftW, gapW, rightW := receiverColumns(iw)
 	pt := m.th.OnPanel()
+	// Panel microlabels are chrome: they settle with the room. Content —
+	// title, artist, wave, dial — keeps living.
+	pt.Dim = scaleStyle(pt.Dim, m.settleScale())
 	wave := m.signalRows(rightW, pt)
 
 	station := cleanStationName(m.st.Name)
@@ -482,7 +566,7 @@ func (m Model) presetLegend(width int) string {
 
 func (m Model) receiverStatusRow(iw int) string {
 	width := maxI(1, iw-4)
-	label, detail, hot := "WHY THIS STATION", whyDetail(m.reason), false
+	label, detail, hot := "WHY THIS STATION", m.tw.RenderOver(m.now, whyDetail(m.reason)), false
 	switch {
 	case m.fatal != "":
 		label, detail, hot = "ERROR", m.fatal, true
@@ -615,14 +699,16 @@ func whyDetail(reason string) string {
 // through the ramp (ember -> accent -> second hue); single-hue themes keep
 // the flat dim line they have always had.
 func (m Model) ruleLine(width int) string {
+	k := m.settleScale()
 	if width < 1 || m.th.AccentHex2 == "" {
-		return m.th.Dim.Render(strings.Repeat(m.th.G.Rule, maxI(0, width)))
+		return scaleStyle(m.th.Dim, k).Render(strings.Repeat(m.th.G.Rule, maxI(0, width)))
 	}
 	var b strings.Builder
 	span := maxI(1, width-1)
 	for i := 0; i < width; i++ {
 		r, g, bl := m.th.rampColor(float64(i) / float64(span))
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(r, g, bl))).Render(m.th.G.Rule))
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(r, g, bl)))
+		b.WriteString(scaleStyle(style, k).Render(m.th.G.Rule))
 	}
 	return b.String()
 }
@@ -632,31 +718,34 @@ func (m Model) frameRule(width int, top bool, label string) string {
 	if !top {
 		left, right = m.th.G.FrameBL, m.th.G.FrameBR
 	}
+	border := m.borderStyle()
 	labelW := runewidth.StringWidth(label)
 	if label != "" && labelW+6 <= width {
 		// left cap (4) + label + separator (1) + tail + right cap (1).
 		// The previous -5 put the labeled top rail one cell past the body.
 		tail := maxI(0, width-labelW-6)
-		return m.th.PanelBorder.Render(left+m.th.G.FrameH+m.th.G.FrameH+" ") +
-			m.th.AccentDim.Bold(true).Render(label) +
-			m.th.PanelBorder.Render(" "+strings.Repeat(m.th.G.FrameH, tail)+right)
+		return border.Render(left+m.th.G.FrameH+m.th.G.FrameH+" ") +
+			scaleStyle(m.th.AccentDim, m.settleScale()).Bold(true).Render(label) +
+			border.Render(" "+strings.Repeat(m.th.G.FrameH, tail)+right)
 	}
-	return m.th.PanelBorder.Render(left + strings.Repeat(m.th.G.FrameH, maxI(0, width-2)) + right)
+	return border.Render(left + strings.Repeat(m.th.G.FrameH, maxI(0, width-2)) + right)
 }
 
 func (m Model) panelColumns(left, right string, leftW, gapW, rightW int) string {
 	fill := m.th.PanelFill
-	return m.th.PanelBorder.Render(m.th.G.FrameV) + fill.Render(" ") +
+	border := m.borderStyle()
+	return border.Render(m.th.G.FrameV) + fill.Render(" ") +
 		surfaceCell(left, leftW, fill) + fill.Render(strings.Repeat(" ", gapW)) +
 		surfaceCell(right, rightW, fill) + fill.Render(" ") +
-		m.th.PanelBorder.Render(m.th.G.FrameV)
+		border.Render(m.th.G.FrameV)
 }
 
 func (m Model) panelFull(content string, width int, fill lipgloss.Style) string {
 	inner := maxI(0, width-4)
-	return m.th.PanelBorder.Render(m.th.G.FrameV) + fill.Render(" ") +
+	border := m.borderStyle()
+	return border.Render(m.th.G.FrameV) + fill.Render(" ") +
 		surfaceCell(content, inner, fill) + fill.Render(" ") +
-		m.th.PanelBorder.Render(m.th.G.FrameV)
+		border.Render(m.th.G.FrameV)
 }
 
 func surfaceCell(content string, width int, fill lipgloss.Style) string {
@@ -707,10 +796,10 @@ func (m Model) trackRow(iw int, idle bool) string {
 	if idle {
 		style = m.th.Mid // the track title is what idle mode keeps readable
 	}
-	// A loved track sits on the faintest accent surface: readable from
-	// across the room, not just from the heart.
+	// A loved track sits on the love wash: a coral flash at the moment of
+	// love, cooling over two seconds into the permanent coral-dark surface.
 	if m.lovedTrack {
-		style = style.Background(m.th.SelFill.GetBackground())
+		style = style.Background(m.loveWash())
 	}
 
 	heart := strings.Repeat(" ", heartW)
@@ -720,7 +809,7 @@ func (m Model) trackRow(iw int, idle bool) string {
 		case since < 120*time.Millisecond:
 			heart = m.th.Invert.Render(m.th.G.Heart) // one-frame flash
 		case since < 2*time.Second:
-			heart = m.th.Accent.Render(m.th.G.Heart)
+			heart = m.th.Love.Render(m.th.G.Heart) // coral: love is semantic
 		default:
 			heart = m.th.AccentDim.Render(m.th.G.Heart)
 		}
@@ -741,6 +830,14 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	markerStyle := th.Accent
 	if idle {
 		markerStyle = m.th.BreatheStyle(m.now.Sub(m.start).Seconds())
+		if bg := th.Accent.GetBackground(); bg != nil {
+			markerStyle = markerStyle.Background(bg)
+		}
+	}
+	// Love lands on the dial: one coral pulse of the needle, seated on the
+	// same surface as its neighbors.
+	if m.lovedTrack && m.now.Sub(m.loveAt) < 600*time.Millisecond {
+		markerStyle = th.Love
 		if bg := th.Accent.GetBackground(); bg != nil {
 			markerStyle = markerStyle.Background(bg)
 		}
@@ -825,7 +922,7 @@ func (m Model) reasonRow(iw int) string {
 	if m.note != "" {
 		return m.statusRow("NOTICE  "+m.note, iw, false)
 	}
-	return m.statusRow(statusReason(m.reason), iw, false)
+	return m.statusRow(m.tw.RenderOver(m.now, statusReason(m.reason)), iw, false)
 }
 
 // statusRow renders "LABEL  detail" input as an aligned, dotted status
@@ -1035,13 +1132,18 @@ func (m Model) lovedRows(rows []string, iw int, budget int) []string {
 		labelW := maxI(4, iw-runewidth.StringWidth(count)-5)
 		label = runewidth.Truncate(label, labelW, m.th.G.Ellipsis)
 		if i == m.libraryPos {
-			// Selection is a surface: a full-width bar, not a marker.
-			left := m.th.SelText.Render(" " + m.th.G.Pointer + " " + label)
-			right := m.th.SelMeta.Render(count + " ")
+			// Selection is a surface: a full-width bar on the love wash,
+			// the heart in coral where the pointer would sit.
+			bg := m.loveWash()
+			selText := m.th.SelText.Background(bg)
+			selMeta := m.th.SelMeta.Background(bg)
+			selFill := m.th.SelFill.Background(bg)
+			left := selText.Render(" ") + m.th.Love.Background(bg).Render(m.th.G.Heart) + selText.Render(" "+label)
+			right := selMeta.Render(count + " ")
 			gap := maxI(0, iw-lipgloss.Width(left)-lipgloss.Width(right))
-			rows = append(rows, left+m.th.SelFill.Render(strings.Repeat(" ", gap))+right)
+			rows = append(rows, left+selFill.Render(strings.Repeat(" ", gap))+right)
 		} else {
-			left := "   " + m.th.Mid.Render(label)
+			left := " " + m.th.Love.Render(m.th.G.Heart) + " " + m.th.Mid.Render(label)
 			right := m.th.Dim.Render(count + " ")
 			rows = append(rows, lrRow(left, right, iw))
 		}

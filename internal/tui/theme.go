@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"screech/internal/core"
 )
 
 // Theme: one saturated accent, three warm grays. NFO austerity, not a
@@ -248,42 +250,103 @@ func NewTheme(accentHex string, ascii bool) Theme {
 // as the receiver—canvas, body, raised readout, selection—but expresses it
 // only through luminance. Love is white rather than a semantic accent.
 func NewAustereTheme(ascii bool) Theme {
+	return newAustereThemeScaled(ascii, 1.0)
+}
+
+// newAustereThemeScaled is NewAustereTheme with every hardcoded luminance
+// multiplied by lum. Daypart temperature for a monochrome theme can only be
+// a lightness shift; hue and warmth have no meaning without hue.
+func newAustereThemeScaled(ascii bool, lum float64) Theme {
+	g := func(hex string) lipgloss.Color {
+		r, gg, b := hexRGB(hex)
+		return lipgloss.Color(rgbHex(int(float64(r)*lum), int(float64(gg)*lum), int(float64(b)*lum)))
+	}
 	t := NewTheme("#D8D8D8", ascii)
 	t.Name = ThemeAustere
-	t.AccentHex = "#D8D8D8"
-	t.Accent = lipgloss.NewStyle().Foreground(lipgloss.Color("#D8D8D8"))
-	t.AccentDim = lipgloss.NewStyle().Foreground(lipgloss.Color("#858585"))
-	t.Bright = lipgloss.NewStyle().Foreground(lipgloss.Color("#EEEEEE"))
-	t.Mid = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0A0"))
-	t.Dim = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262"))
-	t.Invert = lipgloss.NewStyle().Foreground(lipgloss.Color("#080808")).Background(lipgloss.Color("#E8E8E8"))
+	t.AccentHex = string(g("#D8D8D8"))
+	t.Accent = lipgloss.NewStyle().Foreground(g("#D8D8D8"))
+	t.AccentDim = lipgloss.NewStyle().Foreground(g("#858585"))
+	t.Bright = lipgloss.NewStyle().Foreground(g("#EEEEEE"))
+	t.Mid = lipgloss.NewStyle().Foreground(g("#A0A0A0"))
+	t.Dim = lipgloss.NewStyle().Foreground(g("#626262"))
+	t.Invert = lipgloss.NewStyle().Foreground(g("#080808")).Background(g("#E8E8E8"))
 
-	panel := lipgloss.Color("#0B0B0B")
-	raised := lipgloss.Color("#181818")
-	footer := lipgloss.Color("#121212")
-	selected := lipgloss.Color("#292929")
+	panel := g("#0B0B0B")
+	raised := g("#181818")
+	footer := g("#121212")
+	selected := g("#292929")
 	t.PanelFill = lipgloss.NewStyle().Background(panel)
 	t.PanelRaised = lipgloss.NewStyle().Background(raised)
-	t.PanelBorder = lipgloss.NewStyle().Foreground(lipgloss.Color("#686868"))
+	t.PanelBorder = lipgloss.NewStyle().Foreground(g("#686868"))
 	t.FootFill = lipgloss.NewStyle().Background(footer)
-	t.FootKey = lipgloss.NewStyle().Background(footer).Bold(true).Foreground(lipgloss.Color("#E4E4E4"))
-	t.FootLabel = lipgloss.NewStyle().Background(footer).Foreground(lipgloss.Color("#808080"))
+	t.FootKey = lipgloss.NewStyle().Background(footer).Bold(true).Foreground(g("#E4E4E4"))
+	t.FootLabel = lipgloss.NewStyle().Background(footer).Foreground(g("#808080"))
 	t.SelFill = lipgloss.NewStyle().Background(selected)
-	t.SelText = lipgloss.NewStyle().Background(selected).Bold(true).Foreground(lipgloss.Color("#F2F2F2"))
-	t.SelMeta = lipgloss.NewStyle().Background(selected).Foreground(lipgloss.Color("#A0A0A0"))
-	t.Love = lipgloss.NewStyle().Foreground(lipgloss.Color("#F4F4F4"))
+	t.SelText = lipgloss.NewStyle().Background(selected).Bold(true).Foreground(g("#F2F2F2"))
+	t.SelMeta = lipgloss.NewStyle().Background(selected).Foreground(g("#A0A0A0"))
+	t.Love = lipgloss.NewStyle().Foreground(g("#F4F4F4"))
 	t.LoveFill = lipgloss.NewStyle().Background(selected)
 
 	t.breatheSteps = t.breatheSteps[:0]
 	for i := 0; i < 24; i++ {
-		v := 92 + int(float64(i)/23.0*124)
+		v := int(float64(92+int(float64(i)/23.0*124)) * lum)
 		t.breatheSteps = append(t.breatheSteps, lipgloss.Color(rgbHex(v, v, v)))
 	}
 	for i := 0; i < len(t.Ramp); i++ {
-		v := 72 + int(float64(i)/float64(len(t.Ramp)-1)*166)
+		v := int(float64(72+int(float64(i)/float64(len(t.Ramp)-1)*166)) * lum)
 		t.Ramp[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(v, v, v)))
 	}
 	return t
+}
+
+// daypartTemper maps a core daypart to a brightness multiplier and a warmth
+// bias (-1 cool .. +1 warm). Midday runs brighter and cooler; night dims and
+// warms toward ember. Morning carries a gentle warm lift, evening is the
+// neutral reference the themes were authored against.
+func daypartTemper(dp string) (bright, warm float64) {
+	switch dp {
+	case core.DaypartMorning:
+		return 1.03, 0.5
+	case core.DaypartDay:
+		return 1.09, -0.6
+	case core.DaypartNight:
+		return 0.82, 1.0
+	default: // evening and anything unforeseen
+		return 1.0, 0.0
+	}
+}
+
+// temperHex applies a daypart to one hex color: bright scales every channel,
+// warm pushes red up and blue down (green barely moves, like a physical
+// dimmer on a warm filament).
+func temperHex(hex string, bright, warm float64) string {
+	r, g, b := hexRGB(hex)
+	return rgbHex(
+		int(float64(r)*bright+warm*36),
+		int(float64(g)*bright+warm*8),
+		int(float64(b)*bright-warm*36),
+	)
+}
+
+// NewDaypartTheme resolves a named theme exactly as NewNamedTheme does, then
+// tempers its hue signature for the time of day: brighter and cooler midday,
+// dimmer and warmer at night. Austere, having no hue, takes the lightness
+// shift only. The persisted theme choice is untouched — this is a viewing
+// condition, not a setting.
+func NewDaypartTheme(name, accentHex string, ascii bool, dp string) Theme {
+	bright, warm := daypartTemper(dp)
+	if normalizeThemeName(name) == ThemeAustere {
+		return newAustereThemeScaled(ascii, bright)
+	}
+	t := NewNamedTheme(name, accentHex, ascii)
+	if bright == 1.0 && warm == 0.0 {
+		return t
+	}
+	accent := temperHex(t.AccentHex, bright, warm)
+	if t.AccentHex2 != "" {
+		return NewGradientTheme(t.Name, accent, temperHex(t.AccentHex2, bright, warm), ascii)
+	}
+	return NewHueTheme(t.Name, accent, ascii)
 }
 
 // NewHueTheme is a receiver finish in a fixed hue. Every gray, surface, and

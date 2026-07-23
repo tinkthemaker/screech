@@ -151,7 +151,7 @@ func TestLovedLibrarySearchNavigateAndRemove(t *testing.T) {
 		t.Fatalf("loved library did not load: view=%v entries=%d", m.historyView, len(m.library))
 	}
 	view := m.View()
-	for _, want := range []string{"LOVED 2", "Burial", "/ FIND", m.th.G.Pointer} {
+	for _, want := range []string{"LOVED 2", "Burial", "/ FIND", m.th.G.Heart} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("library missing %q:\n%s", want, view)
 		}

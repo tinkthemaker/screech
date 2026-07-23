@@ -255,7 +255,9 @@ receiver finishes in other hues; every gray, surface, and ramp derives from
 the accent, so the faceplate reads the same in any color. Charm and Lagoon
 carry a two-hue signature: the ramp top blends into a second hue instead of
 pale gold, and the header rule runs the full gradient. Theme changes never
-affect listening state.
+affect listening state. The chosen finish tempers with the daypart — brighter
+and cooler midday, dimmer and warmer at night; austere takes the lightness
+shift only, and picker previews render under the current daypart.
 
 **Library views.** `h` opens recent tracks. `H` opens a unified library on the
 loved view; Tab cycles recent, loved, and saved stations. Loved tracks are
@@ -273,12 +275,13 @@ loved rows) while leaving listen history and the taste model untouched.
 Radio metadata is recall and discovery context, never presented as an
 on-demand replay URL. Esc closes.
 
-**The wave (honest amplitude, synthetic texture).** Two rows of half-blocks
-per bar, a vertical gradient from a visible ember base through the accent to
-a pale peak, peak-hold ticks that cool through the ramp as they fall. Bars
-are bass-weighted — the left end responds harder to the loudness signal — so
-the single amplitude number still reads as a spectrum, not a uniform bounce.
-Amplitude is real (mpv astats RMS over IPC ~20Hz); texture is synthetic. If
+**The wave (honest amplitude, synthetic texture).** Two rows of touching braille cells
+— 2x4 sub-cells per terminal column, the top row the left channel, the bottom
+row the right — a vertical gradient from a visible ember base through the
+accent to a pale peak, peak-hold ticks that cool through the ramp as they
+fall. Bars are bass-weighted, so per-channel levels still read as a
+spectrum, not a uniform bounce. Amplitude is real (mpv astats per-channel
+RMS + peak over IPC ~20Hz, mono mixdown fallback); texture is synthetic. If
 level data stops (other backends), it falls back to self-animated breathing
 after 3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already
 takes a `[]float64` either way.
@@ -288,20 +291,28 @@ takes a `[]float64` either way.
 (overshoot, settle — harmonica), wave flatlines to `▁▁▁`, old station name
 dissolves through random glyphs resolving left-to-right into the new name
 (decrypt effect). Wave swells when the stream locks. No generic spinner exists
-anywhere in the app.
+anywhere in the app. A retune opens with a bounded static collapse in the
+wave bay — dither noise fizzling into the ember baseline — and while the
+needle travels, the dial's warm bleed becomes a detune smear that clears when
+the spring settles on the lock.
 
-**Set piece: love.** One-frame inverse flash on ♥, holds accent ~2s, decays to a
-persistent dim ♥. Structured feedback (`LOVED  Track and station`) lands the
+**Set piece: love.** One-frame inverse flash on ♥, holds coral ~2s while the row
+cools from a coral flash into the permanent love wash, then a persistent dim
+♥. The dial marker pulses coral once and the footer's L chip keeps the coral
+while loved. Structured feedback (`LOVED  Track and station`) lands the
 same frame as the keypress, always; never block render on network.
 
 **Idle (the main state).** After ~3 min without keys: everything dims except track
 title and wave; the accent marker breathes (slow luminance sine, ~6s period). Any
 key snaps bright. Natural track changes step the new title dim → mid → bright.
 Marquee etiquette for long titles: pause 2s, scroll once, pause, reset — no
-endless loops.
+endless loops. Past 5 min without any activity the chrome — wordmark, frame
+metal, key strip, microlabels — eases to an ember floor over ~30s; the wave,
+dial marker, and LIVE readout keep living, and any key, tune, or player state
+event restores the room instantly.
 
-**Boot.** ~500ms: rules draw outward from center, wordmark letterspaces in, then
-content. Skippable on any key.
+**Boot.** ~600ms: rules draw outward from center, wordmark letterspaces in, then
+content. Skippable on any key — the key still lands.
 
 **Texture.** Mid-contrast readout cluster top-right: `AAC  128K  2:14:06`.
 Fixed-width clock formatting and uppercase codec labels provide
