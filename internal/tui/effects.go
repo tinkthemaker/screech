@@ -136,6 +136,16 @@ func sliceCols(s string, startCol, width int) string {
 	return b.String()
 }
 
+// --- static: the tuning ceremony's noise ---
+// staticHash is a deterministic integer hash for the static collapse: same
+// cell + frame, same glyph, with no math/rand state to seed or race.
+
+func staticHash(x, row, frame int) uint32 {
+	h := uint32(x)*374761393 + uint32(row)*668265263 + uint32(frame)*2246822519
+	h = (h ^ (h >> 13)) * 1274126177
+	return h ^ (h >> 16)
+}
+
 // --- spring: dial physics ---
 // Small critically-underdamped spring; overshoot and settle. Hand-rolled to
 // keep the dependency list at four.

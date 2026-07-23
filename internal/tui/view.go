@@ -219,7 +219,7 @@ func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 
 	if iw >= 28 && !compact && contentH >= 8 {
 		rows = append(rows, "")
-		rows = append(rows, m.wave.Render(m.th)...)
+		rows = append(rows, m.signalRows(iw, m.th)...)
 		rows = append(rows, m.bandRow(iw, m.idle()))
 	}
 
@@ -230,6 +230,61 @@ func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 		rows = append(rows, m.volumeRow(iw))
 	default:
 		rows = append(rows, m.reasonRow(iw))
+	}
+	return rows
+}
+
+// signalRows is the wave bay: real metering, or the tuning ceremony's
+// static collapse while a retune is locking.
+func (m Model) signalRows(width int, th Theme) []string {
+	if m.staticActive() {
+		return m.staticRows(width, th)
+	}
+	return m.wave.Render(th)
+}
+
+// staticRows renders the static collapse: two rows of dither noise on the
+// ember-low ramp, a pure function of the ceremony clock (same elapsed,
+// same frame). Density fades to zero across the window so the collapse
+// fizzles into the dim baseline rather than cutting — that fizzle is also
+// the failure path's ending. Rows are exactly two and exactly width cells,
+// the same contract as Wave.Render.
+func (m Model) staticRows(width int, th Theme) []string {
+	if width < 1 {
+		return []string{"", ""}
+	}
+	elapsed := m.now.Sub(m.tuneAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	frame := int(elapsed / (50 * time.Millisecond))
+	fade := 1 - float64(elapsed)/float64(staticDur)
+	set := []rune("░▒▓")
+	base := string(rune(brailleBlank + brailleBaselineBits))
+	if th.G.Blocks[0] == '_' { // 7-bit palette: #%* noise on the block floor
+		set = []rune("#%*")
+		base = string(th.G.Blocks[0])
+	}
+	low, mid := th.RampFor(1, 7), th.RampFor(3, 7)
+	rows := make([]string, 2)
+	for row := 0; row < 2; row++ {
+		var b strings.Builder
+		for x := 0; x < width; x++ {
+			h := staticHash(x, row, frame)
+			if h%1000 < uint32(fade*1000) {
+				style := th.Dim
+				switch h >> 20 % 3 {
+				case 0:
+					style = low
+				case 1:
+					style = mid
+				}
+				b.WriteString(style.Render(string(set[h>>10%uint32(len(set))])))
+			} else {
+				b.WriteString(th.Dim.Render(base))
+			}
+		}
+		rows[row] = b.String()
 	}
 	return rows
 }
@@ -336,7 +391,7 @@ func receiverColumns(iw int) (left, gap, right int) {
 func (m Model) receiverRows(iw int) []string {
 	leftW, gapW, rightW := receiverColumns(iw)
 	pt := m.th.OnPanel()
-	wave := m.wave.Render(pt)
+	wave := m.signalRows(rightW, pt)
 
 	station := cleanStationName(m.st.Name)
 	if station == "" {
@@ -362,6 +417,13 @@ func (m Model) receiverRows(iw int) []string {
 	artist = runewidth.Truncate(artist, leftW, m.th.G.Ellipsis)
 	station = runewidth.Truncate(station, leftW, m.th.G.Ellipsis)
 
+	// The BROADCAST name decrypt-resolves with the lock, like the compact
+	// hero — the station isn't really "there" until the stream is.
+	stationCell := pt.Bright.Bold(true).Render(strings.ToUpper(station))
+	if m.stDecrypt.Active(m.now) {
+		stationCell = m.stDecrypt.Render(m.now, pt, leftW)
+	}
+
 	// The bottom readout row doubles as the overlay bay: the seed prompt or
 	// the volume slider takes it over while open, exactly as promptRow and
 	// volumeRow replace the reason line in the compact layout. Precedence
@@ -381,7 +443,7 @@ func (m Model) receiverRows(iw int) []string {
 		m.panelColumns(pt.Mid.Render(artist), wave[1], leftW, gapW, rightW),
 		m.panelColumns("", pt.Dim.Render(lrRow("LOW", "HIGH", rightW)), leftW, gapW, rightW),
 		m.panelColumns(pt.Dim.Bold(true).Render("BROADCAST"), pt.Dim.Bold(true).Render("STATION MEMORY"), leftW, gapW, rightW),
-		m.panelColumns(pt.Bright.Bold(true).Render(strings.ToUpper(station)), m.bandRowTheme(rightW, m.idle(), pt), leftW, gapW, rightW),
+		m.panelColumns(stationCell, m.bandRowTheme(rightW, m.idle(), pt), leftW, gapW, rightW),
 		m.panelColumns("", pt.Dim.Render(m.presetLegend(rightW)), leftW, gapW, rightW),
 		bottomRow,
 		m.frameRule(iw, false, ""),
@@ -697,11 +759,25 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 		}
 	}
 	// Warm bleed: a 5-cell ember gradient around the marker, fading through
-	// the ramp with distance. Preset ticks win over the bleed.
+	// the ramp with distance. Preset ticks win over the bleed. While the
+	// needle is still traveling — or the stream hasn't locked — the bleed
+	// becomes a detune smear: a wider trail of ramp-low dither glyphs that
+	// clears back to the warm bleed once the spring settles on a lock.
 	bleed := []struct {
 		off  int
 		frac float64
 	}{{-2, 0.18}, {-1, 0.42}, {1, 0.42}, {2, 0.18}}
+	detuning := !m.dial.Settled(m.dialTgt) || m.ph == phTune
+	if detuning {
+		bleed = []struct {
+			off  int
+			frac float64
+		}{{-3, 0.18}, {-2, 0.30}, {-1, 0.42}, {1, 0.42}, {2, 0.30}, {3, 0.18}}
+	}
+	dither := "░"
+	if th.G.Blocks[0] == '_' {
+		dither = "#"
+	}
 	for _, bl := range bleed {
 		j := col + bl.off
 		if j < 0 || j >= iw || isTick[j] {
@@ -712,7 +788,18 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 		if bg := th.Accent.GetBackground(); bg != nil {
 			style = style.Background(bg)
 		}
-		cells[j] = style.Render(th.G.Band)
+		glyph := th.G.Band
+		if detuning {
+			off := bl.off
+			if off < 0 {
+				off = -off
+			}
+			glyph = th.G.Dot
+			if off >= 2 {
+				glyph = dither
+			}
+		}
+		cells[j] = style.Render(glyph)
 	}
 	if col >= 0 && col < iw {
 		cells[col] = markerStyle.Render(th.G.Marker)

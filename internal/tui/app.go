@@ -25,6 +25,11 @@ const (
 
 	defaultSyncLimit = 20000
 	libraryLimit     = 500
+
+	// staticDur is the wave bay's static collapse at the start of a retune:
+	// long enough to read as a tuner between stations, short enough that
+	// the happy path resolves well under a second.
+	staticDur = 400 * time.Millisecond
 )
 
 type historyView int
@@ -77,11 +82,12 @@ type Model struct {
 	haveSt bool
 	reason string
 
-	decrypt Decrypt
-	tw      Typewriter
-	wave    *Wave
-	dial    *Spring
-	dialTgt float64
+	decrypt   Decrypt
+	stDecrypt Decrypt // receiver BROADCAST row resolves with the lock
+	tw        Typewriter
+	wave      *Wave
+	dial      *Spring
+	dialTgt   float64
 
 	track      string
 	haveTrack  bool
@@ -283,6 +289,7 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	m.ph = phTune
 	m.tuneAt = m.now
 	m.decrypt = NewDecrypt(heroText(cleanStationName(m.st.Name), 72, m.th.G.Ellipsis), m.now)
+	m.stDecrypt = NewDecrypt(strings.ToUpper(cleanStationName(m.st.Name)), m.now)
 	m.tw = NewTypewriter(m.reason, m.now.Add(300*time.Millisecond))
 	m.track = ""
 	m.haveTrack = false
@@ -1200,9 +1207,21 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 	case player.EventDied:
 		m.ph = phDead
 		m.fatal = "mpv exited " + m.th.G.Dot + " restart screech"
+		m.wave.SetEnergy(0.05) // the meter fizzles to its ember baseline
 		return m, nil
 	}
 	return m, m.listen()
+}
+
+// staticActive reports whether the tuning ceremony's static collapse is
+// playing in the wave bay: a short, strictly bounded window from tune
+// start that always ends at stream lock (or when the window elapses, so
+// the failure path fizzles into the baseline instead of freezing).
+func (m Model) staticActive() bool {
+	if m.ph != phTune && m.ph != phBuffer {
+		return false
+	}
+	return m.now.Sub(m.tuneAt) < staticDur
 }
 
 func (m Model) innerWidth() int {
