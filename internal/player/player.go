@@ -24,8 +24,15 @@ const (
 type Event struct {
 	Type  EventType
 	Title string
-	Level float64
-	Err   error
+	// Level is the mono mixdown loudness 0..1 (EventLevel). LevelL and
+	// LevelR are the per-channel loudness for the same window — a mono
+	// stream mirrors one value into both — and Peak is the true digital
+	// peak. All derive from mpv's astats filter with the same dB curve.
+	Level  float64
+	LevelL float64
+	LevelR float64
+	Peak   float64
+	Err    error
 }
 
 type Player interface {

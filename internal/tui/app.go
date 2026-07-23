@@ -1183,7 +1183,12 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 		m.wave.SetEnergy(0.2)
 
 	case player.EventLevel:
-		m.wave.SetLevel(ev.Level, m.now.Sub(m.start).Seconds())
+		l, r := ev.LevelL, ev.LevelR
+		if l == 0 && r == 0 && ev.Level > 0 {
+			// A backend that only measures a mono mixdown.
+			l, r = ev.Level, ev.Level
+		}
+		m.wave.SetStereoLevels(l, r, ev.Peak, m.now.Sub(m.start).Seconds())
 
 	case player.EventStreamError:
 		if m.haveSt {

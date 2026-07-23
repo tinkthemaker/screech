@@ -25,6 +25,12 @@ type MPV struct {
 	sawIcy bool
 
 	lastLevelEmit time.Time
+
+	// Latest astats metering, combined into one EventLevel per emit window.
+	lvlOverall float64
+	lvlL, lvlR float64
+	lvlPeak    float64
+	sawL, sawR bool
 }
 
 func NewMPV(mpvPath string) (*MPV, error) {
@@ -68,7 +74,10 @@ func NewMPV(mpvPath string) (*MPV, error) {
 
 	m := &MPV{cmd: cmd, conn: conn, events: make(chan Event, 64)}
 	for i, prop := range []string{"metadata", "media-title", "core-idle", "paused-for-cache",
-		"af-metadata/lavfi.astats.Overall.RMS_level"} {
+		"af-metadata/lavfi.astats.Overall.RMS_level",
+		"af-metadata/lavfi.astats.1.RMS_level",
+		"af-metadata/lavfi.astats.2.RMS_level",
+		"af-metadata/lavfi.astats.Overall.Peak_level"} {
 		if err := m.send("observe_property", i+1, prop); err != nil {
 			m.Close()
 			return nil, err
@@ -216,31 +225,81 @@ func (m *MPV) handleProperty(msg mpvMsg) {
 		} else {
 			m.emit(Event{Type: EventPlaying})
 		}
-	case "af-metadata/lavfi.astats.Overall.RMS_level":
+	case "af-metadata/lavfi.astats.Overall.RMS_level",
+		"af-metadata/lavfi.astats.1.RMS_level",
+		"af-metadata/lavfi.astats.2.RMS_level",
+		"af-metadata/lavfi.astats.Overall.Peak_level":
 		// Arrives per audio frame; throttle to ~20Hz so the UI channel
-		// never floods. Value is dB, roughly -60 (silence) to 0 (loud).
-		now := time.Now()
-		if now.Sub(m.lastLevelEmit) < 50*time.Millisecond {
-			return
-		}
-		var raw string
-		if json.Unmarshal(msg.Data, &raw) != nil {
-			return
-		}
-		db, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		// never floods. Values are dB, roughly -60 (silence) to 0 (loud).
+		db, err := parseDB(msg.Data)
 		if err != nil {
 			return
 		}
-		lv := 1 + db/48
-		if lv < 0 {
-			lv = 0
-		}
-		if lv > 1 {
-			lv = 1
-		}
-		m.lastLevelEmit = now
-		m.emit(Event{Type: EventLevel, Level: lv})
+		m.handleLevel(msg.Name, db)
 	}
+}
+
+// parseDB reads an astats metadata value. mpv carries filter metadata as
+// strings, but accept a bare number too so a future backend change is not
+// a silent meter blackout.
+func parseDB(raw json.RawMessage) (float64, error) {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strconv.ParseFloat(strings.TrimSpace(s), 64)
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return 0, err
+	}
+	return f, nil
+}
+
+// dbToUnit maps dBFS (≈ -48..0) onto 0..1.
+func dbToUnit(db float64) float64 {
+	lv := 1 + db/48
+	if lv < 0 {
+		return 0
+	}
+	if lv > 1 {
+		return 1
+	}
+	return lv
+}
+
+// handleLevel folds one astats sample into the metering window and emits a
+// combined stereo EventLevel at most every 50ms. A mono stream (or a build
+// of astats that only reports channel 1) mirrors that channel into both.
+func (m *MPV) handleLevel(name string, db float64) {
+	lv := dbToUnit(db)
+	m.mu.Lock()
+	switch name {
+	case "af-metadata/lavfi.astats.Overall.RMS_level":
+		m.lvlOverall = lv
+	case "af-metadata/lavfi.astats.1.RMS_level":
+		m.lvlL = lv
+		m.sawL = true
+	case "af-metadata/lavfi.astats.2.RMS_level":
+		m.lvlR = lv
+		m.sawR = true
+	case "af-metadata/lavfi.astats.Overall.Peak_level":
+		m.lvlPeak = lv
+	}
+	now := time.Now()
+	if now.Sub(m.lastLevelEmit) < 50*time.Millisecond {
+		m.mu.Unlock()
+		return
+	}
+	m.lastLevelEmit = now
+	l, r := m.lvlL, m.lvlR
+	if !m.sawR {
+		r = l
+	}
+	if !m.sawL {
+		l = r
+	}
+	ev := Event{Type: EventLevel, Level: m.lvlOverall, LevelL: l, LevelR: r, Peak: m.lvlPeak}
+	m.mu.Unlock()
+	m.emit(ev)
 }
 
 func (m *MPV) emit(ev Event) {
