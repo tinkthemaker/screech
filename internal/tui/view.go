@@ -36,12 +36,14 @@ func (m Model) View() string {
 	footer := m.footerBar()
 	var top []string
 	if !small {
-		top = []string{m.headerBar(), m.th.Dim.Render(strings.Repeat(m.th.G.Rule, m.w))}
+		top = []string{m.headerBar(), m.ruleLine(m.w)}
 	}
 	contentH := m.h - len(top) - 1
 
 	var body []string
-	if m.history {
+	if m.themeOpen {
+		body = m.themeRows(iw, contentH)
+	} else if m.history {
 		body = m.historyRows(iw, compact, contentH)
 	} else {
 		body = m.mainRows(iw, compact, contentH)
@@ -128,6 +130,9 @@ func (m Model) readout() string {
 }
 
 func (m Model) footerItems() [][2]string {
+	if m.themeOpen {
+		return [][2]string{{"J/K", "preview"}, {"ENTER", "apply"}, {"ESC", "cancel"}}
+	}
 	if m.history {
 		items := [][2]string{{"TAB", "next view"}, {"ESC", "close"}}
 		if m.historyView == historyLoved {
@@ -161,7 +166,7 @@ func (m Model) footerItems() [][2]string {
 	}
 	return [][2]string{
 		{"SPACE", "skip"}, {"L", love}, {"F", save},
-		{"/", "discover"}, {"H", "library"}, {"V", fmt.Sprintf("%d%%", m.volume)}, {"Q", "quit"},
+		{"/", "discover"}, {"H", "library"}, {"V", fmt.Sprintf("%d%%", m.volume)}, {"T", "theme"}, {"Q", "quit"},
 	}
 }
 
@@ -229,6 +234,83 @@ func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 	return rows
 }
 
+// themeRows is a small, modal finish selector. Moving the cursor previews the
+// complete palette immediately; the footer makes the Enter/Escape transaction
+// explicit.
+func (m Model) themeRows(iw, budget int) []string {
+	choices := ThemeChoices()
+	if iw < 50 || budget < len(choices)+5 {
+		rows := []string{m.th.Accent.Bold(true).Render("THEME")}
+		for i, choice := range choices {
+			pointer := "  "
+			style := m.th.Mid
+			if i == m.themePos {
+				pointer = m.th.G.Pointer + " "
+				style = m.th.Bright.Bold(true)
+			}
+			line := pointer + fmt.Sprintf("%d  %s", i+1, strings.ToUpper(choice.Label))
+			rows = append(rows, style.Render(runewidth.Truncate(line, iw, m.th.G.Ellipsis)))
+		}
+		if m.themePos >= 0 && m.themePos < len(choices) {
+			rows = append(rows, m.th.Dim.Render(runewidth.Truncate(choices[m.themePos].Description, iw, m.th.G.Ellipsis)))
+		}
+		return rows
+	}
+
+	rows := []string{m.frameRule(iw, true, "APPEARANCE / THEME")}
+	pt := m.th.OnPanel()
+	rows = append(rows, m.panelFull(
+		pt.Dim.Render("Choose an instrument finish "+m.th.G.Dot+" movement previews live"),
+		iw, m.th.PanelFill))
+	for i, choice := range choices {
+		rows = append(rows, m.themeChoiceRow(iw, i, choice))
+	}
+	rows = append(rows, m.panelFull("", iw, m.th.PanelFill))
+	preview := pt.Dim.Bold(true).Render("SIGNAL  ") + m.themeSwatch(minI(32, iw-16))
+	rows = append(rows, m.panelFull(preview, iw, m.th.PanelFill))
+	choice := choices[m.themePos]
+	rows = append(rows, m.panelFull(pt.Mid.Render(choice.Description), iw, m.th.PanelFill))
+	rows = append(rows, m.frameRule(iw, false, ""))
+	return rows
+}
+
+func (m Model) themeChoiceRow(iw, index int, choice ThemeChoice) string {
+	inner := maxI(1, iw-4)
+	selected := index == m.themePos
+	fill := m.th.PanelFill
+	leftStyle, rightStyle := m.th.OnPanel().Mid, m.th.OnPanel().Dim
+	pointer := "  "
+	if selected {
+		fill = m.th.SelFill
+		leftStyle, rightStyle = m.th.SelText, m.th.SelMeta
+		pointer = m.th.G.Pointer + " "
+	}
+	left := leftStyle.Bold(selected).Render(pointer + fmt.Sprintf("%d  %s", index+1, strings.ToUpper(choice.Label)))
+	right := rightStyle.Render(choice.ID)
+	return m.panelFull(surfaceLR(left, right, inner, fill), iw, fill)
+}
+
+func (m Model) themeSwatch(width int) string {
+	if width < 1 {
+		return ""
+	}
+	bg := m.th.PanelFill.GetBackground()
+	var b strings.Builder
+	for i := 0; i < width; i++ {
+		idx := i * len(m.th.Ramp) / width
+		if idx >= len(m.th.Ramp) {
+			idx = len(m.th.Ramp) - 1
+		}
+		b.WriteString(m.th.Ramp[idx].Background(bg).Render(string(m.th.G.Blocks[len(m.th.G.Blocks)-1])))
+	}
+	return b.String()
+}
+
+func surfaceLR(left, right string, width int, fill lipgloss.Style) string {
+	gap := maxI(0, width-lipgloss.Width(left)-lipgloss.Width(right))
+	return left + fill.Render(strings.Repeat(" ", gap)) + right
+}
+
 // receiverColumns is shared with the resize path so the synthetic spectrum
 // is generated at the width of its instrument bay, not cropped afterward.
 func receiverColumns(iw int) (left, gap, right int) {
@@ -280,6 +362,18 @@ func (m Model) receiverRows(iw int) []string {
 	artist = runewidth.Truncate(artist, leftW, m.th.G.Ellipsis)
 	station = runewidth.Truncate(station, leftW, m.th.G.Ellipsis)
 
+	// The bottom readout row doubles as the overlay bay: the seed prompt or
+	// the volume slider takes it over while open, exactly as promptRow and
+	// volumeRow replace the reason line in the compact layout. Precedence
+	// matches the Update dispatch and the compact switch: prompt first.
+	bottomRow := m.receiverStatusRow(iw)
+	switch {
+	case m.prompt:
+		bottomRow = m.receiverPromptRow(iw)
+	case m.volumeOpen:
+		bottomRow = m.receiverVolumeRow(iw)
+	}
+
 	return []string{
 		m.frameRule(iw, true, "RECEIVER / NOW PLAYING"),
 		m.panelColumns(pt.Dim.Bold(true).Render(primaryLabel), pt.Dim.Bold(true).Render("SIGNAL"), leftW, gapW, rightW),
@@ -289,7 +383,7 @@ func (m Model) receiverRows(iw int) []string {
 		m.panelColumns(pt.Dim.Bold(true).Render("BROADCAST"), pt.Dim.Bold(true).Render("STATION MEMORY"), leftW, gapW, rightW),
 		m.panelColumns(pt.Bright.Bold(true).Render(strings.ToUpper(station)), m.bandRowTheme(rightW, m.idle(), pt), leftW, gapW, rightW),
 		m.panelColumns("", pt.Dim.Render(m.presetLegend(rightW)), leftW, gapW, rightW),
-		m.receiverStatusRow(iw),
+		bottomRow,
 		m.frameRule(iw, false, ""),
 	}
 }
@@ -357,6 +451,81 @@ func (m Model) receiverStatusRow(iw int) string {
 	return m.panelFull(content, iw, raised)
 }
 
+// receiverVolumeRow is the volume slider seated on the raised readout
+// surface — the wide faceplate's counterpart of volumeRow, sharing its
+// knob-and-band language and its theme-derived colors.
+func (m Model) receiverVolumeRow(iw int) string {
+	width := maxI(1, iw-4)
+	raised := m.th.PanelRaised
+	bg := raised.GetBackground()
+	labelStyle := m.th.Accent.Bold(true).Background(bg)
+	knobStyle := m.th.Accent.Background(bg)
+	bandStyle := m.th.AccentDim.Background(bg)
+	restStyle := m.th.Mid.Background(bg)
+
+	percent := fmt.Sprintf("%d%%", m.volume)
+	const label = "VOLUME"
+	barW := width - runewidth.StringWidth(label) - runewidth.StringWidth(percent) - 4
+	if barW > 36 {
+		barW = 36
+	}
+	if barW < 4 {
+		content := labelStyle.Render(label) + raised.Render("  ") + restStyle.Render(percent)
+		return m.panelFull(content, iw, raised)
+	}
+	knob := int(math.Round(float64(m.volume) / 100 * float64(barW-1)))
+	cells := make([]string, barW)
+	for i := range cells {
+		switch {
+		case i == knob:
+			cells[i] = knobStyle.Render(m.th.G.Knob)
+		case i < knob:
+			cells[i] = bandStyle.Render(m.th.G.Band)
+		default:
+			cells[i] = restStyle.Render(m.th.G.Band)
+		}
+	}
+	content := labelStyle.Render(label) + raised.Render("  ") +
+		strings.Join(cells, "") + raised.Render("  ") + restStyle.Render(percent)
+	return m.panelFull(content, iw, raised)
+}
+
+// receiverPromptRow is the seed prompt seated on the raised readout
+// surface — the wide faceplate's counterpart of promptRow, keeping its
+// accent chevron, bright query, blinking cursor, and dim empty-hint.
+func (m Model) receiverPromptRow(iw int) string {
+	width := maxI(1, iw-4)
+	raised := m.th.PanelRaised
+	bg := raised.GetBackground()
+	labelStyle := m.th.Accent.Bold(true).Background(bg)
+	accent := m.th.Accent.Background(bg)
+	bright := m.th.Bright.Background(bg)
+	dim := m.th.Dim.Background(bg)
+
+	cur := m.th.G.Cursor
+	if (m.now.UnixMilli()/530)%2 == 1 {
+		cur = " "
+	}
+	const label = "SEED"
+	chev := accent.Render("> ")
+	// Room left for the query after label, gap, chevron, and cursor.
+	tail := maxI(0, width-runewidth.StringWidth(label)-2-runewidth.StringWidth("> ")-1)
+	content := labelStyle.Render(label) + raised.Render("  ") + chev
+	if len(m.buf) == 0 {
+		hint := "genre or artist " + m.th.G.Dot + " esc cancels"
+		if m.virgin {
+			hint = "type a genre or artist " + m.th.G.Dot + " space for a wildcard"
+		}
+		hint = runewidth.Truncate(hint, maxI(0, tail-1), m.th.G.Ellipsis)
+		return m.panelFull(content+accent.Render(cur)+raised.Render(" ")+dim.Render(hint), iw, raised)
+	}
+	buf := string(m.buf)
+	if bw := runewidth.StringWidth(buf); bw > tail {
+		buf = sliceCols(buf, bw-tail, tail)
+	}
+	return m.panelFull(content+bright.Render(buf)+accent.Render(cur), iw, raised)
+}
+
 func whyDetail(reason string) string {
 	switch {
 	case reason == "where you left off":
@@ -378,6 +547,22 @@ func whyDetail(reason string) string {
 	default:
 		return strings.TrimSpace(reason)
 	}
+}
+
+// ruleLine renders a full-width header rule. Gradient finishes run the rule
+// through the ramp (ember -> accent -> second hue); single-hue themes keep
+// the flat dim line they have always had.
+func (m Model) ruleLine(width int) string {
+	if width < 1 || m.th.AccentHex2 == "" {
+		return m.th.Dim.Render(strings.Repeat(m.th.G.Rule, maxI(0, width)))
+	}
+	var b strings.Builder
+	span := maxI(1, width-1)
+	for i := 0; i < width; i++ {
+		r, g, bl := m.th.rampColor(float64(i) / float64(span))
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(r, g, bl))).Render(m.th.G.Rule))
+	}
+	return b.String()
 }
 
 func (m Model) frameRule(width int, top bool, label string) string {
@@ -971,7 +1156,7 @@ func (m Model) bootView(iw int, pad string, p float64) string {
 		ruleW = 1
 	}
 	ruleLeft := (iw - ruleW) / 2
-	rule := strings.Repeat(" ", ruleLeft) + m.th.Dim.Render(strings.Repeat(m.th.G.Rule, ruleW))
+	rule := strings.Repeat(" ", ruleLeft) + m.ruleLine(ruleW)
 
 	markRunes := []rune(letterspace(wordmark))
 	shown := 0

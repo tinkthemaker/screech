@@ -18,7 +18,8 @@ from review are folded in.
 
 ## Hard scope cuts
 
-No playlists. No accounts. No recording. No podcasts. No config UI (one TOML file).
+No playlists. No accounts. No recording. No podcasts. No general config UI
+(one TOML file); the focused theme picker is the presentation-only exception.
 No album art / sixel. No Nerd Fonts (box-drawing, blocks, braille — all standard
 Unicode). v1 additionally cuts: visible station browser, search, manual station
 starring, heard/loved views (they return as demoted toggles post-slice).
@@ -244,6 +245,17 @@ a five-cell ember→accent→ember gradient. A loved track's whole row takes
 the faintest accent surface, readable from across the room. The status
 line's label carries a category glyph and weight: accent for seed/love,
 mid for recall, dim for wildcard. Still one hue — many temperatures.
+
+**Theme picker (v0.5).** `t` opens a focused finish selector. Movement previews
+the whole interface immediately, Enter persists the selection in local state,
+and Escape restores the prior palette. Receiver is the default warm phosphor
+finish. Austere removes hue entirely and expresses the same hierarchy through
+black, white, and luminance alone. Verdant, Azure, Violet, and Rose are fixed
+receiver finishes in other hues; every gray, surface, and ramp derives from
+the accent, so the faceplate reads the same in any color. Charm and Lagoon
+carry a two-hue signature: the ramp top blends into a second hue instead of
+pale gold, and the header rule runs the full gradient. Theme changes never
+affect listening state.
 
 **Library views.** `h` opens recent tracks. `H` opens a unified library on the
 loved view; Tab cycles recent, loved, and saved stations. Loved tracks are

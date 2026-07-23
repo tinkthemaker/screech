@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func meanDisp(w *Wave) float64 {
@@ -146,5 +148,57 @@ func TestWavePeakCools(t *testing.T) {
 	if steps[0].GetForeground() == steps[1].GetForeground() ||
 		steps[1].GetForeground() == steps[2].GetForeground() {
 		t.Error("peak steps should cool through distinct colors")
+	}
+}
+
+// Regression: the lazy peak-style cache must actually populate. A zero
+// lipgloss.Style reports a non-nil empty color, so the old nil-based guard
+// never fired and peak ticks rendered unstyled — black holes in the
+// faceplate above the wave. Cached ticks must also sit on the panel
+// surface when rendered through an OnPanel theme.
+func TestWavePeakCachePopulatesOnPanel(t *testing.T) {
+	w := NewWave(8)
+	pt := NewTheme("#FFB000", false).OnPanel()
+	w.Render(pt)
+	wantBg := fmt.Sprint(pt.PanelFill.GetBackground())
+	for i, s := range w.peakSteps {
+		if fg := fmt.Sprint(s.GetForeground()); len(fg) != 7 || fg[0] != '#' {
+			t.Errorf("cached peak step %d foreground = %q, want a hex color", i, fg)
+		}
+		if bg := fmt.Sprint(s.GetBackground()); bg != wantBg {
+			t.Errorf("cached peak step %d background = %q, want panel fill %q", i, bg, wantBg)
+		}
+	}
+
+	// ResetPalette must force a re-derive against the new theme's surface.
+	w.ResetPalette()
+	flat := NewAustereTheme(false).OnPanel()
+	w.Render(flat)
+	if bg, want := fmt.Sprint(w.peakSteps[0].GetBackground()), fmt.Sprint(flat.PanelFill.GetBackground()); bg != want {
+		t.Errorf("after ResetPalette, peak background = %q, want %q", bg, want)
+	}
+}
+
+// Regression: upper-row gaps must be seated on the caller's surface, not
+// raw spaces that punch the terminal's default background through the
+// faceplate. A fresh wave is all gaps, so its upper row must carry the
+// panel background on every cell.
+func TestWaveUpperRowSeatedOnPanel(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	w := NewWave(6)
+	pt := NewTheme("#FFB000", false).OnPanel()
+	row := w.Render(pt)[0]
+	if lipgloss.Width(row) != 6 {
+		t.Fatalf("upper row width = %d, want 6", lipgloss.Width(row))
+	}
+	if strings.Contains(row, "\x1b[0m ") || !strings.Contains(row, "48;2;19;15;8") {
+		t.Errorf("upper-row gaps must sit on the panel surface: %q", row)
+	}
+
+	// Flat (non-panel) themes leave gaps untouched, as before.
+	flat := NewWave(6)
+	row = flat.Render(NewTheme("#FFB000", false))[0]
+	if strings.Contains(row, "48;") {
+		t.Errorf("flat layout should not paint a background behind the wave: %q", row)
 	}
 }

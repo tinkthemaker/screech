@@ -1,5 +1,6 @@
 // Package config: one TOML file, created with commented defaults on first
-// run. There is no config UI and there never will be.
+// run. Screech has no general settings UI; the in-app theme picker persists
+// its presentation choice alongside other local runtime state.
 package config
 
 import (

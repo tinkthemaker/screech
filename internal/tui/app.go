@@ -56,6 +56,13 @@ type Model struct {
 	pl   player.Player
 	th   Theme
 
+	themeName     string
+	themeOriginal string
+	themeAccent   string
+	themeASCII    bool
+	themeOpen     bool
+	themePos      int
+
 	w, h    int
 	start   time.Time
 	now     time.Time
@@ -141,22 +148,26 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 	if sl <= 0 {
 		sl = defaultSyncLimit
 	}
+	themeName := normalizeThemeName(c.Theme())
 	return Model{
-		syncLimit: sl,
-		core:      c,
-		pl:        pl,
-		th:        NewTheme(opts.Accent, opts.ASCII),
-		start:     now,
-		now:       now,
-		lastKey:   now,
-		wave:      NewWave(32),
-		dial:      NewSpring(0.5),
-		dialTgt:   0.5,
-		syncing:   syncing,
-		virgin:    virgin,
-		prompt:    false,
-		presets:   c.Presets(),
-		volume:    c.Volume(),
+		syncLimit:   sl,
+		core:        c,
+		pl:          pl,
+		th:          NewNamedTheme(themeName, opts.Accent, opts.ASCII),
+		themeName:   themeName,
+		themeAccent: opts.Accent,
+		themeASCII:  opts.ASCII,
+		start:       now,
+		now:         now,
+		lastKey:     now,
+		wave:        NewWave(32),
+		dial:        NewSpring(0.5),
+		dialTgt:     0.5,
+		syncing:     syncing,
+		virgin:      virgin,
+		prompt:      false,
+		presets:     c.Presets(),
+		volume:      c.Volume(),
 	}
 }
 
@@ -293,6 +304,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		m.lastKey = m.now
+		if m.themeOpen {
+			return m.handleThemeKey(msg)
+		}
 		if m.prompt {
 			return m.handlePromptKey(msg)
 		}
@@ -482,6 +496,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.note = "could not open library"
 		}
 		return m, nil
+
+	case "t", "T":
+		m.themeOpen = true
+		m.themeOriginal = m.themeName
+		m.themePos = themeChoiceIndex(m.themeName)
+		return m, nil
 	}
 
 	// Digits 1-9: preset recall, deterministic.
@@ -502,6 +522,59 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		pick.Reason = fmt.Sprintf("preset %d", slot)
 		return m.applyPick(pick)
+	}
+	return m, nil
+}
+
+func themeChoiceIndex(name string) int {
+	name = normalizeThemeName(name)
+	for i, choice := range themeChoices {
+		if choice.ID == name {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m *Model) previewTheme(name string) {
+	m.themeName = normalizeThemeName(name)
+	m.th = NewNamedTheme(m.themeName, m.themeAccent, m.themeASCII)
+	m.wave.ResetPalette()
+}
+
+func (m Model) handleThemeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	choices := ThemeChoices()
+	switch key {
+	case "ctrl+c", "q":
+		m.core.EndListen(time.Now())
+		_ = m.pl.Close()
+		return m, tea.Quit
+	case "esc", "t", "T":
+		m.previewTheme(m.themeOriginal)
+		m.themeOpen = false
+		return m, nil
+	case "up", "k", "shift+tab":
+		m.themePos = (m.themePos - 1 + len(choices)) % len(choices)
+		m.previewTheme(choices[m.themePos].ID)
+		return m, nil
+	case "down", "j", "tab":
+		m.themePos = (m.themePos + 1) % len(choices)
+		m.previewTheme(choices[m.themePos].ID)
+		return m, nil
+	case "enter":
+		m.previewTheme(choices[m.themePos].ID)
+		if err := m.core.SetTheme(m.themeName); err != nil {
+			m.note = "could not save theme " + m.th.G.Dot + " " + err.Error()
+			return m, nil
+		}
+		m.themeOpen = false
+		m.setFeedback("THEME  " + choices[m.themePos].Label + " applied")
+		return m, nil
+	}
+	if len(key) == 1 && key[0] >= '1' && int(key[0]-'1') < len(choices) {
+		m.themePos = int(key[0] - '1')
+		m.previewTheme(choices[m.themePos].ID)
 	}
 	return m, nil
 }

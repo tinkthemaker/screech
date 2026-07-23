@@ -34,6 +34,7 @@ type Wave struct {
 	levelAt   float64 // Step-clock seconds of last sample; <0 = never
 
 	peakSteps [3]lipgloss.Style // cooling ramp for falling peaks
+	peakReady bool              // peakSteps holds styles derived from the current theme
 }
 
 func NewWave(bars int) *Wave {
@@ -72,6 +73,10 @@ func (w *Wave) Resize(bars int) {
 }
 
 func (w *Wave) SetEnergy(e float64) { w.targetEnergy = clampF(e, 0, 1) }
+
+// ResetPalette forces lazily cached peak colors to follow a newly selected
+// theme on the next render.
+func (w *Wave) ResetPalette() { w.peakReady = false }
 
 // Step advances the animation. t is absolute seconds, dt frame seconds.
 func (w *Wave) Step(t, dt float64) {
@@ -131,8 +136,20 @@ func (w *Wave) Render(t Theme) []string {
 	if w.bars < 1 {
 		return []string{"", ""}
 	}
-	if len(w.peakSteps) == 0 || w.peakSteps[0].GetForeground() == nil {
-		w.peakSteps = t.PeakSteps()
+	if !w.peakReady {
+		// The cache needs an explicit flag: peakSteps is an array (len is
+		// always 3) and a zero lipgloss.Style reports a non-nil empty
+		// color, so a nil check on the zero value never fires.
+		// Seat the ticks on the caller's surface: an OnPanel theme carries
+		// the faceplate background on its grays; flat layouts leave it
+		// unset and the terminal background shows through, as before.
+		bg := t.Dim.GetBackground()
+		steps := t.PeakSteps()
+		for i := range steps {
+			steps[i] = steps[i].Background(bg)
+		}
+		w.peakSteps = steps
+		w.peakReady = true
 	}
 	blocks := t.G.Blocks // eighth blocks, quiet -> loud
 	maxLvl := len(blocks) - 1
@@ -185,7 +202,10 @@ func (w *Wave) Render(t Theme) []string {
 			}
 			upper.WriteString(w.peakSteps[step].Render(string(blocks[peakUp])))
 		default:
-			upper.WriteByte(' ')
+			// A gap keeps the rows aligned; render it through Dim so an
+			// OnPanel theme fills the cell with the faceplate surface
+			// instead of punching a black hole through the panel.
+			upper.WriteString(t.Dim.Render(" "))
 		}
 	}
 	return []string{upper.String(), lower.String()}

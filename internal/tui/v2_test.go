@@ -143,6 +143,76 @@ func TestVolumeSliderControlsPlayerAndPersists(t *testing.T) {
 	}
 }
 
+// Regression: the wide receiver faceplate must host the volume slider too.
+// mainRows hands wide terminals to receiverRows, which used to ignore
+// volumeOpen entirely — pressing v changed the footer but no slider ever
+// rendered.
+func TestVolumeSliderRendersInReceiverFaceplate(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 110, 32
+	m.start = m.now.Add(-time.Minute)
+	m.volume = 50
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = mm.(Model)
+	if !m.volumeOpen || !strings.Contains(m.View(), "VOLUME") {
+		t.Fatal("v should open the volume slider in the wide receiver layout")
+	}
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = mm.(Model)
+	if m.volume != 55 || cmd == nil {
+		t.Fatalf("right should raise volume: %d", m.volume)
+	}
+	if !strings.Contains(m.View(), "55%") {
+		t.Fatalf("receiver volume row should show the percentage:\n%s", m.View())
+	}
+	assertFits(t, m.View(), 110, 32)
+
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = mm.(Model)
+	if m.volumeOpen {
+		t.Fatal("v should close the volume slider")
+	}
+	if strings.Contains(m.View(), "VOLUME") {
+		t.Fatal("closing should restore the status readout")
+	}
+}
+
+// Regression: the wide receiver faceplate must host the seed prompt too.
+// Pressing / set m.prompt and the footer showed ENTER tune / ESC cancel,
+// but receiverRows never rendered promptRow — the user typed blind.
+func TestSeedPromptRendersInReceiverFaceplate(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 110, 32
+	m.start = m.now.Add(-time.Minute)
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = mm.(Model)
+	if !m.prompt || !strings.Contains(m.View(), "SEED") {
+		t.Fatal("/ should open the seed prompt in the wide receiver layout")
+	}
+	if !strings.Contains(m.View(), "genre or artist") {
+		t.Fatalf("empty prompt should show the hint:\n%s", m.View())
+	}
+
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ambient")})
+	m = mm.(Model)
+	if !strings.Contains(m.View(), "ambient") {
+		t.Fatalf("typed query should render in the receiver prompt:\n%s", m.View())
+	}
+	assertFits(t, m.View(), 110, 32)
+
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mm.(Model)
+	if m.prompt {
+		t.Fatal("esc should close the seed prompt")
+	}
+	if strings.Contains(m.View(), "SEED") {
+		t.Fatal("closing should restore the status readout")
+	}
+}
+
 func TestVolumeSliderClampsAndFitsTinyTerminals(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 20, 6

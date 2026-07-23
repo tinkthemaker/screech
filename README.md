@@ -20,7 +20,7 @@ playlists, no telemetry. One binary, one config file, one database, all yours.
   │ WHY THIS STATION  Plays 3 artists you love                               │
   ╰────────────────────────────────────────────────────────────────────────────╯
 
-  [SPACE] skip  [L] love  [F] preset 7  [/] discover  [H] library  [V] 75%
+  [SPACE] skip  [L] love  [F] preset 7  [/] discover  [H] library  [V] 75%  [T] theme
 ```
 
 On wide terminals Screech becomes a receiver faceplate: the music owns the
@@ -90,6 +90,10 @@ muscle memory, not a list. Everything past that lives in the library.
 the player in five-percent steps without changing system volume. The level
 is remembered across launches; `v`, enter, or esc closes the slider.
 
+**t** — open the theme picker. Move with arrows or `j`/`k` to preview a finish
+live, Enter applies and remembers it, and Escape restores the previous theme.
+The initial choices are Receiver (warm phosphor) and Austere (monochrome).
+
 **h** — recently heard tracks, newest first. Loved tracks carry an ember
 heart.
 
@@ -154,7 +158,8 @@ is synthetic; amplitude is true.
 `%AppData%\screech\config.toml` on Windows and
 `~/.config/screech/config.toml` elsewhere. The commented defaults cover the
 accent color, ASCII fallback, mpv path, data directory, ad hopping, and
-directory cache size. Everything Screech learns lives in one SQLite file.
+directory cache size. The theme picker and volume are remembered in the local
+SQLite file. Everything Screech learns lives there too.
 
 ## Building
 

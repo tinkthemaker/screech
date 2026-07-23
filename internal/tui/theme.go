@@ -12,7 +12,12 @@ import (
 // Theme: one saturated accent, three warm grays. NFO austerity, not a
 // rainbow dashboard. Accent defaults to phosphor amber.
 type Theme struct {
+	Name      string
 	AccentHex string
+	// AccentHex2 is the optional second gradient stop. Empty keeps the
+	// classic single-hue ramp (ember -> accent -> pale gold); set, the ramp
+	// top blends accent -> AccentHex2 instead.
+	AccentHex2 string
 
 	Accent    lipgloss.Style
 	AccentDim lipgloss.Style // ember: the accent at ~55%, for quiet warmth
@@ -44,6 +49,71 @@ type Theme struct {
 	G Glyphs
 
 	breatheSteps []lipgloss.Color
+}
+
+const (
+	ThemeReceiver = "receiver"
+	ThemeAustere  = "austere"
+	ThemeVerdant  = "verdant"
+	ThemeAzure    = "azure"
+	ThemeViolet   = "violet"
+	ThemeRose     = "rose"
+	ThemeCharm    = "charm"
+	ThemeLagoon   = "lagoon"
+)
+
+type ThemeChoice struct {
+	ID          string
+	Label       string
+	Description string
+}
+
+var themeChoices = []ThemeChoice{
+	{ID: ThemeReceiver, Label: "Receiver", Description: "Warm phosphor and ember"},
+	{ID: ThemeAustere, Label: "Austere", Description: "Strict monochrome signal"},
+	{ID: ThemeVerdant, Label: "Verdant", Description: "Green phosphor terminal glow"},
+	{ID: ThemeAzure, Label: "Azure", Description: "Cool broadcast blue"},
+	{ID: ThemeViolet, Label: "Violet", Description: "Deep lavender static"},
+	{ID: ThemeRose, Label: "Rose", Description: "Soft neon bloom"},
+	{ID: ThemeCharm, Label: "Charm", Description: "Signature pink-violet gradient"},
+	{ID: ThemeLagoon, Label: "Lagoon", Description: "Mint to blue, the Charm reef"},
+}
+
+func ThemeChoices() []ThemeChoice {
+	out := make([]ThemeChoice, len(themeChoices))
+	copy(out, themeChoices)
+	return out
+}
+
+func normalizeThemeName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, choice := range themeChoices {
+		if name == choice.ID {
+			return name
+		}
+	}
+	return ThemeReceiver
+}
+
+func NewNamedTheme(name, accentHex string, ascii bool) Theme {
+	switch normalizeThemeName(name) {
+	case ThemeAustere:
+		return NewAustereTheme(ascii)
+	case ThemeVerdant:
+		return NewHueTheme(ThemeVerdant, "#45DC78", ascii)
+	case ThemeAzure:
+		return NewHueTheme(ThemeAzure, "#4FA8F5", ascii)
+	case ThemeViolet:
+		return NewHueTheme(ThemeViolet, "#A98BFF", ascii)
+	case ThemeRose:
+		return NewHueTheme(ThemeRose, "#FF7AB8", ascii)
+	case ThemeCharm:
+		return NewGradientTheme(ThemeCharm, "#FF7EB6", "#B48CFF", ascii)
+	case ThemeLagoon:
+		return NewGradientTheme(ThemeLagoon, "#3FE8B0", "#4FA8F5", ascii)
+	default:
+		return NewTheme(accentHex, ascii)
+	}
 }
 
 // Glyphs is the material palette. The ascii set is bad-SSH insurance: every
@@ -117,6 +187,7 @@ func NewTheme(accentHex string, ascii bool) Theme {
 	}
 	r, g, b := hexRGB(accentHex)
 	t := Theme{
+		Name:      ThemeReceiver,
 		AccentHex: accentHex,
 		Accent:    lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)),
 		// Grays derive from the accent hue, not a fixed olive: an amber
@@ -169,6 +240,71 @@ func NewTheme(accentHex string, ascii bool) Theme {
 		f := float64(i) / 7.0
 		rr, gg, bb := t.rampColor(f)
 		t.Ramp[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(rr, gg, bb)))
+	}
+	return t
+}
+
+// NewAustereTheme removes hue entirely. It keeps the same material hierarchy
+// as the receiver—canvas, body, raised readout, selection—but expresses it
+// only through luminance. Love is white rather than a semantic accent.
+func NewAustereTheme(ascii bool) Theme {
+	t := NewTheme("#D8D8D8", ascii)
+	t.Name = ThemeAustere
+	t.AccentHex = "#D8D8D8"
+	t.Accent = lipgloss.NewStyle().Foreground(lipgloss.Color("#D8D8D8"))
+	t.AccentDim = lipgloss.NewStyle().Foreground(lipgloss.Color("#858585"))
+	t.Bright = lipgloss.NewStyle().Foreground(lipgloss.Color("#EEEEEE"))
+	t.Mid = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0A0"))
+	t.Dim = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262"))
+	t.Invert = lipgloss.NewStyle().Foreground(lipgloss.Color("#080808")).Background(lipgloss.Color("#E8E8E8"))
+
+	panel := lipgloss.Color("#0B0B0B")
+	raised := lipgloss.Color("#181818")
+	footer := lipgloss.Color("#121212")
+	selected := lipgloss.Color("#292929")
+	t.PanelFill = lipgloss.NewStyle().Background(panel)
+	t.PanelRaised = lipgloss.NewStyle().Background(raised)
+	t.PanelBorder = lipgloss.NewStyle().Foreground(lipgloss.Color("#686868"))
+	t.FootFill = lipgloss.NewStyle().Background(footer)
+	t.FootKey = lipgloss.NewStyle().Background(footer).Bold(true).Foreground(lipgloss.Color("#E4E4E4"))
+	t.FootLabel = lipgloss.NewStyle().Background(footer).Foreground(lipgloss.Color("#808080"))
+	t.SelFill = lipgloss.NewStyle().Background(selected)
+	t.SelText = lipgloss.NewStyle().Background(selected).Bold(true).Foreground(lipgloss.Color("#F2F2F2"))
+	t.SelMeta = lipgloss.NewStyle().Background(selected).Foreground(lipgloss.Color("#A0A0A0"))
+	t.Love = lipgloss.NewStyle().Foreground(lipgloss.Color("#F4F4F4"))
+	t.LoveFill = lipgloss.NewStyle().Background(selected)
+
+	t.breatheSteps = t.breatheSteps[:0]
+	for i := 0; i < 24; i++ {
+		v := 92 + int(float64(i)/23.0*124)
+		t.breatheSteps = append(t.breatheSteps, lipgloss.Color(rgbHex(v, v, v)))
+	}
+	for i := 0; i < len(t.Ramp); i++ {
+		v := 72 + int(float64(i)/float64(len(t.Ramp)-1)*166)
+		t.Ramp[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(v, v, v)))
+	}
+	return t
+}
+
+// NewHueTheme is a receiver finish in a fixed hue. Every gray, surface, and
+// ramp derives from the accent exactly as the configurable receiver theme
+// derives them — only the hue (and the persisted name) differ, so the
+// faceplate keeps its engineered-hardware read in any color.
+func NewHueTheme(name, accentHex string, ascii bool) Theme {
+	t := NewTheme(accentHex, ascii)
+	t.Name = name
+	return t
+}
+
+// NewGradientTheme is a receiver finish with a two-hue signature: the ramp
+// top blends from the accent into a second hue instead of pale gold. Grays
+// and surfaces still derive from the first accent, so the faceplate keeps a
+// single home temperature while the signal instruments carry the gradient.
+func NewGradientTheme(name, accentHex, accentHex2 string, ascii bool) Theme {
+	t := NewTheme(accentHex, ascii)
+	t.Name = name
+	if validHex(accentHex2) {
+		t.AccentHex2 = accentHex2
 	}
 	return t
 }
@@ -237,14 +373,22 @@ func grayHex(ar, ag, ab int, lightness, warmth float64) string {
 	)
 }
 
-// rampColor is the accent at position f (0..1) along the ember→accent→pale
-// ramp. 0 is a visible ember (never near-black), 1 the accent, >0.6 pushes
-// toward pale gold. Used by the wave's per-level gradient and the dial.
+// rampColor is the accent at position f (0..1) along the ramp. 0 is a
+// visible ember (never near-black), 0.6 the accent. Above 0.6 the top pushes
+// toward pale gold, or — when AccentHex2 is set — blends all the way into
+// the second hue. Used by the wave's per-level gradient and the dial.
 func (t Theme) rampColor(f float64) (int, int, int) {
 	r, g, b := hexRGB(t.AccentHex)
 	if f <= 0.6 {
 		k := 0.35 + (f/0.6)*0.65
 		return int(float64(r) * k), int(float64(g) * k), int(float64(b) * k)
+	}
+	if t.AccentHex2 != "" {
+		r2, g2, b2 := hexRGB(t.AccentHex2)
+		k := (f - 0.6) / 0.4
+		return int(float64(r) + (float64(r2)-float64(r))*k),
+			int(float64(g) + (float64(g2)-float64(g))*k),
+			int(float64(b) + (float64(b2)-float64(b))*k)
 	}
 	k := (f - 0.6) / 0.4 * 0.45
 	return int(float64(r) + (255-float64(r))*k),

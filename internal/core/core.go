@@ -274,6 +274,17 @@ func (c *Core) SetVolume(percent int) error {
 	return c.store.SetMeta("volume", strconv.Itoa(percent))
 }
 
+// Theme is the persisted TUI finish. Like volume, it is local presentation
+// state rather than part of the taste model or portable configuration.
+func (c *Core) Theme() string {
+	v, _ := c.store.GetMeta("theme")
+	return strings.TrimSpace(v)
+}
+
+func (c *Core) SetTheme(name string) error {
+	return c.store.SetMeta("theme", strings.TrimSpace(name))
+}
+
 // Presets returns a copy of the preset slots (1-9 -> station uuid).
 func (c *Core) Presets() map[int]string {
 	c.mu.Lock()
