@@ -46,7 +46,7 @@ func NewMPV(mpvPath string) (*MPV, error) {
 		"--volume=100",
 		"--cache=yes",
 		"--network-timeout=15",
-		"--user-agent=screech/0.2",
+		"--user-agent=screech/0.6",
 		// astats injects per-frame loudness into filter metadata; the wave
 		// visualizer reads it so its amplitude is real, not theatrical.
 		"--af=lavfi=[astats=metadata=1:reset=1]",

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const rbUserAgent = "screech/0.1 (+terminal radio; enthusiast build)"
+const rbUserAgent = "screech/0.6 (+terminal radio; enthusiast build)"
 
 // Fallback pool if the all.api server list is unreachable.
 var rbFallbackServers = []string{
