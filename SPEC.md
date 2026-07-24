@@ -250,7 +250,7 @@ mid for recall, dim for wildcard. Still one hue — many temperatures.
 the whole interface immediately, Enter persists the selection in local state,
 and Escape restores the prior palette. Receiver is the default warm phosphor
 finish. Austere removes hue entirely and expresses the same hierarchy through
-black, white, and luminance alone. Verdant, Azure, Violet, and Rose are fixed
+black, white, and luminance alone. Verdant, Azure, Violet, and Slayer are fixed
 receiver finishes in other hues; every gray, surface, and ramp derives from
 the accent, so the faceplate reads the same in any color. Charm and Lagoon
 carry a two-hue signature: the ramp top blends into a second hue instead of

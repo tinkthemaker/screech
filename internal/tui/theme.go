@@ -59,7 +59,7 @@ const (
 	ThemeVerdant  = "verdant"
 	ThemeAzure    = "azure"
 	ThemeViolet   = "violet"
-	ThemeRose     = "rose"
+	ThemeSlayer   = "slayer"
 	ThemeCharm    = "charm"
 	ThemeLagoon   = "lagoon"
 )
@@ -76,7 +76,7 @@ var themeChoices = []ThemeChoice{
 	{ID: ThemeVerdant, Label: "Verdant", Description: "Green phosphor terminal glow"},
 	{ID: ThemeAzure, Label: "Azure", Description: "Cool broadcast blue"},
 	{ID: ThemeViolet, Label: "Violet", Description: "Deep lavender static"},
-	{ID: ThemeRose, Label: "Rose", Description: "Soft neon bloom"},
+	{ID: ThemeSlayer, Label: "Slayer", Description: "Blood red on black iron"},
 	{ID: ThemeCharm, Label: "Charm", Description: "Signature pink-violet gradient"},
 	{ID: ThemeLagoon, Label: "Lagoon", Description: "Mint to blue, the Charm reef"},
 }
@@ -107,8 +107,8 @@ func NewNamedTheme(name, accentHex string, ascii bool) Theme {
 		return NewHueTheme(ThemeAzure, "#4FA8F5", ascii)
 	case ThemeViolet:
 		return NewHueTheme(ThemeViolet, "#A98BFF", ascii)
-	case ThemeRose:
-		return NewHueTheme(ThemeRose, "#FF7AB8", ascii)
+	case ThemeSlayer:
+		return NewHueTheme(ThemeSlayer, "#DC143C", ascii)
 	case ThemeCharm:
 		return NewGradientTheme(ThemeCharm, "#FF7EB6", "#B48CFF", ascii)
 	case ThemeLagoon:

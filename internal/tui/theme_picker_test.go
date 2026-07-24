@@ -37,7 +37,7 @@ func TestHueThemesResolveAndStayChromatic(t *testing.T) {
 		ThemeVerdant: "#45DC78",
 		ThemeAzure:   "#4FA8F5",
 		ThemeViolet:  "#A98BFF",
-		ThemeRose:    "#FF7AB8",
+		ThemeSlayer:  "#DC143C",
 	}
 	for id, hex := range accents {
 		th := NewNamedTheme(id, "#FFB000", false)
