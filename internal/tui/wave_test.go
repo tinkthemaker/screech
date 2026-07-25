@@ -256,16 +256,22 @@ func TestWaveTruePeakHold(t *testing.T) {
 	w.SetEnergy(1)
 	dt := 1.0 / 20
 
-	// Quiet RMS but a hot digital peak: markers must pin near 0.9 while the
-	// bars stay low.
+	// Quiet RMS but a hot digital peak: markers must pin to the real peak
+	// while the bars stay low. The ceiling is tilted by bassWeight so it
+	// follows the bay's shape instead of drawing one flat rule across it,
+	// so each marker is checked against its own bar's ceiling.
 	for i := 0; i < 100; i++ {
 		tm := float64(i) * dt
 		w.SetStereoLevels(0.1, 0.1, 0.9, tm)
 		w.Step(tm, dt)
 	}
 	for i, p := range w.peakL {
-		if p < 0.8 {
-			t.Fatalf("peak marker %d = %.3f, want a jump to the real peak >= 0.8", i, p)
+		want := 0.9 * w.bassWeight(i)
+		if p < want-1e-6 {
+			t.Fatalf("peak marker %d = %.3f, want a jump to the real peak >= %.3f", i, p, want)
+		}
+		if p <= w.dispL[i] {
+			t.Fatalf("peak marker %d (%.3f) should float above its bar (%.3f)", i, p, w.dispL[i])
 		}
 	}
 	if meanOf(w.dispL) > 0.5 {

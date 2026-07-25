@@ -8,10 +8,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"screech/internal/version"
 )
 
-const rbUserAgent = "screech/0.6 (+terminal radio; enthusiast build)"
+// rbUserAgent follows radio-browser etiquette: a real, identifying agent
+// carrying the running version. Built from internal/version so a release
+// can never ship a stale one.
+func rbUserAgent() string {
+	return version.UserAgent() + " (+terminal radio; enthusiast build)"
+}
 
 // Fallback pool if the all.api server list is unreachable.
 var rbFallbackServers = []string{
@@ -20,10 +28,15 @@ var rbFallbackServers = []string{
 	"fi1.api.radio-browser.info",
 }
 
+// RadioBrowser is safe for concurrent use. It has to be: Click fires its
+// report from its own goroutine while the weekly background sync may be
+// mid-FetchTop, and both touch the chosen server and the rng.
 type RadioBrowser struct {
 	client *http.Client
-	base   string // chosen server, e.g. https://de1.api.radio-browser.info
-	rng    *rand.Rand
+
+	mu   sync.Mutex
+	base string // chosen server, e.g. https://de1.api.radio-browser.info
+	rng  *rand.Rand
 }
 
 func NewRadioBrowser() *RadioBrowser {
@@ -38,7 +51,7 @@ func (rb *RadioBrowser) get(ctx context.Context, u string, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", rbUserAgent)
+	req.Header.Set("User-Agent", rbUserAgent())
 	resp, err := rb.client.Do(req)
 	if err != nil {
 		return err
@@ -54,10 +67,11 @@ func (rb *RadioBrowser) get(ctx context.Context, u string, out any) error {
 }
 
 // pickServer resolves a server per radio-browser etiquette: ask the pool,
-// pick one at random, fall back to a hardcoded list.
+// pick one at random, fall back to a hardcoded list. The pool request runs
+// unlocked so a slow directory can't stall a concurrent caller.
 func (rb *RadioBrowser) pickServer(ctx context.Context) string {
-	if rb.base != "" {
-		return rb.base
+	if base := rb.currentServer(); base != "" {
+		return base
 	}
 	var servers []struct {
 		Name string `json:"name"`
@@ -76,8 +90,28 @@ func (rb *RadioBrowser) pickServer(ctx context.Context) string {
 	if len(names) == 0 {
 		names = rbFallbackServers
 	}
-	rb.base = "https://" + names[rb.rng.Intn(len(names))]
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	// Another caller may have resolved one while this request was in
+	// flight. Keep theirs: one chosen server per process is the etiquette.
+	if rb.base == "" {
+		rb.base = "https://" + names[rb.rng.Intn(len(names))]
+	}
 	return rb.base
+}
+
+func (rb *RadioBrowser) currentServer() string {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	return rb.base
+}
+
+// dropServer forgets the chosen server so the next call resolves a
+// different one. Called when a request against it fails.
+func (rb *RadioBrowser) dropServer() {
+	rb.mu.Lock()
+	rb.base = ""
+	rb.mu.Unlock()
 }
 
 type rbStation struct {
@@ -117,7 +151,7 @@ func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, err
 		q.Set("offset", fmt.Sprint(offset))
 		var raw []rbStation
 		if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
-			rb.base = "" // let the next attempt pick a different server
+			rb.dropServer() // let the next attempt pick a different server
 			if len(out) > 0 {
 				return out, nil
 			}
@@ -172,7 +206,7 @@ func (rb *RadioBrowser) search(ctx context.Context, q url.Values, limit int) ([]
 	q.Set("limit", fmt.Sprint(limit))
 	var raw []rbStation
 	if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
-		rb.base = ""
+		rb.dropServer()
 		return nil, err
 	}
 	out := make([]Station, 0, len(raw))

@@ -174,16 +174,32 @@ func TestReceiverStationDecrypts(t *testing.T) {
 	if !m.stDecrypt.Active(m.now) {
 		t.Fatal("applyPick should arm the station-name decrypt")
 	}
-	row := m.receiverRows(m.innerWidth())[6] // BROADCAST row
+	row := m.broadcastRow(t)
 	if strings.Contains(stripANSI(row), strings.ToUpper(st.Name)) {
 		t.Fatal("the name must not be resolved at the start of the ceremony")
 	}
 
 	m.now = m.now.Add(time.Second) // decrypt dur elapsed
-	row = m.receiverRows(m.innerWidth())[6]
+	row = m.broadcastRow(t)
 	if !strings.Contains(stripANSI(row), strings.ToUpper(st.Name)) {
 		t.Fatalf("the name should resolve with the lock:\n%s", row)
 	}
+}
+
+// broadcastRow finds the station-name row by locating the BROADCAST label
+// above it. The faceplate's row count now varies with terminal height, so
+// indexing into it by a fixed number would silently start testing a
+// different row on a different screen.
+func (m Model) broadcastRow(t *testing.T) string {
+	t.Helper()
+	rows := m.receiverRows(m.innerWidth(), m.contentHeight())
+	for i, r := range rows {
+		if strings.Contains(stripANSI(r), "BROADCAST") && i+1 < len(rows) {
+			return rows[i+1]
+		}
+	}
+	t.Fatal("no BROADCAST label in the faceplate")
+	return ""
 }
 
 // The dead path is intentional: the meter fizzles to its ember baseline.

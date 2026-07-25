@@ -285,7 +285,7 @@ func (m Model) footerBar() string {
 
 func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 	if iw >= 78 && !compact && contentH >= 11 {
-		return m.receiverRows(iw)
+		return m.receiverRows(iw, contentH)
 	}
 	var rows []string
 	if !compact {
@@ -331,8 +331,9 @@ func (m Model) signalRows(width int, th Theme) []string {
 // the failure path's ending. Rows are exactly two and exactly width cells,
 // the same contract as Wave.Render.
 func (m Model) staticRows(width int, th Theme) []string {
+	rows := m.wave.Rows() * 2
 	if width < 1 {
-		return []string{"", ""}
+		return make([]string, rows)
 	}
 	elapsed := m.now.Sub(m.tuneAt)
 	if elapsed < 0 {
@@ -346,9 +347,21 @@ func (m Model) staticRows(width int, th Theme) []string {
 		set = []rune("#%*")
 		base = string(th.G.Blocks[0])
 	}
+	blank := string(rune(brailleBlank))
+	if th.G.Blocks[0] == '_' {
+		blank = " "
+	}
+	perChan := m.wave.Rows()
 	low, mid := th.RampFor(1, 7), th.RampFor(3, 7)
-	rows := make([]string, 2)
-	for row := 0; row < 2; row++ {
+	out := make([]string, rows)
+	for row := 0; row < rows; row++ {
+		// Only the bottom cell of each channel carries the baseline; the
+		// cells stacked above it rest empty, exactly as the live meter
+		// leaves them.
+		rest := blank
+		if row%perChan == perChan-1 {
+			rest = base
+		}
 		var b strings.Builder
 		for x := 0; x < width; x++ {
 			h := staticHash(x, row, frame)
@@ -362,12 +375,12 @@ func (m Model) staticRows(width int, th Theme) []string {
 				}
 				b.WriteString(style.Render(string(set[h>>10%uint32(len(set))])))
 			} else {
-				b.WriteString(th.Dim.Render(base))
+				b.WriteString(th.Dim.Render(rest))
 			}
 		}
-		rows[row] = b.String()
+		out[row] = b.String()
 	}
-	return rows
+	return out
 }
 
 // themeRows is a small, modal finish selector. Moving the cursor previews the
@@ -466,10 +479,118 @@ func receiverColumns(iw int) (left, gap, right int) {
 	return
 }
 
+// stackedFixedRows is the compact layout's non-stretching content: the
+// NOW PLAYING microlabel, hero, track line, a spacer, the band line and the
+// reason row. Only the signal bay grows.
+const stackedFixedRows = 6
+
+// stackedWaveRows sizes the compact layout's meter. A terminal too narrow
+// for the two-bay faceplate is not necessarily short, and an 80-column
+// window is the single most common terminal there is — it shouldn't get a
+// two-row meter floating in half a screen of nothing.
+func stackedWaveRows(contentH int) int {
+	n := 1 + (contentH-stackedFixedRows-2)/2
+	if n < 1 {
+		n = 1
+	}
+	if n > maxWaveRows {
+		n = maxWaveRows
+	}
+	return n
+}
+
+// receiverFixedRows is everything in the faceplate that doesn't stretch:
+// both frame rules, the two label rows, title, artist, the LOW/HIGH scale,
+// the station name, the preset legend and the status readout. The wave's
+// first two rows sit alongside title and artist, so they cost nothing extra.
+const receiverFixedRows = 10
+
+// maxReceiverPad caps the blank rows inside the panel. Past this the
+// faceplate stops reading as a machined object and starts reading as a box
+// someone dragged the corner of. Height beyond this is deliberately left as
+// margin around a well-proportioned instrument.
+const maxReceiverPad = 3
+
+// receiverLayout decides how the faceplate spends the height it's given.
+// Extra rows go to the signal bay first, since the meter is the one part of
+// the panel that's actually alive, then to padding.
+//
+// This is why the panel used to sit at a fixed ten rows and float in a sea
+// of black on a tall terminal: it never asked how much room it had. Note
+// that filling the terminal completely is not the goal — a radio faceplate
+// stretched down eighty rows would be worse than the original problem. The
+// panel grows to a substantial size and then centers.
+func receiverLayout(contentH int) (wavePerChannel, pad int) {
+	spare := contentH - receiverFixedRows
+	if spare < 0 {
+		spare = 0
+	}
+	// Each extra per-channel row costs two rows of panel: both channels grow
+	// together. Keep one row in reserve so the panel never reaches the edge.
+	wavePerChannel = 1 + (spare-1)/2
+	if wavePerChannel < 1 {
+		wavePerChannel = 1
+	}
+	if wavePerChannel > maxWaveRows {
+		wavePerChannel = maxWaveRows
+	}
+	pad = spare - 2*(wavePerChannel-1) - 1
+	if pad < 0 {
+		pad = 0
+	}
+	if pad > maxReceiverPad {
+		pad = maxReceiverPad
+	}
+	return
+}
+
+// padColumn stretches a column of rows to height by distributing blank rows
+// into its marked gaps. A gap is an empty string already present in the
+// column; surplus is shared among them, with any remainder going to the
+// last one so the block above stays anchored where it was written.
+//
+// This is what keeps the left bay from clumping: the track block and the
+// broadcast block spread down the panel alongside the signal instead of
+// stacking at the top with a hole underneath.
+func padColumn(rows []string, height int) []string {
+	if len(rows) >= height {
+		return rows
+	}
+	var gaps []int
+	for i, r := range rows {
+		if r == "" {
+			gaps = append(gaps, i)
+		}
+	}
+	surplus := height - len(rows)
+	if len(gaps) == 0 {
+		return append(rows, make([]string, surplus)...)
+	}
+	extra := make([]int, len(gaps))
+	for i := range extra {
+		extra[i] = surplus / len(gaps)
+	}
+	for i := 0; i < surplus%len(gaps); i++ {
+		extra[len(extra)-1-i]++
+	}
+	out := make([]string, 0, height)
+	g := 0
+	for i, r := range rows {
+		out = append(out, r)
+		if g < len(gaps) && gaps[g] == i {
+			for n := 0; n < extra[g]; n++ {
+				out = append(out, "")
+			}
+			g++
+		}
+	}
+	return out
+}
+
 // receiverRows is the wide-screen identity of Screech: a single substantial
 // faceplate rather than a narrow column of terminal output. Music owns the
 // left bay; the living signal and station-memory dial own the right.
-func (m Model) receiverRows(iw int) []string {
+func (m Model) receiverRows(iw, contentH int) []string {
 	leftW, gapW, rightW := receiverColumns(iw)
 	pt := m.th.OnPanel()
 	// Panel microlabels are chrome: they settle with the room. Content —
@@ -520,18 +641,84 @@ func (m Model) receiverRows(iw int) []string {
 		bottomRow = m.receiverVolumeRow(iw)
 	}
 
-	return []string{
-		m.frameRule(iw, true, "RECEIVER / NOW PLAYING"),
-		m.panelColumns(pt.Dim.Bold(true).Render(primaryLabel), pt.Dim.Bold(true).Render("SIGNAL"), leftW, gapW, rightW),
-		m.panelColumns(titleCell, wave[0], leftW, gapW, rightW),
-		m.panelColumns(pt.Mid.Render(artist), wave[1], leftW, gapW, rightW),
-		m.panelColumns("", pt.Dim.Render(lrRow("LOW", "HIGH", rightW)), leftW, gapW, rightW),
-		m.panelColumns(pt.Dim.Bold(true).Render("BROADCAST"), pt.Dim.Bold(true).Render("STATION MEMORY"), leftW, gapW, rightW),
-		m.panelColumns(stationCell, m.bandRowTheme(rightW, m.idle(), pt), leftW, gapW, rightW),
-		m.panelColumns("", pt.Dim.Render(m.presetLegend(rightW)), leftW, gapW, rightW),
-		bottomRow,
-		m.frameRule(iw, false, ""),
+	// The two bays are composed independently and then zipped. They hold
+	// different amounts of hardware — the right one carries the meter, the
+	// scale, the dial and the legend — so laying them out row by row forced
+	// the left bay's content into a clump at the top with a hole under it.
+	// Empty strings mark the gaps padColumn is allowed to stretch.
+	left := []string{
+		pt.Dim.Bold(true).Render(primaryLabel),
+		titleCell,
+		pt.Mid.Render(artist),
+		"", // stretches: pushes the broadcast block down beside the meter
+		pt.Dim.Bold(true).Render("BROADCAST"),
+		stationCell,
+		"", // stretches: keeps the block off the status readout
 	}
+	// Tags are the station's own description of itself and they drive tag
+	// affinity, which is one of the three things picking your next station.
+	// They had no representation on screen at all, while the left bay sat
+	// empty next to a meter — so the bay gets filled with something true
+	// rather than with more blank rows.
+	if tags := stationTags(&m.st, leftW); tags != "" {
+		left = append(left, pt.Dim.Bold(true).Render("GENRE"), pt.Mid.Render(tags), "")
+	}
+	right := []string{pt.Dim.Bold(true).Render(m.signalLabel())}
+	right = append(right, wave...)
+	right = append(right,
+		pt.Dim.Render(lrRow("LOW", "HIGH", rightW)),
+		"", // stretches: separates the signal bay from the memory dial
+		pt.Dim.Bold(true).Render("STATION MEMORY"),
+		m.bandRowTheme(rightW, m.idle(), pt),
+		pt.Dim.Render(m.presetLegend(rightW)),
+	)
+
+	// Stretch the shorter bay's gaps to match the taller one, so the
+	// broadcast block lands beside the meter rather than above or below it.
+	// Panel breathing room is added afterwards, to both bays equally —
+	// folding it into the stretch target instead pulls the two bays apart
+	// and opens a dead zone between BROADCAST and STATION MEMORY.
+	natural := maxI(len(left), len(right))
+	left, right = padColumn(left, natural), padColumn(right, natural)
+	_, pad := receiverLayout(contentH)
+	for i := 0; i < pad; i++ {
+		left, right = append(left, ""), append(right, "")
+	}
+
+	body := len(left)
+	rows := make([]string, 0, body+3)
+	rows = append(rows, m.frameRule(iw, true, "RECEIVER / NOW PLAYING"))
+	for i := 0; i < body; i++ {
+		rows = append(rows, m.panelColumns(left[i], right[i], leftW, gapW, rightW))
+	}
+	return append(rows, bottomRow, m.frameRule(iw, false, ""))
+}
+
+// stationTags renders the station's self-reported tags for the GENRE block:
+// the first few, comma separated, truncated to the bay. Returns "" when the
+// station carries none, in which case the block is dropped entirely rather
+// than left as an empty label.
+func stationTags(st *core.Station, width int) string {
+	tags := st.TagList()
+	if len(tags) == 0 || width < 8 {
+		return ""
+	}
+	if len(tags) > 3 {
+		tags = tags[:3]
+	}
+	return runewidth.Truncate(strings.Join(tags, ", "), width, "…")
+}
+
+// signalLabel names the signal bay and, with it, the axis the two blocks of
+// rows encode. The bay is split top-half left channel, bottom-half right,
+// but the only labels near it read LOW and HIGH — which describe the
+// horizontal axis. Without this, nothing on screen says the vertical split
+// means anything at all.
+func (m Model) signalLabel() string {
+	if m.stereo {
+		return "SIGNAL  L/R"
+	}
+	return "SIGNAL  MONO"
 }
 
 func splitTrackDisplay(track string) (artist, title string) {

@@ -12,7 +12,11 @@ import (
 const (
 	decayHalfLife = 21 * 24 * time.Hour
 
-	fastSkipWindow = 90 * time.Second
+	// FastSkipWindow is the line between a skip and a variety request.
+	// Exported because the UI's feedback text has to name the same
+	// threshold the reward actually uses, and two copies of a tuning
+	// constant will drift.
+	FastSkipWindow = 90 * time.Second
 
 	listenAlphaPer10Min = 1.0 // α += minutes/10 ...
 	listenAlphaMin      = 0.2 // ... clamped to [0.2, 3.0]
@@ -20,6 +24,14 @@ const (
 	skipBeta            = 1.0
 	skipBetaDuringAd    = 0.25 // ad-break skips are discounted, not ignored
 	loveAlpha           = 2.0
+
+	// countFloor is the (1,1) prior: no reward may push a pseudo-count
+	// below "never heard". It only ever binds when a love is returned,
+	// because decay has already pulled the boost partway home and
+	// subtracting the full dose would otherwise leave the station worse
+	// off than if it had never been loved at all. Taking back praise is
+	// not the same as punishment.
+	countFloor = 1.0
 )
 
 // Dayparts partition the bandit counts by local time of day.

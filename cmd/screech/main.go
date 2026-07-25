@@ -10,9 +10,12 @@ import (
 	"screech/internal/core"
 	"screech/internal/player"
 	"screech/internal/tui"
+	versionpkg "screech/internal/version"
 )
 
-var version = "0.6.0"
+// version is the one string every surface reports. It lives in
+// internal/version so the mpv and radio-browser User-Agents move with it.
+var version = versionpkg.Current
 
 func main() {
 	if len(os.Args) > 1 {

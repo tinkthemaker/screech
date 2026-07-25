@@ -84,7 +84,7 @@ func TestLovedTracksDeduplicatesAndCanForget(t *testing.T) {
 	c.NoteTitle("Artist One - First", now)
 	c.Love(now.Add(time.Minute))
 	c.NoteTitle("Artist Two - Second", now.Add(3*time.Minute))
-	c.Love(now.Add(4*time.Minute))
+	c.Love(now.Add(4 * time.Minute))
 
 	got, err := c.LovedTracks(100)
 	if err != nil {

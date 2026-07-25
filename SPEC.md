@@ -32,8 +32,13 @@ two controls:
 - **next** (`space` or `n`) — pressed fast (<90s) it's a skip (negative). Pressed
   after a long listen it's a variety request (listen credit already banked, no penalty).
 - **love** (`l`) — strong positive on the track's artist + station + tags.
-  Toggle: loving the same track (or, trackless, the same station) a second
-  time returns the exact boosts — a bounded dose, not a permanent scar.
+  Toggle: loving the same track (or, trackless, *that same station*) a
+  second time returns the boosts. Returning is floored at the (1,1) prior:
+  decay has usually eaten part of the boost by then, so subtracting the
+  full dose would leave a station worse off than one never loved at all.
+  Taking back praise is not punishment. A trackless love is keyed to its
+  station, never global, so loving a second silent stream cannot read as
+  un-loving the first.
 - **dead streams** (`TuneDead`) — a stream that fails to lock closes its
   listen with no skip semantics and no bandit reward; fail_count is the
   whole penalty. Network trouble is not dislike.
@@ -149,6 +154,8 @@ play the argmax. Uncertainty handles explore/exploit with no knobs.
 - listen end, duration < 90s (fast skip): β += 1.0
 - fast skip during suspected ad break: β += 0.25 (discounted)
 - love: α += 2.0 on the current station (artists/tags credited separately)
+- every write floors α and β at 1.0, so no reward path can push a count
+  below the untouched prior
 
 **Lazy decay:** half-life ~21 days. Each row stores `updated_at`; on read/write,
 pull (α, β) toward the (1, 1) prior by `0.5^(Δt/half-life)`. No cron, no
@@ -228,8 +235,21 @@ allowed for fine detail.
 **Faceplate layout (v0.5).** The brand/status rail pins to the top and the
 stateful key strip pins to the bottom. At 78 columns and sufficient height, a
 single framed receiver body centers between them. Its left bay contains track,
-artist, and broadcast identity; its right bay contains the live signal and the
-station-memory dial. A raised full-width readout explains the current pick.
+artist, broadcast identity, and the station's genre tags; its right bay
+contains the live signal and the station-memory dial. A raised full-width
+readout explains the current pick.
+
+**The faceplate is height-aware.** It was a fixed ten rows at every terminal
+size, which on a tall window left a business card floating in three quarters
+of an empty screen — while the library view beside it filled the same
+terminal correctly. Surplus height goes to the signal bay first, since the
+meter is the one part of the panel that's alive, then to a small amount of
+internal padding. Filling the terminal is explicitly *not* the goal: a
+receiver stretched down eighty rows would be worse than the original
+problem. The panel grows to a substantial size and then centers. The two
+bays are composed independently and zipped, so the left bay's blocks
+distribute down the panel beside the instruments instead of clumping at the
+top with a hole underneath.
 Narrow terminals collapse to the v0.4 stacked composition. Meter columns touch
 to form a continuous signal silhouette, library selection is a full-row background bar, and
 microlabels anchor every data field. Surfaces derive from the accent hue so any
@@ -239,7 +259,23 @@ configured color keeps its temperature. The footer exposes live state (`loved`,
 **Color material (v0.4).** The accent is no longer a garnish. Grays derive
 from the accent hue (an amber accent warms them to stone, a violet cools
 them to lavender — the fixed olive family is gone), and the dim floor is
-raised so "quiet" never means illegible. The header readout sits on the
+raised so "quiet" never means illegible.
+
+**Legibility is measured, not eyeballed.** Green carries ~71% of perceived
+luminance and red ~21%, so deriving grays by scaling RGB uniformly made the
+same nominal lightness three shades darker on the crimson finish than on
+amber: dim measured 3.2–4.2 across the finishes, under AA in every one of
+them, while carrying every microlabel on screen. Grays are therefore
+renormalized to a target luminance after being warmed toward the accent, and
+the wave's ramp floor is a luminance target rather than a fixed fraction of
+the accent — most of the meter lives at the bottom of that ramp, so the low
+step is the majority of what the eye actually sees, and at 35% of a crimson
+accent it measured 1.3 against the panel. Daypart dimming scales surfaces
+and text at different rates for the same reason: these backgrounds sit in
+sRGB's linear toe while text sits up the gamma curve, so an even multiplier
+quietly eats contrast. `TestThemeContrastFloors` and
+`TestWaveRampIsVisibleAndMonotonic` hold the line at every finish and
+daypart. The header readout sits on the
 accent while the stream is live; buffering blinks. The dial marker carries
 a five-cell ember→accent→ember gradient. A loved track's whole row takes
 the faintest accent surface, readable from across the room. The status
@@ -275,16 +311,33 @@ loved rows) while leaving listen history and the taste model untouched.
 Radio metadata is recall and discovery context, never presented as an
 on-demand replay URL. Esc closes.
 
-**The wave (honest amplitude, synthetic texture).** Two rows of touching braille cells
-— 2x4 sub-cells per terminal column, the top row the left channel, the bottom
-row the right — a vertical gradient from a visible ember base through the
-accent to a pale peak, peak-hold ticks that cool through the ramp as they
-fall. Bars are bass-weighted, so per-channel levels still read as a
-spectrum, not a uniform bounce. Amplitude is real (mpv astats per-channel
-RMS + peak over IPC ~20Hz, mono mixdown fallback); texture is synthetic. If
-level data stops (other backends), it falls back to self-animated breathing
-after 3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already
-takes a `[]float64` either way.
+**The wave (honest amplitude, synthetic texture).** Touching braille cells,
+the top block of rows the left channel and the bottom block the right, with
+a vertical gradient from a visible ember base through the accent to a pale
+peak and peak-hold ticks that cool through the ramp as they fall. Bars are
+bass-weighted, so per-channel levels still read as a spectrum, not a uniform
+bounce; the tilt is a lean (1.0 → 0.74), not a cliff, or the right of the
+bay goes structurally dead. Amplitude is real (mpv astats per-channel RMS +
+peak over IPC ~20Hz, mono mixdown fallback); texture is synthetic. If level
+data stops (other backends), it falls back to self-animated breathing after
+3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already takes
+a `[]float64` either way.
+
+**Resolution is per-row, and one row is not enough.** A braille cell's eight
+dots are four rows of two columns, so a single row of braille resolves four
+heights, not eight. At four levels the meter was effectively binary across
+the whole useful loudness range and read as static rather than signal. Each
+channel therefore spans up to three stacked cells — twelve levels — sized by
+the height available. The bay never grows past that: a meter needs headroom
+above typical program level, and past twelve levels that headroom is a whole
+terminal row sitting permanently empty inside a drawn frame.
+
+**The meter is calibrated to broadcast, not to the format.** dBFS maps over
+−36 to −3, the range real streams occupy, rather than the format's full
+−48 to 0. Mapping the format wasted most of the scale on levels nothing ever
+sends, so a quiet ambient set and a loud master landed within a few percent
+of each other. Typical streaming loudness (≈ −14 dBFS) should sit around
+two-thirds up the bay with room above for peaks.
 
 **Set piece: tuning (the signature moment).** A band line under the header
 (`──────╂──────`). On next: accent marker springs to the new station's position

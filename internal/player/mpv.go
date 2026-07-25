@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"screech/internal/version"
 )
 
 // MPV drives a headless mpv process over its JSON IPC socket (unix socket on
@@ -46,7 +48,7 @@ func NewMPV(mpvPath string) (*MPV, error) {
 		"--volume=100",
 		"--cache=yes",
 		"--network-timeout=15",
-		"--user-agent=screech/0.6",
+		"--user-agent="+version.UserAgent(),
 		// astats injects per-frame loudness into filter metadata; the wave
 		// visualizer reads it so its amplitude is real, not theatrical.
 		"--af=lavfi=[astats=metadata=1:reset=1]",
@@ -95,6 +97,9 @@ func (m *MPV) Events() <-chan Event { return m.events }
 func (m *MPV) Play(url string) error {
 	m.mu.Lock()
 	m.sawIcy = false
+	// Channel reporting is a property of the stream, not the process: a
+	// mono station following a stereo one must not inherit its stereo flag.
+	m.sawL, m.sawR = false, false
 	m.mu.Unlock()
 	return m.send("loadfile", url)
 }
@@ -254,9 +259,20 @@ func parseDB(raw json.RawMessage) (float64, error) {
 	return f, nil
 }
 
-// dbToUnit maps dBFS (≈ -48..0) onto 0..1.
+// meterFloorDB / meterCeilDB bracket the range real broadcast audio actually
+// occupies. Mapping the full -48..0 wasted most of the scale on levels no
+// stream ever sends: a typical streaming master sits near -14 dBFS RMS,
+// which landed at 0.71 of a range whose top the meter never reached, so the
+// visible needle barely moved between a quiet ambient set and a loud one.
+// -36 is below anything but a fade, -3 is essentially clipping.
+const (
+	meterFloorDB = -36.0
+	meterCeilDB  = -3.0
+)
+
+// dbToUnit maps RMS dBFS onto 0..1 across the range broadcast audio uses.
 func dbToUnit(db float64) float64 {
-	lv := 1 + db/48
+	lv := (db - meterFloorDB) / (meterCeilDB - meterFloorDB)
 	if lv < 0 {
 		return 0
 	}
@@ -297,7 +313,8 @@ func (m *MPV) handleLevel(name string, db float64) {
 	if !m.sawL {
 		l = r
 	}
-	ev := Event{Type: EventLevel, Level: m.lvlOverall, LevelL: l, LevelR: r, Peak: m.lvlPeak}
+	ev := Event{Type: EventLevel, Level: m.lvlOverall, LevelL: l, LevelR: r,
+		Peak: m.lvlPeak, Stereo: m.sawL && m.sawR}
 	m.mu.Unlock()
 	m.emit(ev)
 }

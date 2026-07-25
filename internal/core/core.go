@@ -6,6 +6,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -393,7 +394,7 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 		return
 	}
 	dur := now.Sub(c.listenStart)
-	skipFast := userSkip && dur < fastSkipWindow
+	skipFast := userSkip && dur < FastSkipWindow
 	duringAd := skipFast && c.suspectAd
 	_ = c.store.FinishListen(c.listenID, now, skipFast, duringAd)
 
@@ -403,7 +404,7 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 		c.applyRewardLocked(c.currentUUID, daypart, 0, skipBetaDuringAd, now)
 	case skipFast:
 		c.applyRewardLocked(c.currentUUID, daypart, 0, skipBeta, now)
-	case dur >= fastSkipWindow:
+	case dur >= FastSkipWindow:
 		c.applyRewardLocked(c.currentUUID, daypart, listenAlpha(dur), 0, now)
 		if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
 			bump := clamp(dur.Minutes()/30, 0.05, 1.0)
@@ -458,10 +459,10 @@ func (c *Core) NoteTitle(raw string, now time.Time) (Track, bool, bool, bool) {
 }
 
 // trackLovedLocked reports whether the current parsed track is in the loved
-// set (artist + title match, or the artist alone when the track has no
-// usable title key).
+// set. Keyed on (artist_key, title), the same pair Love toggles on, so a
+// title with no parsed artist still lights its heart.
 func (c *Core) trackLovedLocked() bool {
-	if !c.hasTrack || c.curTrack.ArtistKey == "" {
+	if !c.hasTrack {
 		return false
 	}
 	exists, err := c.store.LovedTrackExists(c.curTrack.ArtistKey, c.curTrack.Title)
@@ -484,12 +485,15 @@ func (c *Core) Love(now time.Time) (Track, bool, bool) {
 	}
 
 	// The toggle is grounded in what the user can see: the loved row for
-	// the currently playing track (or, trackless, the row for the station).
-	if c.hasTrack && c.curTrack.ArtistKey != "" {
+	// the currently playing track (or, trackless, this station's row).
+	// A parsed track always has a title even when the artist half is
+	// missing, so (artist_key, title) identifies it either way; the
+	// trackless case is the only one that keys on the station.
+	if c.hasTrack {
 		if exists, err := c.store.LovedTrackExists(c.curTrack.ArtistKey, c.curTrack.Title); err == nil && exists {
 			return c.unloveLocked(now)
 		}
-	} else if exists, err := c.store.LovedTrackExists("", ""); err == nil && exists {
+	} else if exists, err := c.store.TracklessStationLoveExists(c.currentUUID); err == nil && exists {
 		return c.unloveLocked(now)
 	}
 
@@ -528,8 +532,10 @@ func (c *Core) unloveLocked(now time.Time) (Track, bool, bool) {
 		}
 	}
 
-	if !c.hasTrack || c.curTrack.ArtistKey == "" {
-		_, _ = c.store.ForgetLovedTrack("", "")
+	if !c.hasTrack {
+		// Scoped to this station: a trackless love is a statement about one
+		// stream, so returning it must not touch any other station's row.
+		_, _ = c.store.ForgetTracklessStationLove(c.currentUUID)
 		return Track{}, false, false
 	}
 	tr := c.curTrack
@@ -537,8 +543,10 @@ func (c *Core) unloveLocked(now time.Time) (Track, bool, bool) {
 	if err != nil || !removed {
 		return tr, true, false
 	}
-	if n, err := c.store.CountLovedArtist(tr.ArtistKey); err == nil && n == 0 {
-		delete(c.loved, tr.ArtistKey)
+	if tr.ArtistKey != "" {
+		if n, err := c.store.CountLovedArtist(tr.ArtistKey); err == nil && n == 0 {
+			delete(c.loved, tr.ArtistKey)
+		}
 	}
 	return tr, true, false
 }
@@ -599,8 +607,8 @@ func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, no
 			}
 		}
 		a, b := row.decayed(now)
-		a += dAlpha
-		b += dBeta
+		a = math.Max(a+dAlpha, countFloor)
+		b = math.Max(b+dBeta, countFloor)
 		nr := banditRow{Alpha: a, Beta: b, UpdatedAt: now}
 		if c.bandit[uuid] == nil {
 			c.bandit[uuid] = map[string]banditRow{}
@@ -615,7 +623,7 @@ func (c *Core) bumpTagLocked(tag string, delta float64, now time.Time) {
 	if r, ok := c.tags[tag]; ok {
 		row = r
 	}
-	w := decayToward(row.Alpha, row.UpdatedAt, now) + delta
+	w := math.Max(decayToward(row.Alpha, row.UpdatedAt, now)+delta, countFloor)
 	c.tags[tag] = banditRow{Alpha: w, UpdatedAt: now}
 	_ = c.store.PutTagAffinity(tag, w, now)
 }

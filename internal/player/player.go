@@ -32,6 +32,12 @@ type Event struct {
 	LevelL float64
 	LevelR float64
 	Peak   float64
+	// Stereo reports whether the backend is actually measuring two
+	// channels. A mono stream — or an astats build that only reports
+	// channel 1 — mirrors one value into both, which makes the meter's two
+	// halves identical. The UI says so rather than implying a stereo image
+	// that isn't there.
+	Stereo bool
 	Err    error
 }
 

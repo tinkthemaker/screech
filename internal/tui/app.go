@@ -104,6 +104,7 @@ type Model struct {
 	lovedTrack bool
 	loveAt     time.Time
 	suspect    bool
+	stereo     bool // the backend is metering two distinct channels
 
 	presets      map[int]string
 	prompt       bool
@@ -320,6 +321,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.wave.Resize(m.waveRenderWidth())
+		m.wave.SetRows(m.waveRenderRows())
 		return m, nil
 
 	case tea.KeyMsg:
@@ -449,7 +451,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case m.suspect:
 			m.setFeedback("LEARNED  Break skip protected")
-		case !m.playStart.IsZero() && m.now.Sub(m.playStart) >= 90*time.Second:
+		case !m.playStart.IsZero() && m.now.Sub(m.playStart) >= core.FastSkipWindow:
 			m.setFeedback("LEARNED  Long listen saved")
 		case !m.playStart.IsZero():
 			m.setFeedback("LEARNED  Fast skip noted")
@@ -1227,6 +1229,7 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			// A backend that only measures a mono mixdown.
 			l, r = ev.Level, ev.Level
 		}
+		m.stereo = ev.Stereo
 		m.wave.SetStereoLevels(l, r, ev.Peak, m.now.Sub(m.start).Seconds())
 
 	case player.EventStreamError:
@@ -1277,6 +1280,34 @@ func (m Model) waveRenderWidth() int {
 		return right
 	}
 	return iw
+}
+
+// waveRenderRows mirrors waveRenderWidth for the vertical axis: the signal
+// bay only stretches inside the wide faceplate. The compact stacked layout
+// keeps a two-row meter, where it sits directly under the track and has no
+// room to grow.
+func (m Model) waveRenderRows() int {
+	iw := m.innerWidth()
+	contentH := m.contentHeight()
+	if iw >= 78 && m.h >= 14 && contentH >= 11 {
+		perChannel, _ := receiverLayout(contentH)
+		return perChannel
+	}
+	if iw >= 28 && m.h >= 14 && contentH >= 8 {
+		return stackedWaveRows(contentH)
+	}
+	return 1
+}
+
+// contentHeight is the room between the pinned header and the pinned key
+// strip. View computes the same number; both must agree or the wave will be
+// sized for a layout the renderer isn't using.
+func (m Model) contentHeight() int {
+	top := 2 // header bar + rule
+	if m.h < 8 {
+		top = 0
+	}
+	return m.h - top - 1
 }
 
 func (m Model) idle() bool {

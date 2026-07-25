@@ -42,8 +42,9 @@ mpv_path = "mpv"
 # Where the database lives. Empty = next to this file.
 data_dir = ""
 
-# Auto-hop away from suspected ad breaks. Off by default: detection is
-# conservative and DJs legitimately trip it. (Not yet wired in v1.)
+# Auto-hop away from suspected ad breaks. Placeholder: this key is read but
+# nothing acts on it yet. Detection is conservative and DJs legitimately
+# trip it, so hopping stays off until it earns its keep.
 auto_hop_ads = false
 
 # How many stations to cache from the directory (top slice by votes).

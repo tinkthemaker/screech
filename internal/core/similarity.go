@@ -12,9 +12,9 @@ import "math"
 // probing every candidate against every loved artist, which keeps tune-time
 // work proportional to loved artists, not to cache size.
 type fingerprints struct {
-	stationArtists map[string]map[string]bool   // station uuid -> artist keys
-	artistStations map[string]map[string]bool   // artist key -> station uuids
-	artistDF       map[string]int               // artist key -> #stations observed playing it
+	stationArtists map[string]map[string]bool // station uuid -> artist keys
+	artistStations map[string]map[string]bool // artist key -> station uuids
+	artistDF       map[string]int             // artist key -> #stations observed playing it
 	heardStations  int
 }
 

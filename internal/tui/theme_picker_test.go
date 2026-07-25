@@ -71,12 +71,22 @@ func TestGradientThemesResolveAndBlend(t *testing.T) {
 		if r != wr || g != wg || b != wb {
 			t.Errorf("theme %q ramp top = #%02X%02X%02X, want %q", id, r, g, b, want[1])
 		}
-		// The ember side stays home: it derives from the first accent only.
+		// The ember side stays home: it runs from the lifted floor up to the
+		// first accent and never leans toward the second hue.
 		r, g, b = th.rampColor(0.3)
 		ar, ag, ab := hexRGB(want[0])
-		k := 0.35 + (0.3/0.6)*0.65
-		if r != int(float64(ar)*k) || g != int(float64(ag)*k) || b != int(float64(ab)*k) {
-			t.Errorf("theme %q ember mid = #%02X%02X%02X, want first-accent ember", id, r, g, b)
+		fr, fg, fb := th.rampFloor[0], th.rampFloor[1], th.rampFloor[2]
+		k := 0.3 / 0.6
+		lerp := func(from, to int) int { return int(float64(from) + (float64(to)-float64(from))*k) }
+		if r != lerp(fr, ar) || g != lerp(fg, ag) || b != lerp(fb, ab) {
+			t.Errorf("theme %q ember mid = #%02X%02X%02X, want the floor→first-accent blend #%02X%02X%02X",
+				id, r, g, b, lerp(fr, ar), lerp(fg, ag), lerp(fb, ab))
+		}
+		// And it is genuinely a different color from the second hue's blend,
+		// so the assertion above isn't passing by coincidence.
+		br, bg2, bb := hexRGB(want[1])
+		if r == lerp(fr, br) && g == lerp(fg, bg2) && b == lerp(fb, bb) {
+			t.Errorf("theme %q ember mid is indistinguishable from a second-hue blend", id)
 		}
 	}
 	// Single-hue themes are untouched: no second stop, pale-gold ramp top.

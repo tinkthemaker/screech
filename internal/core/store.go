@@ -51,6 +51,11 @@ func (s *Station) StreamURL() string {
 	return s.URL
 }
 
+// schemaVersion is stamped into meta on open. Nothing reads it yet, which
+// is the point: the first migration that needs to tell an old database from
+// a new one can't retroactively ask a database that never recorded this.
+const schemaVersion = "1"
+
 type Store struct {
 	db *sql.DB
 }
@@ -64,6 +69,14 @@ func OpenStore(path string) (*Store, error) {
 	db.SetMaxOpenConns(1) // single writer; screech is a one-process app
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// Stamp the schema version, leaving an existing stamp alone. Every
+	// database that has ever existed is at version 1, so claiming it for
+	// the unstamped ones is accurate rather than optimistic.
+	if _, err := db.Exec(`INSERT INTO meta(key,value) VALUES('schema_version', ?)
+		ON CONFLICT(key) DO NOTHING`, schemaVersion); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -380,10 +393,35 @@ func (s *Store) ForgetLovedTrack(artistKey, title string) (bool, error) {
 
 // LovedTrackExists reports whether a (artist_key, title) pair is in the
 // loved set. Used to make love a toggle rather than a one-way valve.
+// Matching mirrors ForgetLovedTrack exactly: a row that reads as loved here
+// must be a row that unlove can actually delete.
 func (s *Store) LovedTrackExists(artistKey, title string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved
-		WHERE artist_key=? AND lower(title)=lower(?)`, artistKey, title).Scan(&n)
+		WHERE artist_key=? AND lower(trim(title))=lower(trim(?))`, artistKey, title).Scan(&n)
+	return n > 0, err
+}
+
+// TracklessStationLoveExists reports whether this station carries a
+// trackless love: the row written when the user loves a stream that never
+// sent a usable title. These are per-station on purpose. Loving a silent
+// stream must never read as un-loving a different silent stream.
+func (s *Store) TracklessStationLoveExists(stationUUID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved
+		WHERE station_uuid=? AND artist_key='' AND trim(title)=''`, stationUUID).Scan(&n)
+	return n > 0, err
+}
+
+// ForgetTracklessStationLove removes one station's trackless love rows and
+// leaves every other station's alone.
+func (s *Store) ForgetTracklessStationLove(stationUUID string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM loved
+		WHERE station_uuid=? AND artist_key='' AND trim(title)=''`, stationUUID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
 	return n > 0, err
 }
 

@@ -1,0 +1,20 @@
+# Screech is developed on Windows and built on Linux runners. Without this,
+# every file round-trips between CRLF and LF and `git diff` fills with
+# thousands of phantom line changes that bury the real ones.
+#
+# Everything text is normalized to LF in the repository. Git still checks
+# out whatever the platform wants; only what gets committed is pinned.
+* text=auto eol=lf
+
+*.go     text eol=lf
+*.md     text eol=lf
+*.toml   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.sum    text eol=lf
+*.mod    text eol=lf
+
+# Binaries: never touch these.
+*.png    binary
+*.exe    binary
+*.db     binary

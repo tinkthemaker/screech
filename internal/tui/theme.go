@@ -51,6 +51,13 @@ type Theme struct {
 	G Glyphs
 
 	breatheSteps []lipgloss.Color
+
+	// rampFloor is the ramp's bottom color, precomputed. The lift that
+	// produces it is a binary search, and rampColor runs per-cell per-frame
+	// on the header rule and the dial, so it must not be done inline.
+	// cacheRampFloor has to be re-run by any constructor that reassigns
+	// AccentHex after NewTheme.
+	rampFloor [3]int
 }
 
 const (
@@ -196,9 +203,14 @@ func NewTheme(accentHex string, ascii bool) Theme {
 		// accent yields warm stone grays, a violet accent cool lavender
 		// ones. Warmth comes from pulling each gray a fraction toward the
 		// accent; the dim floor is raised so "quiet" never means illegible.
-		Bright: lipgloss.NewStyle().Foreground(lipgloss.Color(grayHex(r, g, b, 0.92, 0.06))),
-		Mid:    lipgloss.NewStyle().Foreground(lipgloss.Color(grayHex(r, g, b, 0.62, 0.10))),
-		Dim:    lipgloss.NewStyle().Foreground(lipgloss.Color(grayHex(r, g, b, 0.42, 0.14))),
+		// Lightness steps are chosen against the panel surface these sit on:
+		// dim carries every microlabel (TRACK, SIGNAL, BROADCAST, the preset
+		// legend), so it has to clear WCAG AA rather than merely look quiet.
+		// 0.42 measured 3.2–4.2 across the finishes, under the 4.5 body
+		// threshold in all of them. See TestThemeContrastFloors.
+		Bright: lipgloss.NewStyle().Foreground(lipgloss.Color(grayHex(r, g, b, 0.93, 0.06))),
+		Mid:    lipgloss.NewStyle().Foreground(lipgloss.Color(grayHex(r, g, b, 0.70, 0.10))),
+		Dim:    lipgloss.NewStyle().Foreground(lipgloss.Color(grayHex(r, g, b, 0.52, 0.14))),
 		Invert: lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(lipgloss.Color(accentHex)),
 		G:      unicodeGlyphs,
 	}
@@ -218,10 +230,15 @@ func NewTheme(accentHex string, ascii bool) Theme {
 	t.FootFill = lipgloss.NewStyle().Background(surface)
 	t.FootKey = lipgloss.NewStyle().Background(surface).Bold(true).Foreground(lipgloss.Color(rgbHex(
 		int(float64(r)*0.80), int(float64(g)*0.80), int(float64(b)*0.80))))
-	t.FootLabel = lipgloss.NewStyle().Background(surface).Foreground(lipgloss.Color("#8A8474"))
+	// Footer and selection text derive from the accent like everything else.
+	// These were fixed warm grays, which meant the blue and green finishes
+	// wore tan labels — the one place the palette didn't follow its hue.
+	// The lightness steps sit above the panel equivalents because both sit
+	// on lighter surfaces than the faceplate body.
+	t.FootLabel = lipgloss.NewStyle().Background(surface).Foreground(lipgloss.Color(grayHex(r, g, b, 0.60, 0.10)))
 	t.SelFill = lipgloss.NewStyle().Background(selBg)
-	t.SelText = lipgloss.NewStyle().Background(selBg).Bold(true).Foreground(lipgloss.Color("#F0ECDF"))
-	t.SelMeta = lipgloss.NewStyle().Background(selBg).Foreground(lipgloss.Color("#9A9480"))
+	t.SelText = lipgloss.NewStyle().Background(selBg).Bold(true).Foreground(lipgloss.Color(grayHex(r, g, b, 0.95, 0.05)))
+	t.SelMeta = lipgloss.NewStyle().Background(selBg).Foreground(lipgloss.Color(grayHex(r, g, b, 0.66, 0.10)))
 	t.PanelFill = lipgloss.NewStyle().Background(panel)
 	t.PanelRaised = lipgloss.NewStyle().Background(raised)
 	t.PanelBorder = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(
@@ -235,9 +252,10 @@ func NewTheme(accentHex string, ascii bool) Theme {
 	t.AccentDim = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(
 		int(float64(r)*0.55), int(float64(g)*0.55), int(float64(b)*0.55))))
 	// The wave ramp: one hue, many temperatures. Low bars smolder at a
-	// visible ember (~35%), full bars hit the accent, peaks push toward
-	// pale gold. The base must be visible: below ~30% most terminals
-	// render the color as black.
+	// visible ember, full bars hit the accent, peaks push toward pale gold.
+	// The floor is a luminance target, not a fraction of the accent — most
+	// of the meter lives down there, so it has to be legible in every hue.
+	t.cacheRampFloor()
 	for i := 0; i < 8; i++ {
 		f := float64(i) / 7.0
 		rr, gg, bb := t.rampColor(f)
@@ -253,23 +271,39 @@ func NewAustereTheme(ascii bool) Theme {
 	return newAustereThemeScaled(ascii, 1.0)
 }
 
-// newAustereThemeScaled is NewAustereTheme with every hardcoded luminance
-// multiplied by lum. Daypart temperature for a monochrome theme can only be
-// a lightness shift; hue and warmth have no meaning without hue.
+// newAustereThemeScaled is NewAustereTheme with its luminance multiplied by
+// lum. Daypart temperature for a monochrome theme can only be a lightness
+// shift; hue and warmth have no meaning without hue.
+//
+// Surfaces and text scale at different rates on purpose. Multiplying both by
+// the same factor looks like it should preserve contrast and doesn't: these
+// backgrounds are dark enough to sit in sRGB's linear toe while the text
+// sits up in the gamma curve, so an even 0.82 at night cost the microlabels
+// a fifth of their contrast and dropped them under AA. The hue finishes
+// dodge this because they re-derive their grays from a fixed lightness; the
+// monochrome one has to be told. Text easing down more slowly than the
+// surface is also just how a real backlit panel behaves.
 func newAustereThemeScaled(ascii bool, lum float64) Theme {
-	g := func(hex string) lipgloss.Color {
+	scale := func(hex string, k float64) lipgloss.Color {
 		r, gg, b := hexRGB(hex)
-		return lipgloss.Color(rgbHex(int(float64(r)*lum), int(float64(gg)*lum), int(float64(b)*lum)))
+		return lipgloss.Color(rgbHex(int(float64(r)*k), int(float64(gg)*k), int(float64(b)*k)))
 	}
+	g := func(hex string) lipgloss.Color { return scale(hex, lum) }
+	textLum := 0.5 + 0.5*lum
+	gt := func(hex string) lipgloss.Color { return scale(hex, textLum) }
+
 	t := NewTheme("#D8D8D8", ascii)
 	t.Name = ThemeAustere
-	t.AccentHex = string(g("#D8D8D8"))
-	t.Accent = lipgloss.NewStyle().Foreground(g("#D8D8D8"))
-	t.AccentDim = lipgloss.NewStyle().Foreground(g("#858585"))
-	t.Bright = lipgloss.NewStyle().Foreground(g("#EEEEEE"))
-	t.Mid = lipgloss.NewStyle().Foreground(g("#A0A0A0"))
-	t.Dim = lipgloss.NewStyle().Foreground(g("#626262"))
-	t.Invert = lipgloss.NewStyle().Foreground(g("#080808")).Background(g("#E8E8E8"))
+	t.AccentHex = string(gt("#D8D8D8"))
+	t.Accent = lipgloss.NewStyle().Foreground(gt("#D8D8D8"))
+	t.AccentDim = lipgloss.NewStyle().Foreground(gt("#858585"))
+	t.Bright = lipgloss.NewStyle().Foreground(gt("#EFEFEF"))
+	t.Mid = lipgloss.NewStyle().Foreground(gt("#B2B2B2"))
+	// #626262 measured 3.2 against the austere panel, the worst of any
+	// finish. Monochrome has no hue to hide behind, so the microlabels have
+	// to earn their legibility from luminance alone.
+	t.Dim = lipgloss.NewStyle().Foreground(gt("#8C8C8C"))
+	t.Invert = lipgloss.NewStyle().Foreground(g("#080808")).Background(gt("#E8E8E8"))
 
 	panel := g("#0B0B0B")
 	raised := g("#181818")
@@ -277,23 +311,28 @@ func newAustereThemeScaled(ascii bool, lum float64) Theme {
 	selected := g("#292929")
 	t.PanelFill = lipgloss.NewStyle().Background(panel)
 	t.PanelRaised = lipgloss.NewStyle().Background(raised)
-	t.PanelBorder = lipgloss.NewStyle().Foreground(g("#686868"))
+	t.PanelBorder = lipgloss.NewStyle().Foreground(gt("#686868"))
 	t.FootFill = lipgloss.NewStyle().Background(footer)
-	t.FootKey = lipgloss.NewStyle().Background(footer).Bold(true).Foreground(g("#E4E4E4"))
-	t.FootLabel = lipgloss.NewStyle().Background(footer).Foreground(g("#808080"))
+	t.FootKey = lipgloss.NewStyle().Background(footer).Bold(true).Foreground(gt("#E4E4E4"))
+	t.FootLabel = lipgloss.NewStyle().Background(footer).Foreground(gt("#909090"))
 	t.SelFill = lipgloss.NewStyle().Background(selected)
-	t.SelText = lipgloss.NewStyle().Background(selected).Bold(true).Foreground(g("#F2F2F2"))
-	t.SelMeta = lipgloss.NewStyle().Background(selected).Foreground(g("#A0A0A0"))
-	t.Love = lipgloss.NewStyle().Foreground(g("#F4F4F4"))
+	t.SelText = lipgloss.NewStyle().Background(selected).Bold(true).Foreground(gt("#F2F2F2"))
+	t.SelMeta = lipgloss.NewStyle().Background(selected).Foreground(gt("#AEAEAE"))
+	t.Love = lipgloss.NewStyle().Foreground(gt("#F4F4F4"))
 	t.LoveFill = lipgloss.NewStyle().Background(selected)
 
+	t.cacheRampFloor() // AccentHex was reassigned above; the floor must follow
 	t.breatheSteps = t.breatheSteps[:0]
 	for i := 0; i < 24; i++ {
 		v := int(float64(92+int(float64(i)/23.0*124)) * lum)
 		t.breatheSteps = append(t.breatheSteps, lipgloss.Color(rgbHex(v, v, v)))
 	}
+	// The monochrome ramp floor was 72, which measured 2.2 against the
+	// austere panel — under the 3:1 that any meaningful graphical element
+	// needs, and the meter spends most of its time on that step. 98 is the
+	// gray that clears it.
 	for i := 0; i < len(t.Ramp); i++ {
-		v := int(float64(72+int(float64(i)/float64(len(t.Ramp)-1)*166)) * lum)
+		v := int(float64(98+int(float64(i)/float64(len(t.Ramp)-1)*140)) * textLum)
 		t.Ramp[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(v, v, v)))
 	}
 	return t
@@ -423,28 +462,144 @@ func rgbHex(r, g, b int) string {
 	return fmt.Sprintf("#%02X%02X%02X", cl(r), cl(g), cl(b))
 }
 
-// grayHex builds a neutral gray of the given lightness (0..1 over 0-255),
-// warmed by pulling a fraction of each channel toward the accent. That
-// fraction is what stops the grays reading as olive dirt: the gray family
-// shares the accent's temperature instead of fighting it.
+// --- perceptual luminance ---
+//
+// Screen colors are not equally bright at equal channel values: green
+// carries ~71% of perceived luminance, red ~21%, blue ~7%. Scaling RGB
+// uniformly therefore produces wildly different legibility depending on the
+// accent's hue, which is why a crimson finish used to read three shades
+// darker than an amber one at the same nominal step. Everything below works
+// in relative luminance so one rule holds across every finish.
+
+// srgbToLinear undoes the sRGB transfer function for one channel.
+func srgbToLinear(v int) float64 {
+	s := float64(v) / 255
+	if s <= 0.04045 {
+		return s / 12.92
+	}
+	return math.Pow((s+0.055)/1.055, 2.4)
+}
+
+// relLuminance is the WCAG relative luminance of an RGB triple, 0..1.
+func relLuminance(r, g, b int) float64 {
+	return 0.2126*srgbToLinear(r) + 0.7152*srgbToLinear(g) + 0.0722*srgbToLinear(b)
+}
+
+// contrastRatio is the WCAG contrast between two RGB triples, 1..21.
+func contrastRatio(r1, g1, b1, r2, g2, b2 int) float64 {
+	a, b := relLuminance(r1, g1, b1), relLuminance(r2, g2, b2)
+	if a < b {
+		a, b = b, a
+	}
+	return (a + 0.05) / (b + 0.05)
+}
+
+// liftToLuminance brightens a color along its own hue until it reaches the
+// target relative luminance. Scaling is tried first so the hue survives
+// intact; only when a fully saturated version still falls short (deep reds
+// and blues simply cannot carry much luminance) does it blend toward white.
+// A color already at or above the target is returned untouched — this only
+// ever raises a floor, never dims anything.
+func liftToLuminance(r, g, b int, target float64) (int, int, int) {
+	if target <= 0 || relLuminance(r, g, b) >= target {
+		return r, g, b
+	}
+	// Phase one: scale up to the point where the first channel saturates.
+	peak := maxI(maxI(r, g), b)
+	if peak > 0 {
+		maxScale := 255 / float64(peak)
+		lo, hi := 1.0, maxScale
+		for i := 0; i < 24; i++ {
+			mid := (lo + hi) / 2
+			if relLuminance(int(float64(r)*mid), int(float64(g)*mid), int(float64(b)*mid)) < target {
+				lo = mid
+			} else {
+				hi = mid
+			}
+		}
+		sr, sg, sb := int(float64(r)*hi), int(float64(g)*hi), int(float64(b)*hi)
+		if relLuminance(sr, sg, sb) >= target {
+			return sr, sg, sb
+		}
+		r, g, b = sr, sg, sb
+	}
+	// Phase two: the hue is maxed out and still too dark. Wash toward white.
+	lo, hi := 0.0, 1.0
+	mix := func(k float64) (int, int, int) {
+		return int(float64(r) + (255-float64(r))*k),
+			int(float64(g) + (255-float64(g))*k),
+			int(float64(b) + (255-float64(b))*k)
+	}
+	for i := 0; i < 24; i++ {
+		mid := (lo + hi) / 2
+		if relLuminance(mix(mid)) < target {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return mix(hi)
+}
+
+// grayHex builds a gray of the given lightness (0..1 over 0-255), warmed by
+// pulling a fraction of each channel toward the accent. That fraction is
+// what stops the grays reading as olive dirt: the gray family shares the
+// accent's temperature instead of fighting it.
+//
+// The warmed result is then renormalized back to the neutral gray's
+// luminance. Without that step, warming toward a dark accent quietly *dims*
+// the gray — pulling 14% toward crimson drops the green channel hardest,
+// and green is most of what the eye reads as brightness. Renormalizing is
+// what makes one lightness number mean the same legibility in all eight
+// finishes.
 func grayHex(ar, ag, ab int, lightness, warmth float64) string {
 	v := lightness * 255
-	return rgbHex(
-		int(v*(1-warmth)+float64(ar)*warmth),
-		int(v*(1-warmth)+float64(ag)*warmth),
-		int(v*(1-warmth)+float64(ab)*warmth),
-	)
+	r := int(v*(1-warmth) + float64(ar)*warmth)
+	g := int(v*(1-warmth) + float64(ag)*warmth)
+	b := int(v*(1-warmth) + float64(ab)*warmth)
+	nv := int(v)
+	return rgbHex(liftToLuminance(r, g, b, relLuminance(nv, nv, nv)))
+}
+
+// rampFloorLuminance is the relative luminance the bottom of the wave ramp
+// must reach. WCAG asks 3:1 for graphical objects that carry meaning, and
+// against these near-black panels (luminance ~0.005) that lands here.
+//
+// It matters more than it sounds: most of the meter sits near the bottom of
+// the ramp most of the time, so the low step is not a garnish, it's the
+// majority of what the eye actually sees. At 35% of accent it measured 1.3
+// on the crimson finish — invisible.
+const rampFloorLuminance = 0.12
+
+// cacheRampFloor computes the ramp's bottom color: the accent cooled to an
+// ember, then lifted along its own hue until it clears rampFloorLuminance.
+// Interpolating up from a precomputed floor (rather than lifting each step
+// independently) is what keeps the ramp monotonic — per-step lifting made
+// the crimson finish brighten, dip, then brighten again.
+func (t *Theme) cacheRampFloor() {
+	r, g, b := hexRGB(t.AccentHex)
+	t.rampFloor = [3]int{}
+	t.rampFloor[0], t.rampFloor[1], t.rampFloor[2] = liftToLuminance(
+		int(float64(r)*0.35), int(float64(g)*0.35), int(float64(b)*0.35), rampFloorLuminance)
 }
 
 // rampColor is the accent at position f (0..1) along the ramp. 0 is a
 // visible ember (never near-black), 0.6 the accent. Above 0.6 the top pushes
 // toward pale gold, or — when AccentHex2 is set — blends all the way into
 // the second hue. Used by the wave's per-level gradient and the dial.
+//
+// An accent darker than the ember floor (a user-configured near-black) makes
+// the lower half flat rather than inverted; the gradient then comes entirely
+// from the pale push above 0.6. Flat and visible beats a ramp that runs
+// backwards.
 func (t Theme) rampColor(f float64) (int, int, int) {
 	r, g, b := hexRGB(t.AccentHex)
 	if f <= 0.6 {
-		k := 0.35 + (f/0.6)*0.65
-		return int(float64(r) * k), int(float64(g) * k), int(float64(b) * k)
+		fr, fg, fb := t.rampFloor[0], t.rampFloor[1], t.rampFloor[2]
+		k := f / 0.6
+		return int(float64(fr) + (float64(r)-float64(fr))*k),
+			int(float64(fg) + (float64(g)-float64(fg))*k),
+			int(float64(fb) + (float64(b)-float64(fb))*k)
 	}
 	if t.AccentHex2 != "" {
 		r2, g2, b2 := hexRGB(t.AccentHex2)

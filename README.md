@@ -42,9 +42,11 @@ collapse back to a compact stacked layout.
 ## Run
 
 ```
-screech.exe            # prebuilt, in dist/
-go run ./cmd/screech   # or from source (Go 1.23+)
+go run ./cmd/screech   # from source (Go 1.25+)
 ```
+
+Prebuilt binaries for Windows, macOS, and Linux are attached to each tagged
+release. Building writes to `dist/`, which is not tracked.
 
 First launch starts playing immediately from the built-in stations while the
 radio-browser.info directory fills in behind it. If the directory is
@@ -146,8 +148,9 @@ always explains the pick: `plays 3 artists you love`, `tag: ambient`,
 Ad avoidance is mostly curation. Commercial simulcast networks get downranked
 before you ever hear them; college, community, and listener-supported streams
 get upranked. Title-based break detection exists but stays humble: it flags
-suspicion, discounts your skips, and never auto-hops unless you enable that
-in the config.
+suspicion and discounts your skips, and it never hops on its own. The
+`auto_hop_ads` config key is a placeholder for that behavior and currently
+does nothing.
 
 The wave under the station name moves with the stream's real loudness,
 measured by mpv and reported over the same pipe that carries titles. Texture

@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,8 +18,31 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      # The tune path runs across goroutines (background sync, fire-and-forget
+      # directory reports, the player's event pump), so the race detector is
+      # the only thing that will catch a regression there before a user does.
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
+
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Build archives
         shell: bash
         run: |
@@ -34,7 +57,7 @@ jobs:
             output="tmp/${name}/screech"
             if [ "$os" = windows ]; then output="${output}.exe"; fi
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
-              -trimpath -ldflags "-s -w -X main.version=${version}" \
+              -trimpath -ldflags "-s -w -X screech/internal/version.Current=${version}" \
               -o "$output" ./cmd/screech
             cp README.md "tmp/${name}/"
             if [ "$os" = windows ]; then

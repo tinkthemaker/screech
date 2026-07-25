@@ -2,6 +2,7 @@ package player
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -36,11 +37,20 @@ func drain(m *MPV) []Event {
 	}
 }
 
+// wantUnit is the expected 0..1 mapping for a dB reading. Written in terms
+// of the documented range so this test checks the plumbing — which astats
+// property lands in which field — rather than restating the constants.
+func wantUnit(db float64) float64 {
+	return (db - meterFloorDB) / (meterCeilDB - meterFloorDB)
+}
+
+func closeTo(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+
 func TestStereoLevelEventCombinesChannelsAndPeak(t *testing.T) {
 	m := newTestMPV()
 	feed(t, m, "af-metadata/lavfi.astats.Overall.RMS_level", "-24")
 	feed(t, m, "af-metadata/lavfi.astats.1.RMS_level", "-12")
-	feed(t, m, "af-metadata/lavfi.astats.2.RMS_level", "-36")
+	feed(t, m, "af-metadata/lavfi.astats.2.RMS_level", "-30")
 	feed(t, m, "af-metadata/lavfi.astats.Overall.Peak_level", "-6")
 
 	events := drain(m)
@@ -51,17 +61,20 @@ func TestStereoLevelEventCombinesChannelsAndPeak(t *testing.T) {
 	if ev.Type != EventLevel {
 		t.Fatalf("event type = %v, want EventLevel", ev.Type)
 	}
-	if ev.Level != 0.5 {
-		t.Errorf("overall level = %v, want 0.5 (1 + -24/48)", ev.Level)
+	if !closeTo(ev.Level, wantUnit(-24)) {
+		t.Errorf("overall level = %v, want %v", ev.Level, wantUnit(-24))
 	}
-	if ev.LevelL != 0.75 {
-		t.Errorf("left level = %v, want 0.75", ev.LevelL)
+	if !closeTo(ev.LevelL, wantUnit(-12)) {
+		t.Errorf("left level = %v, want %v", ev.LevelL, wantUnit(-12))
 	}
-	if ev.LevelR != 0.25 {
-		t.Errorf("right level = %v, want 0.25", ev.LevelR)
+	if !closeTo(ev.LevelR, wantUnit(-30)) {
+		t.Errorf("right level = %v, want %v", ev.LevelR, wantUnit(-30))
 	}
-	if ev.Peak != 0.875 {
-		t.Errorf("peak = %v, want 0.875 (1 + -6/48)", ev.Peak)
+	if !closeTo(ev.Peak, wantUnit(-6)) {
+		t.Errorf("peak = %v, want %v", ev.Peak, wantUnit(-6))
+	}
+	if !ev.Stereo {
+		t.Error("both channels reported, so the event should be flagged stereo")
 	}
 }
 
@@ -74,8 +87,32 @@ func TestMonoStreamMirrorsChannelIntoBoth(t *testing.T) {
 		t.Fatalf("want 1 event, got %d", len(events))
 	}
 	ev := events[0]
-	if ev.LevelL != 0.5 || ev.LevelR != 0.5 {
+	if !closeTo(ev.LevelL, wantUnit(-24)) || !closeTo(ev.LevelR, wantUnit(-24)) {
 		t.Errorf("mono should mirror channel 1 into both: L=%v R=%v", ev.LevelL, ev.LevelR)
+	}
+	if ev.Stereo {
+		t.Error("only channel 1 reported, so the event must not claim stereo")
+	}
+}
+
+// The meter's whole job is showing the difference between a quiet stream
+// and a loud one. Mapping the full -48..0 spent most of the scale on levels
+// no broadcast stream ever sends, so everything real bunched up in a narrow
+// band and the needle barely moved.
+func TestMeterRangeCoversRealBroadcastLevels(t *testing.T) {
+	quiet, typical, loud := dbToUnit(-30), dbToUnit(-14), dbToUnit(-6)
+	t.Logf("quiet(-30dB)=%.2f  typical(-14dB)=%.2f  loud(-6dB)=%.2f", quiet, typical, loud)
+	if typical-quiet < 0.30 {
+		t.Errorf("a quiet stream and a typical one differ by only %.2f of the scale", typical-quiet)
+	}
+	if loud-typical < 0.15 {
+		t.Errorf("a typical stream and a loud one differ by only %.2f of the scale", loud-typical)
+	}
+	if typical < 0.5 || typical > 0.85 {
+		t.Errorf("typical broadcast loudness sits at %.2f; it should land in the meter's upper middle", typical)
+	}
+	if dbToUnit(-60) != 0 || dbToUnit(0) != 1 {
+		t.Error("the curve must still clamp outside its range")
 	}
 }
 

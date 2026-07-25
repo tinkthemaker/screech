@@ -25,6 +25,7 @@ import (
 // uniform bounce.
 type Wave struct {
 	bars         int
+	rows         int       // stacked cells per channel; 0 means 1
 	p1, p2, p3   []float64 // per-bar phase offsets
 	dispL, dispR []float64 // displayed per-channel bar heights 0..1
 	peakL, peakR []float64 // per-channel peak-hold markers
@@ -48,7 +49,7 @@ type Wave struct {
 }
 
 func NewWave(bars int) *Wave {
-	w := &Wave{levelAt: -999}
+	w := &Wave{levelAt: -999, rows: 1}
 	w.Resize(bars)
 	return w
 }
@@ -110,6 +111,34 @@ func (w *Wave) Resize(bars int) {
 
 func (w *Wave) SetEnergy(e float64) { w.targetEnergy = clampF(e, 0, 1) }
 
+// maxWaveRows caps how tall one channel's bay can get. Three cells is
+// twelve levels, which is enough to read loudness as a shape rather than a
+// binary. Four was tried and rejected: a meter should keep headroom above
+// typical program level, and at sixteen levels that headroom is a whole
+// terminal row sitting permanently empty inside a drawn frame, which reads
+// as a rendering fault rather than as restraint.
+const maxWaveRows = 3
+
+// Rows is the number of stacked cells per channel; Render always returns
+// twice this many strings.
+func (w *Wave) Rows() int {
+	if w.rows < 1 {
+		return 1
+	}
+	return w.rows
+}
+
+// SetRows sets the per-channel height of the bay, clamped to [1, maxWaveRows].
+func (w *Wave) SetRows(n int) {
+	if n < 1 {
+		n = 1
+	}
+	if n > maxWaveRows {
+		n = maxWaveRows
+	}
+	w.rows = n
+}
+
 // ResetPalette forces lazily cached peak colors to follow a newly selected
 // theme on the next render.
 func (w *Wave) ResetPalette() { w.peakReady = false }
@@ -131,11 +160,19 @@ func (w *Wave) Step(t, dt float64) {
 		w.dispR[i] += (tgtR - w.dispR[i]) * clampF(dt*9, 0, 1)
 		w.peakL[i] = peakHold(w.peakL[i], w.dispL[i], dt)
 		w.peakR[i] = peakHold(w.peakR[i], w.dispR[i], dt)
-		if live && w.peakL[i] < w.peakDisp {
-			w.peakL[i] = w.peakDisp // true peak-hold: jump to the real peak
-		}
-		if live && w.peakR[i] < w.peakDisp {
-			w.peakR[i] = w.peakDisp
+		// True peak-hold: every bar's marker floats at least at the real
+		// digital peak. Tilted by bassWeight so the ceiling follows the
+		// bay's own shape — stamped flat it drew one continuous dotted rule
+		// across the meter, which at this resolution reads as a divider
+		// rather than as a reading.
+		if live {
+			ceiling := w.peakDisp * w.bassWeight(i)
+			if w.peakL[i] < ceiling {
+				w.peakL[i] = ceiling
+			}
+			if w.peakR[i] < ceiling {
+				w.peakR[i] = ceiling
+			}
 		}
 	}
 }
@@ -167,11 +204,20 @@ func (w *Wave) targets(i int, t float64, live bool) (float64, float64) {
 	ampL := 0.55 + 0.45*math.Sin(0.23*t+x*0.11) // fallback breathing
 	ampR := ampL
 	if live {
-		ampL = math.Min(0.15+0.95*w.lvlDispL, 1)
-		ampR = math.Min(0.15+0.95*w.lvlDispR, 1)
+		// Program level maps most of the bay: typical broadcast loudness
+		// should sit around two-thirds up with the top reserved for peaks,
+		// rather than the old 0.15+0.95x which left everything real
+		// clustered in the bottom third.
+		ampL = math.Min(0.20+1.0*w.lvlDispL, 1)
+		ampR = math.Min(0.20+1.0*w.lvlDispR, 1)
 	}
+	// Texture varies the bar *around* the measured level rather than
+	// scaling it down. The old (0.5 + 0.5*s) averaged 0.5, so every bar was
+	// halved before bassWeight halved it again and the meter never left the
+	// bottom of its range whatever the music did. This keeps the same shape
+	// with a floor under it: mean ~0.72 of level, peaks at full.
 	bw := w.bassWeight(i)
-	tex := w.energy * (0.5 + 0.5*s) * bw
+	tex := w.energy * (0.72 + 0.28*s) * bw
 	return clampF(tex*ampL, 0, 1), clampF(tex*ampR, 0, 1)
 }
 
@@ -179,13 +225,18 @@ func (w *Wave) targets(i int, t float64, live bool) (float64, float64) {
 // of the wave responds harder to the loudness signal. One amplitude number
 // can't be a spectrum, but it can lean on the perceptual shortcut that
 // bass energy dominates loudness: bars at the left swing ~1.0, falling to
-// ~0.55 at the right.
+// ~0.74 at the right.
+//
+// The old 0.55 right-hand floor was too steep for the resolution available:
+// combined with the texture it capped the rightmost bars at two of four
+// levels, so the right third of the bay sat dead no matter how loud the
+// music was. The tilt should be a lean, not a cliff.
 func (w *Wave) bassWeight(i int) float64 {
 	if w.bars <= 1 {
 		return 1.0
 	}
 	x := float64(i) / float64(w.bars-1) // 0 left -> 1 right
-	return 1.0 - 0.45*x
+	return 1.0 - 0.26*x
 }
 
 // Braille: each cell is 2 columns x 4 rows of dots (U+2800 base). Bit
@@ -203,18 +254,31 @@ const brailleBlank = 0x2800
 // brailleBaselineBits is the flatline: only the bottom dot row lit.
 const brailleBaselineBits = 0x40 + 0x80
 
-// brailleBar maps a 0..1 height onto the cell's 8 dots (without the U+2800
+// brailleLevelsPerCell is the vertical resolution of one braille cell. The
+// cell holds 8 dots but they are 4 rows of 2 columns, so a single row of
+// braille can express exactly four heights, not eight — stacking cells is
+// the only way to get more.
+const brailleLevelsPerCell = 4
+
+// brailleBar maps a 0..1 height onto one cell's 8 dots (without the U+2800
 // base), filled bottom-up, both columns per level, the odd half-dot going
 // to the left column. Returns the dot bits and how many vertical levels
 // they occupy (0..4).
 func brailleBar(h float64) (rune, int) {
-	n := int(math.Round(clampF(h, 0, 1) * 8))
+	return brailleCell(clampF(h, 0, 1) * brailleLevelsPerCell)
+}
+
+// brailleCell fills one cell with `levels` of height (0..4, fractional).
+// The fractional remainder lights the left column of the next level up,
+// which reads as a half step.
+func brailleCell(levels float64) (rune, int) {
+	n := int(math.Round(clampF(levels, 0, brailleLevelsPerCell) * 2))
 	full, half := n/2, n%2
 	var bits rune
 	for lvl := 1; lvl <= full; lvl++ {
 		bits += brailleDots[lvl][0] + brailleDots[lvl][1]
 	}
-	if half == 1 {
+	if half == 1 && full+1 < len(brailleDots) {
 		bits += brailleDots[full+1][0]
 	}
 	return bits, full + half
@@ -242,21 +306,20 @@ func braillePeakDots(lvl int) rune {
 // exactly.
 //
 // Rows are returned top-first; the caller prints them on consecutive lines.
+// The total is always Rows()*2 — the left channel's block, then the right's.
 func (w *Wave) Render(t Theme) []string {
 	if w.bars < 1 {
-		return []string{"", ""}
+		return make([]string, w.Rows()*2)
 	}
 	w.ensurePeakSteps(t)
 	if t.G.Blocks[0] == '_' { // 7-bit palette: braille would be mojibake
-		return []string{
-			w.renderBlockRow(t, w.dispL, w.peakL),
-			w.renderBlockRow(t, w.dispR, w.peakR),
-		}
+		return append(
+			w.renderBlockChannel(t, w.dispL, w.peakL),
+			w.renderBlockChannel(t, w.dispR, w.peakR)...)
 	}
-	return []string{
-		w.renderBrailleRow(t, w.dispL, w.peakL),
-		w.renderBrailleRow(t, w.dispR, w.peakR),
-	}
+	return append(
+		w.renderBrailleChannel(t, w.dispL, w.peakL),
+		w.renderBrailleChannel(t, w.dispR, w.peakR)...)
 }
 
 func (w *Wave) ensurePeakSteps(t Theme) {
@@ -290,52 +353,89 @@ func peakStep(frac float64) int {
 	}
 }
 
-func (w *Wave) renderBrailleRow(t Theme, disp, peak []float64) string {
-	var b strings.Builder
+// renderBrailleChannel draws one channel across w.rows stacked cells,
+// top-first. Total vertical resolution is rows*4 levels, so a two-row bay
+// reads eight steps and a four-row bay sixteen — the difference between a
+// meter that flickers between "flat" and "one dot" and one you can actually
+// watch. Each cell is colored by the ramp position of the bar's overall
+// height, so a tall bar is hot along its whole length rather than only at
+// the top.
+func (w *Wave) renderBrailleChannel(t Theme, disp, peak []float64) []string {
+	rows := w.Rows()
+	total := float64(rows * brailleLevelsPerCell)
+	out := make([]string, rows)
+	builders := make([]strings.Builder, rows)
 	for i := 0; i < w.bars; i++ {
-		n := int(math.Round(clampF(disp[i], 0, 1) * 8))
-		var bits rune
-		var style lipgloss.Style
-		levels := 1 // the baseline occupies the bottom level
-		if n == 0 {
-			bits, style = brailleBaselineBits, t.Dim
-		} else {
-			bits, levels = brailleBar(disp[i])
-			style = t.RampFor(n-1, 7)
+		h := clampF(disp[i], 0, 1)
+		filled := h * total
+		p := clampF(peak[i], 0, 1)
+		peakLvl := p * total
+		barStyle := t.Dim
+		if filled > 0.01 {
+			barStyle = t.RampFor(int(h*7.999), 7)
 		}
-		if p := clampF(peak[i], 0, 1); p > 0.02 {
-			if pLvl := int(math.Ceil(p * 4)); pLvl > levels {
-				// True peak-hold: overlay the marker's dot pair above the
-				// bar instead of erasing it — the silhouette stays and the
-				// cell takes the cooling-ramp color while it floats there.
-				bits += braillePeakDots(pLvl)
-				style = w.peakSteps[peakStep(p-disp[i])]
+		for row := 0; row < rows; row++ {
+			// row 0 is the top cell; cellFloor is how many levels sit below it.
+			cellFloor := float64((rows - 1 - row) * brailleLevelsPerCell)
+			bits, levels := brailleCell(filled - cellFloor)
+			style := barStyle
+			if levels == 0 {
+				style = t.Dim
+				if row == rows-1 {
+					bits = brailleBaselineBits // the flatline lives on the floor
+					levels = 1
+				}
 			}
+			// True peak-hold: overlay the marker above the bar rather than
+			// erasing it, so the silhouette survives and the cell takes the
+			// cooling-ramp color while the tick floats there.
+			if p > 0.02 {
+				if pl := int(math.Ceil(peakLvl - cellFloor)); pl >= 1 && pl <= brailleLevelsPerCell && pl > levels {
+					bits += braillePeakDots(pl)
+					style = w.peakSteps[peakStep(p-h)]
+				}
+			}
+			builders[row].WriteString(style.Render(string(brailleBlank + bits)))
 		}
-		b.WriteString(style.Render(string(brailleBlank + bits)))
 	}
-	return b.String()
+	for row := range builders {
+		out[row] = builders[row].String()
+	}
+	return out
 }
 
-// renderBlockRow is the 7-bit fallback: one eighth-block cell per bar with
-// the peak marker taking the cell over while it floats above the bar.
-func (w *Wave) renderBlockRow(t Theme, disp, peak []float64) string {
+// renderBlockChannel is the 7-bit fallback: eighth-block cells, stacked the
+// same way, with the peak marker taking a cell over while it floats above
+// the bar.
+func (w *Wave) renderBlockChannel(t Theme, disp, peak []float64) []string {
 	blocks := t.G.Blocks
 	maxLvl := len(blocks) - 1
-	var b strings.Builder
+	rows := w.Rows()
+	total := float64(rows * maxLvl)
+	out := make([]string, rows)
+	builders := make([]strings.Builder, rows)
 	for i := 0; i < w.bars; i++ {
-		lvl := int(math.Round(clampF(disp[i], 0, 1) * float64(maxLvl)))
-		pLvl := int(math.Round(clampF(peak[i], 0, 1) * float64(maxLvl)))
-		switch {
-		case pLvl > lvl && pLvl > 0:
-			b.WriteString(w.peakSteps[peakStep(peak[i]-disp[i])].Render(string(blocks[pLvl])))
-		case lvl > 0:
-			b.WriteString(t.RampFor(lvl, maxLvl).Render(string(blocks[lvl])))
-		default:
-			b.WriteString(t.Dim.Render(string(blocks[0])))
+		h := clampF(disp[i], 0, 1)
+		filled := h * total
+		peakFilled := clampF(peak[i], 0, 1) * total
+		for row := 0; row < rows; row++ {
+			cellFloor := float64((rows - 1 - row) * maxLvl)
+			lvl := int(math.Round(clampF(filled-cellFloor, 0, float64(maxLvl))))
+			pLvl := int(math.Round(clampF(peakFilled-cellFloor, 0, float64(maxLvl))))
+			switch {
+			case pLvl > lvl && pLvl > 0:
+				builders[row].WriteString(w.peakSteps[peakStep(peak[i]-h)].Render(string(blocks[pLvl])))
+			case lvl > 0:
+				builders[row].WriteString(t.RampFor(int(h*float64(maxLvl)), maxLvl).Render(string(blocks[lvl])))
+			default:
+				builders[row].WriteString(t.Dim.Render(string(blocks[0])))
+			}
 		}
 	}
-	return b.String()
+	for row := range builders {
+		out[row] = builders[row].String()
+	}
+	return out
 }
 
 func clampF(x, lo, hi float64) float64 {
