@@ -28,6 +28,10 @@ jobs:
           fi
       - name: Vet
         run: go vet ./...
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          staticcheck ./...
       - name: Test
         run: go test -race ./...
       # Windows and macOS are the platforms screech actually ships to, and
@@ -39,3 +43,23 @@ jobs:
           for target in windows/amd64 darwin/arm64 linux/arm64; do
             GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 go build ./...
           done
+
+  # Cross-compiling proves the per-OS files build; only running them proves
+  # the named pipe, %AppData% config resolution, and console-hold behave.
+  # The suite takes seconds, so both shipping platforms run it for real.
+  # The race detector needs cgo, which is not guaranteed on the Windows
+  # runner; the ubuntu job above owns that gate.
+  test-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test ./...

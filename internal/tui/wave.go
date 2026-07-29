@@ -260,14 +260,6 @@ const brailleBaselineBits = 0x40 + 0x80
 // the only way to get more.
 const brailleLevelsPerCell = 4
 
-// brailleBar maps a 0..1 height onto one cell's 8 dots (without the U+2800
-// base), filled bottom-up, both columns per level, the odd half-dot going
-// to the left column. Returns the dot bits and how many vertical levels
-// they occupy (0..4).
-func brailleBar(h float64) (rune, int) {
-	return brailleCell(clampF(h, 0, 1) * brailleLevelsPerCell)
-}
-
 // brailleCell fills one cell with `levels` of height (0..4, fractional).
 // The fractional remainder lights the left column of the next level up,
 // which reads as a half step.
