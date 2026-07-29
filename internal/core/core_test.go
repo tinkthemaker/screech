@@ -167,12 +167,9 @@ func TestTuneDeadAppliesNoSkipPenalty(t *testing.T) {
 		t.Fatal("tune-dead must still move to a different station")
 	}
 
-	rows := c.bandit[p.Station.UUID]
-	if rows != nil {
-		for dp, r := range rows {
-			if r.Beta > 1.0 {
-				t.Fatalf("tune-dead applied a skip beta on %s: %+v", dp, r)
-			}
+	for dp, r := range c.bandit[p.Station.UUID] {
+		if r.Beta > 1.0 {
+			t.Fatalf("tune-dead applied a skip beta on %s: %+v", dp, r)
 		}
 	}
 	var skipFast int
@@ -189,7 +186,7 @@ func TestTuneDeadAppliesNoSkipPenalty(t *testing.T) {
 	if _, err := c.Tune(now.Add(time.Minute + 10*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	rows = c.bandit[next.Station.UUID]
+	rows := c.bandit[next.Station.UUID]
 	if rows == nil || rows[DaypartAll].Beta <= 1.0 {
 		t.Fatalf("user fast skip should bump beta: %+v", rows)
 	}
