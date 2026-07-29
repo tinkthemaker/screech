@@ -115,7 +115,15 @@ func NewNamedTheme(name, accentHex string, ascii bool) Theme {
 	case ThemeViolet:
 		return NewHueTheme(ThemeViolet, "#A98BFF", ascii)
 	case ThemeSlayer:
-		return NewHueTheme(ThemeSlayer, "#DC143C", ascii)
+		// Blood red into heated iron. The accent was #DC143C, which is CSS
+		// "crimson" and sits at hue 348 — twelve degrees into the magenta
+		// side of red, so every gray, surface and ramp step derived from it
+		// came out rose. A second stop is unusual for a single-hue finish,
+		// but red is the one hue where the normal ramp top fails: pushing
+		// any red toward pale desaturates it through salmon, and the wave
+		// is six rows of that. Running it to ember instead reads as worked
+		// metal, which is the point of the finish.
+		return NewGradientTheme(ThemeSlayer, "#C21A16", "#FF6A18", ascii)
 	case ThemeCharm:
 		return NewGradientTheme(ThemeCharm, "#FF7EB6", "#B48CFF", ascii)
 	case ThemeLagoon:
@@ -140,6 +148,7 @@ type Glyphs struct {
 	Tick     string // preset mark on the band line
 	Knob     string // volume slider thumb
 	Pointer  string // active row in browsable lists
+	Seam     string // gutter between the two faceplate bays
 	FrameTL  string
 	FrameTR  string
 	FrameBL  string
@@ -161,6 +170,7 @@ var unicodeGlyphs = Glyphs{
 	Tick:     "┴",
 	Knob:     "●",
 	Pointer:  "›",
+	Seam:     "│",
 	FrameTL:  "╭",
 	FrameTR:  "╮",
 	FrameBL:  "╰",
@@ -182,6 +192,7 @@ var asciiGlyphs = Glyphs{
 	Tick:     "+",
 	Knob:     "O",
 	Pointer:  ">",
+	Seam:     ":",
 	FrameTL:  "+",
 	FrameTR:  "+",
 	FrameBL:  "+",
@@ -251,17 +262,29 @@ func NewTheme(accentHex string, ascii bool) Theme {
 	// warmth without shouting.
 	t.AccentDim = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(
 		int(float64(r)*0.55), int(float64(g)*0.55), int(float64(b)*0.55))))
-	// The wave ramp: one hue, many temperatures. Low bars smolder at a
-	// visible ember, full bars hit the accent, peaks push toward pale gold.
+	t.buildRamp()
+	return t
+}
+
+// buildRamp bakes the eight ramp styles the wave, bevel and density strip
+// render with. One hue, many temperatures: low bars smolder at a visible
+// ember, full bars hit the accent, peaks push toward pale — or, when a
+// second stop is set, all the way into the second hue.
+//
+// Any constructor that changes AccentHex or AccentHex2 must call this
+// again. Not doing so is how the two-hue finishes ended up with a
+// single-hue meter: NewTheme baked the array, and the second stop was
+// assigned afterwards, so only the callers that recompute rampColor live
+// (the header rule, the dial bleed) ever saw the gradient.
+func (t *Theme) buildRamp() {
 	// The floor is a luminance target, not a fraction of the accent — most
 	// of the meter lives down there, so it has to be legible in every hue.
 	t.cacheRampFloor()
-	for i := 0; i < 8; i++ {
-		f := float64(i) / 7.0
+	for i := 0; i < len(t.Ramp); i++ {
+		f := float64(i) / float64(len(t.Ramp)-1)
 		rr, gg, bb := t.rampColor(f)
 		t.Ramp[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(rr, gg, bb)))
 	}
-	return t
 }
 
 // NewAustereTheme removes hue entirely. It keeps the same material hierarchy
@@ -355,16 +378,107 @@ func daypartTemper(dp string) (bright, warm float64) {
 	}
 }
 
+// maxDaypartHueDrift caps how far the daypart temper may rotate a hue.
+//
+// Warmth is applied as a channel push — red up, blue down — which rotates
+// the hue as a side effect. For most accents that side effect is under two
+// degrees and reads as warmth. For an accent already at the red end of the
+// wheel there is nowhere to rotate but into magenta: the midday "cool" push
+// moved the crimson finish to hue 339, which is pink. A finish should not
+// change which colour it is depending on the time of day.
+const maxDaypartHueDrift = 6.0
+
 // temperHex applies a daypart to one hex color: bright scales every channel,
 // warm pushes red up and blue down (green barely moves, like a physical
-// dimmer on a warm filament).
+// dimmer on a warm filament), and the resulting hue is held within
+// maxDaypartHueDrift of where it started.
 func temperHex(hex string, bright, warm float64) string {
 	r, g, b := hexRGB(hex)
-	return rgbHex(
-		int(float64(r)*bright+warm*36),
-		int(float64(g)*bright+warm*8),
-		int(float64(b)*bright-warm*36),
-	)
+	tr := int(float64(r)*bright + warm*36)
+	tg := int(float64(g)*bright + warm*8)
+	tb := int(float64(b)*bright - warm*36)
+	tr, tg, tb = clampByte(tr), clampByte(tg), clampByte(tb)
+
+	h0, s0, _ := rgbToHSL(r, g, b)
+	h1, s1, l1 := rgbToHSL(tr, tg, tb)
+	if s0 < 0.02 || s1 < 0.02 {
+		return rgbHex(tr, tg, tb) // no hue worth preserving
+	}
+	drift := math.Mod(h1-h0+540, 360) - 180 // signed shortest path
+	if math.Abs(drift) > maxDaypartHueDrift {
+		h1 = math.Mod(h0+math.Copysign(maxDaypartHueDrift, drift)+360, 360)
+		tr, tg, tb = hslToRGB(h1, s1, l1)
+	}
+	return rgbHex(tr, tg, tb)
+}
+
+func clampByte(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
+// rgbToHSL and hslToRGB exist so the daypart temper can reason about hue
+// directly. Channel arithmetic alone cannot tell warmth from rotation.
+func rgbToHSL(r, g, b int) (h, s, l float64) {
+	rf, gf, bf := float64(r)/255, float64(g)/255, float64(b)/255
+	mx := math.Max(rf, math.Max(gf, bf))
+	mn := math.Min(rf, math.Min(gf, bf))
+	l = (mx + mn) / 2
+	d := mx - mn
+	if d == 0 {
+		return 0, 0, l
+	}
+	if l > 0.5 {
+		s = d / (2 - mx - mn)
+	} else {
+		s = d / (mx + mn)
+	}
+	switch mx {
+	case rf:
+		h = math.Mod((gf-bf)/d, 6)
+	case gf:
+		h = (bf-rf)/d + 2
+	default:
+		h = (rf-gf)/d + 4
+	}
+	h *= 60
+	if h < 0 {
+		h += 360
+	}
+	return
+}
+
+func hslToRGB(h, s, l float64) (int, int, int) {
+	if s <= 0 {
+		v := int(math.Round(l * 255))
+		return v, v, v
+	}
+	c := (1 - math.Abs(2*l-1)) * s
+	x := c * (1 - math.Abs(math.Mod(h/60, 2)-1))
+	m := l - c/2
+	var rf, gf, bf float64
+	switch {
+	case h < 60:
+		rf, gf, bf = c, x, 0
+	case h < 120:
+		rf, gf, bf = x, c, 0
+	case h < 180:
+		rf, gf, bf = 0, c, x
+	case h < 240:
+		rf, gf, bf = 0, x, c
+	case h < 300:
+		rf, gf, bf = x, 0, c
+	default:
+		rf, gf, bf = c, 0, x
+	}
+	return int(math.Round((rf + m) * 255)),
+		int(math.Round((gf + m) * 255)),
+		int(math.Round((bf + m) * 255))
 }
 
 // NewDaypartTheme resolves a named theme exactly as NewNamedTheme does, then
@@ -407,6 +521,7 @@ func NewGradientTheme(name, accentHex, accentHex2 string, ascii bool) Theme {
 	t.Name = name
 	if validHex(accentHex2) {
 		t.AccentHex2 = accentHex2
+		t.buildRamp() // the baked ramp predates the second stop
 	}
 	return t
 }
@@ -571,6 +686,39 @@ func grayHex(ar, ag, ab int, lightness, warmth float64) string {
 // on the crimson finish — invisible.
 const rampFloorLuminance = 0.12
 
+// rampLuminanceGain is how much brighter the ramp top sits than the accent,
+// and rampTopLuminance caps it short of white. These are relative
+// luminance, not HSL lightness, because lightness is not what the eye
+// reads: rotating a hue from mint toward blue loses perceived brightness
+// even as lightness rises, since blue carries 7% of luminance and green
+// carries 71%.
+const (
+	rampLuminanceGain = 0.34
+	rampTopLuminance  = 0.62
+	// The rise is guaranteed even for an accent already at the cap, and
+	// bounded short of white so a peak still reads as a color.
+	rampMinLuminanceRise = 0.10
+	rampCeilLuminance    = 0.88
+)
+
+// setLuminance rescales a color to a target relative luminance, preserving
+// its hue and saturation. Used to hold the two-hue ramp monotonic while its
+// hue travels.
+func setLuminance(r, g, b int, target float64) (int, int, int) {
+	h, s, _ := rgbToHSL(r, g, b)
+	lo, hi := 0.0, 1.0
+	for i := 0; i < 24; i++ {
+		mid := (lo + hi) / 2
+		rr, gg, bb := hslToRGB(h, s, mid)
+		if relLuminance(rr, gg, bb) < target {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return hslToRGB(h, s, hi)
+}
+
 // cacheRampFloor computes the ramp's bottom color: the accent cooled to an
 // ember, then lifted along its own hue until it clears rampFloorLuminance.
 // Interpolating up from a precomputed floor (rather than lifting each step
@@ -604,9 +752,22 @@ func (t Theme) rampColor(f float64) (int, int, int) {
 	if t.AccentHex2 != "" {
 		r2, g2, b2 := hexRGB(t.AccentHex2)
 		k := (f - 0.6) / 0.4
-		return int(float64(r) + (float64(r2)-float64(r))*k),
-			int(float64(g) + (float64(g2)-float64(g))*k),
-			int(float64(b) + (float64(b2)-float64(b))*k)
+		br := float64(r) + (float64(r2)-float64(r))*k
+		bg := float64(g) + (float64(g2)-float64(g))*k
+		bb := float64(b) + (float64(b2)-float64(b))*k
+		// Hue and saturation travel to the second stop; brightness keeps
+		// climbing regardless. A straight RGB blend inverts the ramp
+		// whenever the second hue is dimmer than the first — Lagoon's blue
+		// against its mint, Charm's violet against its pink — and an
+		// inverted ramp makes a loud bar look quieter than a middling one.
+		// Height is what the ramp encodes; the second hue is signature.
+		// An accent already at or above the cap (Lagoon's mint sits exactly
+		// on it) still has to climb, or the top three steps flatten and
+		// integer rounding decides their order.
+		l0 := relLuminance(r, g, b)
+		lTop := math.Min(rampCeilLuminance,
+			math.Max(l0+rampMinLuminanceRise, math.Min(rampTopLuminance, l0+rampLuminanceGain)))
+		return setLuminance(int(br), int(bg), int(bb), l0+(lTop-l0)*k)
 	}
 	k := (f - 0.6) / 0.4 * 0.45
 	return int(float64(r) + (255-float64(r))*k),

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -624,7 +626,13 @@ func (m Model) receiverRows(iw, contentH int) []string {
 
 	// The BROADCAST name decrypt-resolves with the lock, like the compact
 	// hero — the station isn't really "there" until the stream is.
-	stationCell := pt.Bright.Bold(true).Render(strings.ToUpper(station))
+	//
+	// It is letterspaced at mid weight rather than bright and bold. The
+	// panel had two heroes: on a receiver the track is the thing playing and
+	// the station is where it comes from, so the station reads as an
+	// engraved source plate and the title is left as the only bright
+	// element on the faceplate.
+	stationCell := pt.Mid.Render(plateText(station, leftW))
 	if m.stDecrypt.Active(m.now) {
 		stationCell = m.stDecrypt.Render(m.now, pt, leftW)
 	}
@@ -646,12 +654,21 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	// scale, the dial and the legend — so laying them out row by row forced
 	// the left bay's content into a clump at the top with a hole under it.
 	// Empty strings mark the gaps padColumn is allowed to stretch.
+	// Figures sit right-aligned on their own label rows, the way a real
+	// instrument panel carries them. Every number screech knew about used to
+	// live up in the header rail, leaving the panel itself numberless.
+	label := func(text, figure string) string {
+		if figure == "" {
+			return pt.Dim.Bold(true).Render(text)
+		}
+		return surfaceLR(pt.Dim.Bold(true).Render(text), pt.Dim.Render(figure), leftW, pt.PanelFill)
+	}
 	left := []string{
-		pt.Dim.Bold(true).Render(primaryLabel),
+		label(primaryLabel, m.playCountFigure()),
 		titleCell,
 		pt.Mid.Render(artist),
 		"", // stretches: pushes the broadcast block down beside the meter
-		pt.Dim.Bold(true).Render("BROADCAST"),
+		label("BROADCAST", fmtTotalTime(m.stTotal)),
 		stationCell,
 		"", // stretches: keeps the block off the status readout
 	}
@@ -663,15 +680,21 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	if tags := stationTags(&m.st, leftW); tags != "" {
 		left = append(left, pt.Dim.Bold(true).Render("GENRE"), pt.Mid.Render(tags), "")
 	}
-	right := []string{pt.Dim.Bold(true).Render(m.signalLabel())}
+	memory := ""
+	if n := len(m.presets); n > 0 {
+		memory = fmt.Sprintf("%d SAVED", n)
+	}
+	right := []string{surfaceLR(pt.Dim.Bold(true).Render(m.signalLabel()),
+		pt.Dim.Render(m.stereoFigure()), rightW, pt.PanelFill)}
 	right = append(right, wave...)
 	right = append(right,
 		pt.Dim.Render(lrRow("LOW", "HIGH", rightW)),
 		"", // stretches: separates the signal bay from the memory dial
-		pt.Dim.Bold(true).Render("STATION MEMORY"),
-		m.bandRowTheme(rightW, m.idle(), pt),
-		pt.Dim.Render(m.presetLegend(rightW)),
+		surfaceLR(pt.Dim.Bold(true).Render("STATION MEMORY"),
+			pt.Dim.Render(memory), rightW, pt.PanelFill),
 	)
+	right = append(right, m.dialRows(rightW, m.idle(), pt)...)
+	right = append(right, pt.Dim.Render(m.presetLegend(rightW)))
 
 	// Stretch the shorter bay's gaps to match the taller one, so the
 	// broadcast block lands beside the meter rather than above or below it.
@@ -707,6 +730,69 @@ func stationTags(st *core.Station, width int) string {
 		tags = tags[:3]
 	}
 	return runewidth.Truncate(strings.Join(tags, ", "), width, "…")
+}
+
+// A dithered bevel under the top rail was tried here and removed. Low
+// contrast is not the same as low visual weight: at 1.34 against the panel
+// it measured subtle, but shade blocks across a contiguous span form one
+// unbroken field of colour, and the eye reads the shape long before it
+// reads the contrast. It looked like a rendering fault at the top of the
+// chassis. The seam between the bays carries the "engineered object" job on
+// its own, without inventing area that means nothing.
+
+// plateText renders a station name as an engraved source plate: uppercase,
+// letterspaced when it fits, plain uppercase when it doesn't. Same rule the
+// compact layout's hero uses, so a name reads the same in both layouts.
+func plateText(name string, width int) string {
+	up := strings.ToUpper(strings.TrimSpace(name))
+	// Same 14-character gate the compact layout's hero uses. Letterspacing
+	// a long directory name is legible in principle and unreadable in
+	// practice — the eye stops grouping it into words.
+	if spaced := letterspace(up); runewidth.StringWidth(up) <= 14 &&
+		runewidth.StringWidth(spaced) <= width {
+		return spaced
+	}
+	return runewidth.Truncate(up, width, "…")
+}
+
+// fmtTotalTime is the cumulative-listen readout: coarse on purpose, since a
+// figure that ticks every second would fight an interface designed to be
+// left alone for hours.
+func fmtTotalTime(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return ""
+	case d < time.Minute:
+		return "<1m"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd %02dh", int(d.Hours())/24, int(d.Hours())%24)
+	}
+}
+
+// playCountFigure reports how often this track has come down any stream.
+// Silent on the first play: "heard 1x" is noise, and a first hearing is the
+// default case rather than a fact worth stating.
+func (m Model) playCountFigure() string {
+	if !m.haveTrack || m.trackPlays < 2 {
+		return ""
+	}
+	return fmt.Sprintf("heard %d%s", m.trackPlays, "×")
+}
+
+// stereoFigure is the signal bay's right-hand readout: which channel layout
+// the backend is actually measuring, stated once rather than implied.
+func (m Model) stereoFigure() string {
+	if m.ph != phPlay {
+		return ""
+	}
+	if m.stereo {
+		return "2 CH"
+	}
+	return "1 CH"
 }
 
 // signalLabel names the signal bay and, with it, the axis the two blocks of
@@ -918,11 +1004,31 @@ func (m Model) frameRule(width int, top bool, label string) string {
 	return border.Render(left + strings.Repeat(m.th.G.FrameH, maxI(0, width-2)) + right)
 }
 
+// seamStyle is the gutter rule between the two bays: the frame metal at
+// roughly half weight, so the seam reads as an internal division rather
+// than competing with the chassis edge.
+func (m Model) seamStyle() lipgloss.Style {
+	s := scaleStyle(m.th.PanelBorder, 0.62*m.settleScale())
+	if bg := m.th.PanelFill.GetBackground(); bg != nil {
+		s = s.Background(bg)
+	}
+	return s
+}
+
 func (m Model) panelColumns(left, right string, leftW, gapW, rightW int) string {
 	fill := m.th.PanelFill
 	border := m.borderStyle()
+	// The gutter was gapW plain spaces, which left the bays reading as two
+	// text columns that happened to be adjacent. A rule down the middle is
+	// what makes the faceplate read as one chassis with two compartments.
+	gutter := fill.Render(strings.Repeat(" ", gapW))
+	if gapW >= 3 {
+		pad := strings.Repeat(" ", (gapW-1)/2)
+		gutter = fill.Render(pad) + m.seamStyle().Render(m.th.G.Seam) +
+			fill.Render(strings.Repeat(" ", gapW-1-len(pad)))
+	}
 	return border.Render(m.th.G.FrameV) + fill.Render(" ") +
-		surfaceCell(left, leftW, fill) + fill.Render(strings.Repeat(" ", gapW)) +
+		surfaceCell(left, leftW, fill) + gutter +
 		surfaceCell(right, rightW, fill) + fill.Render(" ") +
 		border.Render(m.th.G.FrameV)
 }
@@ -1009,6 +1115,179 @@ func (m Model) trackRow(iw int, idle bool) string {
 // needle glows like a VU meter, brightening at the playing position.
 func (m Model) bandRow(iw int, idle bool) string {
 	return m.bandRowTheme(iw, idle, m.th)
+}
+
+// dialRows is the station-memory dial: a listening-density strip, the band
+// with its needle and preset ticks, and the slot digits under the ticks
+// they belong to.
+//
+// It used to be one row of band glyphs. That was defensible while the
+// signal meter beside it was also one row, but the meter is six rows now
+// and a hairline underneath it read as a placeholder. The digits are not
+// decoration either: preset ticks were anonymous, so the dial could tell
+// you a saved station lived at that position but never which one.
+//
+// The strip replaced a row of evenly spaced graduations. Graduations imply
+// a quantity along the axis, and there isn't one — dial position is a hash
+// of the station UUID, so a mark at 30% measured nothing while sitting
+// directly above ticks that measured something real. Listening time is a
+// genuine distribution over that same axis, so the row now carries it.
+func (m Model) dialRows(width int, idle bool, th Theme) []string {
+	if width < 1 {
+		return []string{"", ""}
+	}
+	rows := make([]string, 0, 3)
+	// No history yet means no distribution. Dropping the row is better than
+	// drawing an empty one: the strip appears when it has something to say.
+	if strip := m.dialDensityRow(width, th); strip != "" {
+		rows = append(rows, strip)
+	}
+	return append(rows,
+		m.bandRowTheme(width, idle, th),
+		m.dialDigits(width, th),
+	)
+}
+
+// buildDialDensity buckets cumulative listen time onto the dial axis and
+// normalizes it to its own peak. The result is a shape, not a measurement:
+// it answers "where do I actually live on this band" rather than "how many
+// hours", which is what the readouts elsewhere are for.
+func buildDialDensity(totals map[string]time.Duration, width int) []float64 {
+	if width < 1 || len(totals) == 0 {
+		return nil
+	}
+	raw := make([]float64, width)
+	for uuid, d := range totals {
+		if d <= 0 {
+			continue
+		}
+		col := int(math.Round(stationDialPos(uuid) * float64(width-1)))
+		if col >= 0 && col < width {
+			raw[col] += d.Seconds()
+		}
+	}
+	// A light blur either side. Without it a handful of stations render as
+	// isolated single-cell spikes, which reads as noise rather than as a
+	// distribution.
+	out := make([]float64, width)
+	peak := 0.0
+	for i := range raw {
+		out[i] = raw[i]
+		if i > 0 {
+			out[i] += 0.5 * raw[i-1]
+		}
+		if i < width-1 {
+			out[i] += 0.5 * raw[i+1]
+		}
+		if out[i] > peak {
+			peak = out[i]
+		}
+	}
+	if peak <= 0 {
+		return nil
+	}
+	for i := range out {
+		out[i] /= peak
+	}
+	return out
+}
+
+// densityTopBlock caps the strip's tallest bar below a full cell. A run of
+// full blocks is a solid slab, which is what made the strip read as a
+// rendering fault rather than as a reading.
+const densityTopBlock = 5
+
+// dialDensityRow renders the strip as a one-row histogram: bar height
+// carries the value, in a single quiet ember.
+//
+// Shade blocks were tried first, on the theory that ░▒▓ is literally a
+// density scale. They failed for two reasons that only show up on a real
+// screen. Fill density has no baseline, so adjacent heavy cells merge into
+// one solid rectangle instead of reading as separate values; and the top of
+// the scale measured 5.08 contrast against the panel, near the band line's
+// own 5.28, so the busiest region of a background strip outweighed the
+// instrument it sits under. Height against a common baseline reads as data
+// at any density, and one colour keeps the strip subordinate.
+func (m Model) dialDensityRow(width int, th Theme) string {
+	d := m.density
+	if len(d) != width {
+		// Width changed since the last rebuild (a resize mid-frame). Skip
+		// rather than render a strip that doesn't match the band below it.
+		return ""
+	}
+	blocks := th.G.Blocks
+	top := minI(densityTopBlock, len(blocks)-1)
+	style := th.RampFor(1, 7)
+	var b strings.Builder
+	for _, v := range d {
+		if v < 0.06 {
+			b.WriteString(th.Dim.Render(" "))
+			continue
+		}
+		lvl := int(math.Round(v * float64(top)))
+		if lvl < 1 {
+			lvl = 1
+		}
+		b.WriteString(style.Render(string(blocks[lvl])))
+	}
+	return b.String()
+}
+
+// dialDigits labels each preset tick with its slot number. The station
+// currently playing takes the accent; the rest sit at ember, the same
+// relationship the ticks themselves have on the band.
+func (m Model) dialDigits(width int, th Theme) string {
+	cells := make([]string, width)
+	blank := th.Dim.Render(" ")
+	for i := range cells {
+		cells[i] = blank
+	}
+	current := m.currentSlot()
+	slots := make([]int, 0, len(m.presets))
+	for slot := range m.presets {
+		slots = append(slots, slot)
+	}
+	sort.Ints(slots)
+
+	// Dial positions are hashed, so two presets can land on neighbouring
+	// columns and their digits then read as one number — a 1 beside a 7 is
+	// "17", not two presets. Each digit therefore claims a cell with at
+	// least one blank either side, searching outward for room. Low slots go
+	// first so the one nearest its true position is the one you'd press.
+	taken := make([]bool, width)
+	free := func(c int) bool {
+		if c < 0 || c >= width {
+			return false
+		}
+		for d := -1; d <= 1; d++ {
+			if n := c + d; n >= 0 && n < width && taken[n] {
+				return false
+			}
+		}
+		return true
+	}
+	for _, slot := range slots {
+		want := int(math.Round(stationDialPos(m.presets[slot]) * float64(width-1)))
+		col := -1
+		for off := 0; off < width && col < 0; off++ {
+			switch {
+			case free(want - off):
+				col = want - off
+			case free(want + off):
+				col = want + off
+			}
+		}
+		if col < 0 {
+			continue // no room left on the scale; the tick still shows
+		}
+		taken[col] = true
+		style := th.AccentDim
+		if slot == current {
+			style = th.Accent.Bold(true)
+		}
+		cells[col] = style.Render(strconv.Itoa(slot))
+	}
+	return strings.Join(cells, "")
 }
 
 func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {

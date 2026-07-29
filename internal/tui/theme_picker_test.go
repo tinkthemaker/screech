@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -37,7 +38,6 @@ func TestHueThemesResolveAndStayChromatic(t *testing.T) {
 		ThemeVerdant: "#45DC78",
 		ThemeAzure:   "#4FA8F5",
 		ThemeViolet:  "#A98BFF",
-		ThemeSlayer:  "#DC143C",
 	}
 	for id, hex := range accents {
 		th := NewNamedTheme(id, "#FFB000", false)
@@ -58,6 +58,10 @@ func TestGradientThemesResolveAndBlend(t *testing.T) {
 	stops := map[string][2]string{
 		ThemeCharm:  {"#FF7EB6", "#B48CFF"},
 		ThemeLagoon: {"#3FE8B0", "#4FA8F5"},
+		// Slayer carries a second stop for a different reason than the other
+		// two: red is the one hue whose pale push desaturates through salmon,
+		// so its ramp runs to ember instead.
+		ThemeSlayer: {"#C21A16", "#FF6A18"},
 	}
 	for id, want := range stops {
 		th := NewNamedTheme(id, "#FFB000", false)
@@ -65,11 +69,23 @@ func TestGradientThemesResolveAndBlend(t *testing.T) {
 			t.Errorf("theme %q resolved to name=%q accents=%q/%q, want %q/%q",
 				id, th.Name, th.AccentHex, th.AccentHex2, want[0], want[1])
 		}
-		// The ramp top lands exactly on the second hue.
+		// The ramp top lands on the second hue. Not on its exact hex: the
+		// top is held to a brightness the accent can't already have, so a
+		// second stop dimmer than the first is lifted rather than allowed
+		// to invert the ramp. Hue and saturation are what carry the
+		// signature, so those are what get checked.
 		r, g, b := th.rampColor(1.0)
-		wr, wg, wb := hexRGB(want[1])
-		if r != wr || g != wg || b != wb {
-			t.Errorf("theme %q ramp top = #%02X%02X%02X, want %q", id, r, g, b, want[1])
+		gotH, gotS, _ := rgbToHSL(r, g, b)
+		wantH, wantS, _ := rgbToHSL(hexRGB(want[1]))
+		if d := math.Abs(math.Mod(gotH-wantH+540, 360) - 180); d > 4 {
+			t.Errorf("theme %q ramp top hue %.1f, want %.1f (second stop %q)", id, gotH, wantH, want[1])
+		}
+		if math.Abs(gotS-wantS) > 0.25 {
+			t.Errorf("theme %q ramp top saturation %.2f, want near %.2f", id, gotS, wantS)
+		}
+		// And it must genuinely be brighter than the accent it climbs from.
+		if relLuminance(r, g, b) <= relLuminance(hexRGB(want[0])) {
+			t.Errorf("theme %q ramp top is no brighter than its accent", id)
 		}
 		// The ember side stays home: it runs from the lifted floor up to the
 		// first accent and never leans toward the second hue.

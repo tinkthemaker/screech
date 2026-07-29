@@ -106,6 +106,20 @@ type Model struct {
 	suspect    bool
 	stereo     bool // the backend is metering two distinct channels
 
+	// Panel readouts. Both are fetched off the UI thread on change and
+	// cached here; a faceplate that blocked its own render on a SQL count
+	// would be a poor trade for a number in the corner.
+	stTotal    time.Duration // cumulative listen time on the current station
+	trackKey   string        // artist key the play count belongs to
+	trackTitle string        // title the play count belongs to
+	trackPlays int
+
+	// listenTotals feeds the dial's density strip; density is it bucketed
+	// to the current bay width. Rebuilt on resize and whenever the totals
+	// change, never in the render path, which has no way to cache.
+	listenTotals map[string]time.Duration
+	density      []float64
+
 	presets      map[int]string
 	prompt       bool
 	buf          []rune
@@ -154,6 +168,18 @@ type (
 		ok  bool
 	}
 	volumeMsg struct{ err error }
+	// Panel readouts arrive asynchronously and are matched against what's
+	// playing now: a slow query returning after the user has already
+	// skipped must not stamp the previous station's figures on the new one.
+	stationStatsMsg struct {
+		uuid  string
+		total time.Duration
+	}
+	trackStatsMsg struct {
+		key, title string
+		plays      int
+	}
+	dialDensityMsg struct{ totals map[string]time.Duration }
 )
 
 func New(c *core.Core, pl player.Player, opts Options) Model {
@@ -196,7 +222,7 @@ func Run(c *core.Core, pl player.Player, opts Options) error {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.tick(), m.listen(), m.volumeCmd()}
+	cmds := []tea.Cmd{m.tick(), m.listen(), m.volumeCmd(), m.dialDensityCmd()}
 	cmds = append(cmds, m.resumeCmd())
 	if m.syncing || m.core.SyncStale(m.syncLimit) {
 		// Weekly directory refresh, in the background. Playback never waits.
@@ -278,6 +304,44 @@ func (m Model) seedCmd(q string) tea.Cmd {
 	}
 }
 
+func (m Model) stationStatsCmd(uuid string) tea.Cmd {
+	c := m.core
+	return func() tea.Msg {
+		total, err := c.StationTotal(uuid)
+		if err != nil {
+			return nil
+		}
+		return stationStatsMsg{uuid: uuid, total: total}
+	}
+}
+
+func (m Model) dialDensityCmd() tea.Cmd {
+	c := m.core
+	return func() tea.Msg {
+		totals, err := c.ListenTotals()
+		if err != nil {
+			return nil
+		}
+		return dialDensityMsg{totals: totals}
+	}
+}
+
+// rebuildDensity re-buckets the listen totals for the current bay width.
+func (m *Model) rebuildDensity() {
+	m.density = buildDialDensity(m.listenTotals, m.waveRenderWidth())
+}
+
+func (m Model) trackStatsCmd(key, title string) tea.Cmd {
+	c := m.core
+	return func() tea.Msg {
+		plays, err := c.TrackPlayCount(key, title)
+		if err != nil {
+			return nil
+		}
+		return trackStatsMsg{key: key, title: title, plays: plays}
+	}
+}
+
 func (m Model) playCmd() tea.Cmd {
 	pl, c := m.pl, m.core
 	st := m.st
@@ -312,7 +376,12 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	m.playStart = time.Time{}
 	m.dialTgt = stationDialPos(m.st.UUID)
 	m.wave.SetEnergy(0.05)
-	return m, m.playCmd()
+	// Readouts belong to the outgoing station; clear them so the new one
+	// never briefly wears the old one's numbers.
+	m.stTotal = 0
+	m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
+	// The outgoing listen has just been banked, so the distribution moved.
+	return m, tea.Batch(m.playCmd(), m.stationStatsCmd(m.st.UUID), m.dialDensityCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -322,6 +391,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.w, m.h = msg.Width, msg.Height
 		m.wave.Resize(m.waveRenderWidth())
 		m.wave.SetRows(m.waveRenderRows())
+		m.rebuildDensity()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -418,6 +488,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.note = "volume control failed " + m.th.G.Dot + " " + msg.err.Error()
 		}
+		return m, nil
+
+	case stationStatsMsg:
+		if m.haveSt && msg.uuid == m.st.UUID {
+			m.stTotal = msg.total
+		}
+		return m, nil
+
+	case trackStatsMsg:
+		if msg.key == m.trackKey && msg.title == m.trackTitle {
+			m.trackPlays = msg.plays
+		}
+		return m, nil
+
+	case dialDensityMsg:
+		m.listenTotals = msg.totals
+		m.rebuildDensity()
 		return m, nil
 
 	case evMsg:
@@ -1186,6 +1273,8 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 	if ev.Type != player.EventLevel {
 		m.lastAct = m.now
 	}
+	// extra carries any work a branch wants done alongside the next listen.
+	var extra tea.Cmd
 	switch ev.Type {
 	case player.EventTitle:
 		tr, ok, suspect, lovedNow := m.core.NoteTitle(ev.Title, time.Now())
@@ -1198,6 +1287,10 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			if text != m.track {
 				m.track = text
 				m.trackAt = m.now
+				// A new title invalidates the play count. Zero it now and
+				// let the query land, rather than showing the last track's.
+				m.trackKey, m.trackTitle, m.trackPlays = tr.ArtistKey, tr.Title, 0
+				extra = m.trackStatsCmd(tr.ArtistKey, tr.Title)
 			}
 			m.haveTrack = true
 			m.lovedTrack = lovedNow
@@ -1205,6 +1298,7 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			m.haveTrack = false
 			m.track = ""
 			m.lovedTrack = false
+			m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
 		}
 
 	case player.EventPlaying:
@@ -1244,6 +1338,9 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 		m.fatal = "mpv exited " + m.th.G.Dot + " restart screech"
 		m.wave.SetEnergy(0.05) // the meter fizzles to its ember baseline
 		return m, nil
+	}
+	if extra != nil {
+		return m, tea.Batch(m.listen(), extra)
 	}
 	return m, m.listen()
 }

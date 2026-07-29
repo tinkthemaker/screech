@@ -47,7 +47,9 @@ Shipped in v0.2, still within the austerity budget:
 
 - **presets** (`f` save/unsave, digits 1-9 recall): deterministic *recall*, the one
   job the bandit can't do. Deliberately zero effect on the taste model — love
-  teaches, presets remember. Saved stations render as ticks on the band line.
+  teaches, presets remember. Saved stations render as ticks on the band
+  line, each carrying its slot digit — an unlabelled tick can tell you a
+  saved station lives at that position but never which key returns to it.
   Nine slots stay nine: presets are muscle memory, not a list. Everything past
   that lives in the library's saved-stations view (below).
 - **seeding** (`/`): type a genre or artist. Genres resolve strongest: a tag
@@ -239,6 +241,59 @@ artist, broadcast identity, and the station's genre tags; its right bay
 contains the live signal and the station-memory dial. A raised full-width
 readout explains the current pick.
 
+**The station-memory dial is an instrument, not a hairline.** Three rows: a
+listening-density strip, the band carrying the needle and the preset ticks,
+and the slot digits beneath the ticks they belong to. One row of band glyphs
+was defensible while the signal meter was also one row; beside a six-row
+meter it read as a placeholder.
+
+The strip replaced a row of evenly spaced graduations, and the reason is
+worth keeping. Graduations imply a quantity along the axis and there isn't
+one: dial position is `fnv32(uuid)`, so a mark at 30% measures nothing while
+sitting directly above ticks that measure something real — decoration shaped
+like data, competing with data. Cumulative listen time *is* a genuine
+distribution over that same axis, so the row carries that instead,
+normalized to its own peak. It answers "where do I actually live on this
+band", which no other part of the interface does. With no history there is
+no distribution and the row is dropped rather than drawn empty.
+
+It draws as a one-row histogram in eighth blocks, one quiet ember, height
+against a common baseline. Shade blocks `░▒▓` were the obvious material and
+were wrong: fill density has no baseline, so adjacent heavy cells merge into
+a solid rectangle instead of reading as separate values, and the top of that
+scale measured 5.08 contrast against the panel where the band line it sits
+under measures 5.28. A background strip outweighing its own instrument reads
+as a rendering fault. Bars are capped below a full cell for the same reason.
+
+**Panel figures sit right-aligned on their label rows**, instrument-panel
+convention: track play count, cumulative station time, saved-station count,
+channel layout. Every number screech knew used to live in the header rail,
+leaving the panel itself numberless. Both counts are fetched off the UI
+thread and matched against what's playing when they land, so a slow query
+returning after a skip cannot stamp the previous station's figures on the
+new one. A first hearing states nothing — "heard 1x" is noise, not a fact.
+A live dB readout was considered and rejected: it would be the most
+instrument-like figure available and it would twitch twenty times a second
+in an interface whose main state is meant to be left alone for hours.
+
+**The chassis has two materials.** A seam runs the full height between the
+bays at ~62% of the frame metal, so the faceplate reads as one body with two
+compartments rather than two adjacent text columns.
+
+A dithered bevel under the top rail was tried alongside it and removed. Low
+contrast is not the same as low visual weight: at 1.34 against the panel it
+measured subtle, but shade blocks across a contiguous span form one unbroken
+field of colour and the eye reads the shape long before it reads the
+contrast. It looked like corruption at the top of the chassis. The seam
+carries the engineered-object job on its own, without inventing area that
+means nothing — which is the general lesson. Decoration that encodes nothing
+still has to earn its area.
+
+**One hero.** The track title is the only Bright+Bold element on the panel.
+The station is letterspaced at mid weight as an engraved source plate,
+subject to the same 14-character gate the compact hero uses — letterspacing
+a long directory name is legible in principle and unreadable in practice.
+
 **The faceplate is height-aware.** It was a fixed ten rows at every terminal
 size, which on a tall window left a business card floating in three quarters
 of an empty screen — while the library view beside it filled the same
@@ -282,15 +337,40 @@ the faintest accent surface, readable from across the room. The status
 line's label carries a category glyph and weight: accent for seed/love,
 mid for recall, dim for wildcard. Still one hue — many temperatures.
 
+**Hue is identity, and the clock must not change it.** The daypart temper
+applies warmth as a channel push — red up, blue down — which rotates the hue
+as a side effect. For most accents that side effect is under two degrees and
+reads as warmth. For one already at the red end of the wheel there is
+nowhere to rotate but into magenta: midday moved the crimson finish to hue
+339, which is pink. The temper is now capped at 6° of drift.
+
+**Red is the hue the ramp rules were not written for.** "Push the top toward
+pale" works for amber (gold), green and blue, which stay recognisable when
+lightened. Any red desaturates through salmon — even a true blood red tops
+out at a dusty rose — and the wave is six rows of ramp top. Slayer therefore
+carries a second stop and runs blood into ember, like worked iron. Its
+accent is a true red at hue ~1 rather than CSS crimson at 348.
+
+Two-hue ramps hold their brightness climb in *relative luminance*, not HSL
+lightness. Lightness is not what the eye reads: rotating from mint toward
+blue loses perceived brightness even as lightness rises, because blue
+carries 7% of luminance where green carries 71%. Left alone, Lagoon's and
+Charm's ramps ran darker at the top, which would make a loud bar look
+quieter than a middling one. Height is what the ramp encodes; the second hue
+is signature, and signature does not get to invert the reading.
+
 **Theme picker (v0.5).** `t` opens a focused finish selector. Movement previews
 the whole interface immediately, Enter persists the selection in local state,
 and Escape restores the prior palette. Receiver is the default warm phosphor
 finish. Austere removes hue entirely and expresses the same hierarchy through
 black, white, and luminance alone. Verdant, Azure, Violet, and Slayer are fixed
 receiver finishes in other hues; every gray, surface, and ramp derives from
-the accent, so the faceplate reads the same in any color. Charm and Lagoon
-carry a two-hue signature: the ramp top blends into a second hue instead of
-pale gold, and the header rule runs the full gradient. Theme changes never
+the accent, so the faceplate reads the same in any color. Charm, Lagoon and
+Slayer carry a two-hue signature: the ramp top blends into a second hue
+instead of pale gold, and the header rule runs the full gradient. Note that
+the baked ramp array has to be rebuilt after a second stop is assigned —
+the wave reads that array, not the live color function, so for a while the
+two-hue finishes had a single-hue meter and nobody noticed. Theme changes never
 affect listening state. The chosen finish tempers with the daypart — brighter
 and cooler midday, dimmer and warmer at night; austere takes the lightness
 shift only, and picker previews render under the current daypart.

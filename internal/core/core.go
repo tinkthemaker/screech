@@ -222,6 +222,24 @@ func (c *Core) RecentlyHeard(n int) ([]RecentTrack, error) {
 	return c.store.RecentlyHeard(n)
 }
 
+// StationTotal is cumulative listen time for one station, for the
+// faceplate's readout. Read-only and cheap enough to run off the UI thread
+// on each tune.
+func (c *Core) StationTotal(uuid string) (time.Duration, error) {
+	return c.store.StationTotal(uuid)
+}
+
+// ListenTotals is cumulative listen time per station, for the dial's
+// density strip.
+func (c *Core) ListenTotals() (map[string]time.Duration, error) {
+	return c.store.ListenTotals()
+}
+
+// TrackPlayCount is how many times a track has been logged from any station.
+func (c *Core) TrackPlayCount(artistKey, title string) (int, error) {
+	return c.store.TrackPlayCount(artistKey, title)
+}
+
 // LovedTracks returns the user's deduplicated track library, newest first.
 func (c *Core) LovedTracks(n int) ([]LovedTrack, error) {
 	return c.store.LovedTracks(n)

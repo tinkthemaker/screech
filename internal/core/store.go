@@ -655,6 +655,53 @@ func (s *Store) RemoveStation(uuid string) (presetCleared bool, lovesRemoved int
 	return presetCleared, int(n), e
 }
 
+// StationTotal is how long this station has been listened to across every
+// session. The faceplate shows it as a readout, which is the sort of figure
+// an instrument panel should carry and screech was keeping entirely to
+// itself. Open listens contribute nothing rather than counting to now.
+func (s *Store) StationTotal(uuid string) (time.Duration, error) {
+	var secs int64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(MAX(0,
+		COALESCE(ended_at, started_at) - started_at)), 0)
+		FROM listens WHERE station_uuid = ?`, uuid).Scan(&secs)
+	return time.Duration(secs) * time.Second, err
+}
+
+// ListenTotals is cumulative listen time per station, for the dial's
+// density strip. Unlike TopListened this isn't ranked or capped: the strip
+// wants the whole distribution, including the long tail of stations you
+// only ever heard once.
+func (s *Store) ListenTotals() (map[string]time.Duration, error) {
+	rows, err := s.db.Query(`SELECT station_uuid,
+		SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)) AS total
+		FROM listens GROUP BY station_uuid HAVING total > 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Duration{}
+	for rows.Next() {
+		var uuid string
+		var secs int64
+		if err := rows.Scan(&uuid, &secs); err != nil {
+			return nil, err
+		}
+		out[uuid] = time.Duration(secs) * time.Second
+	}
+	return out, rows.Err()
+}
+
+// TrackPlayCount is how many times this track has come down any stream.
+// Matching mirrors the loved-track queries so "heard 3x" and the library's
+// heard count never disagree.
+func (s *Store) TrackPlayCount(artistKey, title string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks_heard
+		WHERE artist_key = ? AND lower(trim(title)) = lower(trim(?))`,
+		artistKey, title).Scan(&n)
+	return n, err
+}
+
 // TopListened ranks stations by cumulative listen time. Open listens (no end
 // yet) count as zero; stations pruned from the cache keep their logged name
 // via the join fallback.
