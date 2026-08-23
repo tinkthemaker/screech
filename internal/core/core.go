@@ -123,7 +123,7 @@ func (c *Core) NeedsSync() bool {
 // failure the existing cache (at minimum the seeds) keeps working; the error
 // is returned for the status line, not as a stop condition.
 func (c *Core) Sync(ctx context.Context, limit int) (added int, pruned int, err error) {
-	sts, err := c.rb.FetchTop(ctx, limit)
+	sts, complete, err := c.rb.FetchTop(ctx, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -131,11 +131,15 @@ func (c *Core) Sync(ctx context.Context, limit int) (added int, pruned int, err 
 	if err := c.store.UpsertStations(sts, fetchedAt); err != nil {
 		return 0, 0, err
 	}
-	// Anything older than this sync that the fresh slice didn't re-vouch for
-	// and that has no history is a corpse candidate.
-	n, err := c.store.PruneStale(fetchedAt, c.ResumeUUID())
-	if err != nil {
-		return len(sts), 0, err
+	// A partial directory slice is valuable, but pruning against it would
+	// throw away stations the directory still vouches for that simply
+	// weren't in the incomplete response. Only prune after a full sync.
+	var n int64
+	if complete {
+		n, err = c.store.PruneStale(fetchedAt, c.ResumeUUID())
+		if err != nil {
+			return len(sts), 0, err
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

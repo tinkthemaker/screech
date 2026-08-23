@@ -132,12 +132,14 @@ type rbStation struct {
 // FetchTop pulls the top `limit` working stations by votes, paging through
 // the directory 5000 at a time (gentler on their volunteer-run servers than
 // one giant request). Votes shift between pages, so results are deduped;
-// a partial slice beats no slice if a later page fails.
-func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, error) {
+// a partial slice beats no slice if a later page fails. The returned bool is
+// true only when every requested page was fetched without a network break.
+func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, bool, error) {
 	const page = 5000
 	base := rb.pickServer(ctx)
 	seen := map[string]bool{}
 	var out []Station
+	complete := true
 	for offset := 0; offset < limit; offset += page {
 		n := page
 		if limit-offset < page {
@@ -153,9 +155,12 @@ func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, err
 		if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
 			rb.dropServer() // let the next attempt pick a different server
 			if len(out) > 0 {
-				return out, nil
+				// We got some fresh data; keep it but mark as partial so the
+				// cache is not pruned against an incomplete directory slice.
+				complete = false
+				return out, complete, nil
 			}
-			return nil, err
+			return nil, false, err
 		}
 		for _, r := range raw {
 			if r.UUID == "" || seen[r.UUID] || (r.URL == "" && r.URLResolved == "") {
@@ -175,7 +180,7 @@ func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, err
 			break // directory exhausted before the limit
 		}
 	}
-	return out, nil
+	return out, complete, nil
 }
 
 // SearchByName finds working stations whose name matches (niche internet
