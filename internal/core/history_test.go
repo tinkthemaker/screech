@@ -60,7 +60,7 @@ func TestRecentlyHeardIncludesLoveAndNewestFirst(t *testing.T) {
 	c.StartListen("seed:wfmu", now)
 	c.NoteTitle("Artist One - First", now)
 	c.NoteTitle("Artist Two - Second", now.Add(time.Minute))
-	c.Love(now.Add(time.Minute))
+	_, _, _, _ = c.Love(now.Add(time.Minute))
 
 	got, err := c.RecentlyHeard(10)
 	if err != nil {
@@ -82,9 +82,9 @@ func TestLovedTracksDeduplicatesAndCanForget(t *testing.T) {
 	now := time.Now()
 	c.StartListen("seed:wfmu", now)
 	c.NoteTitle("Artist One - First", now)
-	c.Love(now.Add(time.Minute))
+	_, _, _, _ = c.Love(now.Add(time.Minute))
 	c.NoteTitle("Artist Two - Second", now.Add(3*time.Minute))
-	c.Love(now.Add(4 * time.Minute))
+	_, _, _, _ = c.Love(now.Add(4 * time.Minute))
 
 	got, err := c.LovedTracks(100)
 	if err != nil {
@@ -114,10 +114,10 @@ func TestLoveToggleDedupesAndRestacks(t *testing.T) {
 	now := time.Now()
 	c.StartListen("seed:wfmu", now)
 	c.NoteTitle("Artist One - First", now)
-	if _, _, lovedNow := c.Love(now.Add(time.Minute)); !lovedNow {
+	if _, _, lovedNow, _ := c.Love(now.Add(time.Minute)); !lovedNow {
 		t.Fatal("first love should apply")
 	}
-	if _, _, lovedNow := c.Love(now.Add(2 * time.Minute)); lovedNow {
+	if _, _, lovedNow, _ := c.Love(now.Add(2 * time.Minute)); lovedNow {
 		t.Fatal("second press on the same track should unlove")
 	}
 	if got, _ := c.LovedTracks(100); len(got) != 0 {
@@ -126,7 +126,7 @@ func TestLoveToggleDedupesAndRestacks(t *testing.T) {
 
 	// Hear it again, love it again: a fresh row.
 	c.NoteTitle("Artist One - First", now.Add(3*time.Minute))
-	if _, _, lovedNow := c.Love(now.Add(4 * time.Minute)); !lovedNow {
+	if _, _, lovedNow, _ := c.Love(now.Add(4 * time.Minute)); !lovedNow {
 		t.Fatal("re-love after re-hearing should apply")
 	}
 	got, _ := c.LovedTracks(100)

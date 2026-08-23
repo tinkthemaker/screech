@@ -322,27 +322,31 @@ func (c *Core) Presets() map[int]string {
 // TogglePreset saves the current station to the lowest free slot, or unsaves
 // it if already saved. Presets are pure recall: they never touch the taste
 // model. full=true means all nine slots are taken.
-func (c *Core) TogglePreset(now time.Time) (slot int, saved bool, full bool) {
+func (c *Core) TogglePreset(now time.Time) (slot int, saved bool, full bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.currentUUID == "" {
-		return 0, false, false
+		return 0, false, false, nil
 	}
 	for s, u := range c.presets {
 		if u == c.currentUUID {
 			delete(c.presets, s)
-			_ = c.store.DeletePreset(s)
-			return s, false, false
+			if err := c.store.DeletePreset(s); err != nil {
+				return 0, false, false, err
+			}
+			return s, false, false, nil
 		}
 	}
 	for s := 1; s <= 9; s++ {
 		if _, used := c.presets[s]; !used {
 			c.presets[s] = c.currentUUID
-			_ = c.store.SetPreset(s, c.currentUUID, now)
-			return s, true, false
+			if err := c.store.SetPreset(s, c.currentUUID, now); err != nil {
+				return 0, false, false, err
+			}
+			return s, true, false, nil
 		}
 	}
-	return 0, false, true
+	return 0, false, true, nil
 }
 
 // TuneTo ends the current listen (dwell time judges it, as always) and hands
@@ -423,15 +427,15 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 	daypart := DaypartFor(c.listenStart)
 	switch {
 	case skipFast && duringAd:
-		c.applyRewardLocked(c.currentUUID, daypart, 0, skipBetaDuringAd, now)
+		_ = c.applyRewardLocked(c.currentUUID, daypart, 0, skipBetaDuringAd, now)
 	case skipFast:
-		c.applyRewardLocked(c.currentUUID, daypart, 0, skipBeta, now)
+		_ = c.applyRewardLocked(c.currentUUID, daypart, 0, skipBeta, now)
 	case dur >= FastSkipWindow:
-		c.applyRewardLocked(c.currentUUID, daypart, listenAlpha(dur), 0, now)
+		_ = c.applyRewardLocked(c.currentUUID, daypart, listenAlpha(dur), 0, now)
 		if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
 			bump := clamp(dur.Minutes()/30, 0.05, 1.0)
 			for _, t := range st.TagList() {
-				c.bumpTagLocked(t, bump, now)
+				_ = c.bumpTagLocked(t, bump, now)
 			}
 		}
 	}
@@ -497,13 +501,13 @@ func (c *Core) trackLovedLocked() bool {
 // exactly those boosts. A returned love decays away like every other
 // bounded reward — it is a bounded dose, not a permanent scar on the model.
 //
-// Returns (track, hadTrack, nowLoved): nowLoved is the resulting state —
+// Returns (track, hadTrack, nowLoved, err): nowLoved is the resulting state —
 // true when the press loved, false when it unloved.
-func (c *Core) Love(now time.Time) (Track, bool, bool) {
+func (c *Core) Love(now time.Time) (Track, bool, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.currentUUID == "" {
-		return Track{}, false, false
+		return Track{}, false, false, nil
 	}
 
 	// The toggle is grounded in what the user can see: the loved row for
@@ -512,32 +516,50 @@ func (c *Core) Love(now time.Time) (Track, bool, bool) {
 	// missing, so (artist_key, title) identifies it either way; the
 	// trackless case is the only one that keys on the station.
 	if c.hasTrack {
-		if exists, err := c.store.LovedTrackExists(c.curTrack.ArtistKey, c.curTrack.Title); err == nil && exists {
+		exists, err := c.store.LovedTrackExists(c.curTrack.ArtistKey, c.curTrack.Title)
+		if err != nil {
+			return Track{}, false, false, err
+		}
+		if exists {
 			return c.unloveLocked(now)
 		}
-	} else if exists, err := c.store.TracklessStationLoveExists(c.currentUUID); err == nil && exists {
-		return c.unloveLocked(now)
+	} else {
+		exists, err := c.store.TracklessStationLoveExists(c.currentUUID)
+		if err != nil {
+			return Track{}, false, false, err
+		}
+		if exists {
+			return c.unloveLocked(now)
+		}
 	}
 
 	daypart := DaypartFor(now)
-	c.applyRewardLocked(c.currentUUID, daypart, loveAlpha, 0, now)
+	if err := c.applyRewardLocked(c.currentUUID, daypart, loveAlpha, 0, now); err != nil {
+		return Track{}, false, false, err
+	}
 	if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
 		for _, t := range st.TagList() {
-			c.bumpTagLocked(t, 0.5, now)
+			if err := c.bumpTagLocked(t, 0.5, now); err != nil {
+				return Track{}, false, false, err
+			}
 		}
 	}
 	if !c.hasTrack {
 		// Trackless love: record the intent against the station so a later
 		// unlove (and the loved library's origin links) can find it.
-		_ = c.store.InsertLoved(c.currentUUID, "", "", "", now)
-		return Track{}, false, true
+		if err := c.store.InsertLoved(c.currentUUID, "", "", "", now); err != nil {
+			return Track{}, false, false, err
+		}
+		return Track{}, false, true, nil
 	}
 	tr := c.curTrack
-	_ = c.store.InsertLoved(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, now)
+	if err := c.store.InsertLoved(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, now); err != nil {
+		return Track{}, false, false, err
+	}
 	if tr.ArtistKey != "" {
 		c.loved[tr.ArtistKey] = true
 	}
-	return tr, true, true
+	return tr, true, true, nil
 }
 
 // unloveLocked reverses a Love on the current track (or, trackless, on the
@@ -545,32 +567,40 @@ func (c *Core) Love(now time.Time) (Track, bool, bool) {
 // boosts, and drops the artist from the loved set when no other loved
 // track by them remains. Already-banked listen rewards are historical fact
 // and stay.
-func (c *Core) unloveLocked(now time.Time) (Track, bool, bool) {
+func (c *Core) unloveLocked(now time.Time) (Track, bool, bool, error) {
 	daypart := DaypartFor(now)
-	c.applyRewardLocked(c.currentUUID, daypart, -loveAlpha, 0, now)
+	if err := c.applyRewardLocked(c.currentUUID, daypart, -loveAlpha, 0, now); err != nil {
+		return Track{}, false, false, err
+	}
 	if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
 		for _, t := range st.TagList() {
-			c.bumpTagLocked(t, -0.5, now)
+			if err := c.bumpTagLocked(t, -0.5, now); err != nil {
+				return Track{}, false, false, err
+			}
 		}
 	}
 
 	if !c.hasTrack {
 		// Scoped to this station: a trackless love is a statement about one
 		// stream, so returning it must not touch any other station's row.
-		_, _ = c.store.ForgetTracklessStationLove(c.currentUUID)
-		return Track{}, false, false
+		_, err := c.store.ForgetTracklessStationLove(c.currentUUID)
+		return Track{}, false, false, err
 	}
 	tr := c.curTrack
 	removed, err := c.store.ForgetLovedTrack(tr.ArtistKey, tr.Title)
 	if err != nil || !removed {
-		return tr, true, false
+		return tr, true, false, err
 	}
 	if tr.ArtistKey != "" {
-		if n, err := c.store.CountLovedArtist(tr.ArtistKey); err == nil && n == 0 {
+		n, err := c.store.CountLovedArtist(tr.ArtistKey)
+		if err != nil {
+			return tr, true, false, err
+		}
+		if n == 0 {
 			delete(c.loved, tr.ArtistKey)
 		}
 	}
-	return tr, true, false
+	return tr, true, false, nil
 }
 
 // MarkStationFailed bumps a station's failure count (stream wouldn't start).
@@ -617,7 +647,7 @@ func (c *Core) stationByUUIDLocked(uuid string) *Station {
 
 // applyRewardLocked adds (dAlpha, dBeta) to the given daypart row and the
 // all-time row, decaying each toward the prior first (lazy decay).
-func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, now time.Time) {
+func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, now time.Time) error {
 	for _, dp := range []string{daypart, DaypartAll} {
 		if dp == "" {
 			continue
@@ -636,18 +666,21 @@ func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, no
 			c.bandit[uuid] = map[string]banditRow{}
 		}
 		c.bandit[uuid][dp] = nr
-		_ = c.store.PutBandit(uuid, dp, a, b, now)
+		if err := c.store.PutBandit(uuid, dp, a, b, now); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (c *Core) bumpTagLocked(tag string, delta float64, now time.Time) {
+func (c *Core) bumpTagLocked(tag string, delta float64, now time.Time) error {
 	row := banditRow{Alpha: 1, UpdatedAt: now}
 	if r, ok := c.tags[tag]; ok {
 		row = r
 	}
 	w := math.Max(decayToward(row.Alpha, row.UpdatedAt, now)+delta, countFloor)
 	c.tags[tag] = banditRow{Alpha: w, UpdatedAt: now}
-	_ = c.store.PutTagAffinity(tag, w, now)
+	return c.store.PutTagAffinity(tag, w, now)
 }
 
 // SeedResult is what a typed seed query resolved to.
@@ -753,7 +786,9 @@ func (c *Core) Seed(ctx context.Context, query string, now time.Time) (SeedResul
 // tuneTagLocked bumps the tag and tunes a station carrying it. Caller's
 // lock must be held.
 func (c *Core) tuneTagLocked(tag string, now time.Time) (Pick, bool) {
-	c.bumpTagLocked(tag, 2.0, now) // love-sized bump; decays like the rest
+	if err := c.bumpTagLocked(tag, 2.0, now); err != nil { // love-sized bump; decays like the rest
+		return Pick{}, false
+	}
 	c.seedTag, c.seedPicks = tag, 4
 	cands := c.candidatesFor(now, func(st *Station) bool {
 		for _, t := range st.TagList() {

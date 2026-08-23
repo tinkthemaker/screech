@@ -552,7 +552,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.haveSt || m.ph == phDead {
 			return m, nil
 		}
-		_, track, lovedNow := m.core.Love(time.Now())
+		_, track, lovedNow, err := m.core.Love(time.Now())
+		if err != nil {
+			m.note = "could not save love " + m.th.G.Dot + " " + err.Error()
+			return m, nil
+		}
 		m.lovedTrack = lovedNow
 		if lovedNow {
 			m.loveAt = m.now
@@ -570,7 +574,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.haveSt || m.ph == phDead {
 			return m, nil
 		}
-		slot, saved, full := m.core.TogglePreset(time.Now())
+		slot, saved, full, err := m.core.TogglePreset(time.Now())
+		if err != nil {
+			m.note = "could not save preset " + m.th.G.Dot + " " + err.Error()
+			return m, nil
+		}
 		m.presets = m.core.Presets()
 		switch {
 		case full:

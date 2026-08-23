@@ -57,8 +57,16 @@ func (s *Station) StreamURL() string {
 // a new one can't retroactively ask a database that never recorded this.
 const schemaVersion = "1"
 
+// queryer is the small surface the store needs from *sql.DB or *sql.Tx.
+type queryer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 type Store struct {
 	db *sql.DB
+	q  queryer
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -68,7 +76,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // single writer; screech is a one-process app
-	s := &Store{db: db}
+	s := &Store{db: db, q: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -76,7 +84,7 @@ func OpenStore(path string) (*Store, error) {
 	// Stamp the schema version, leaving an existing stamp alone. Every
 	// database that has ever existed is at version 1, so claiming it for
 	// the unstamped ones is accurate rather than optimistic.
-	if _, err := db.Exec(`INSERT INTO meta(key,value) VALUES('schema_version', ?)
+	if _, err := s.q.Exec(`INSERT INTO meta(key,value) VALUES('schema_version', ?)
 		ON CONFLICT(key) DO NOTHING`, schemaVersion); err != nil {
 		db.Close()
 		return nil, err
@@ -88,7 +96,7 @@ func OpenStore(path string) (*Store, error) {
 	// session is "we don't know how long it played", not "zero credit
 	// for a listen that may have run for hours".
 	cutoff := time.Now().Add(-2 * time.Minute)
-	if _, err := db.Exec(`UPDATE listens SET ended_at=started_at WHERE ended_at IS NULL AND started_at < ?`, cutoff.Unix()); err != nil {
+	if _, err := s.q.Exec(`UPDATE listens SET ended_at=started_at WHERE ended_at IS NULL AND started_at < ?`, cutoff.Unix()); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -108,13 +116,25 @@ func OpenStoreReadOnly(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	return &Store{db: db}, nil
+	return &Store{db: db, q: db}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// Begin starts a transaction. The caller is responsible for Commit/Rollback.
+func (s *Store) Begin() (*sql.Tx, error) { return s.db.Begin() }
+
+// WithTx returns a Store that executes all queries inside the given
+// transaction. Use it to group multiple persistence operations atomically.
+func (s *Store) WithTx(tx *sql.Tx) *Store { return &Store{q: tx} }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+	_, err := s.q.Exec(`
 CREATE TABLE IF NOT EXISTS stations(
 	uuid TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -225,7 +245,7 @@ func (s *Store) UpsertStations(sts []Station, fetchedAt time.Time) error {
 }
 
 func (s *Store) LoadStations() ([]Station, error) {
-	rows, err := s.db.Query(`SELECT uuid,name,url,url_resolved,homepage,tags,country,codec,
+	rows, err := s.q.Query(`SELECT uuid,name,url,url_resolved,homepage,tags,country,codec,
 		bitrate,votes,clickcount,lastcheckok,ad_risk,fail_count FROM stations`)
 	if err != nil {
 		return nil, err
@@ -248,7 +268,7 @@ func (s *Store) LoadStations() ([]Station, error) {
 
 func (s *Store) StationCount() (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM stations`).Scan(&n)
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM stations`).Scan(&n)
 	return n, err
 }
 
@@ -257,7 +277,7 @@ func (s *Store) StationCount() (int, error) {
 // history. Seeds, presets, anything listened to, loved on, or scored by the
 // bandit, and the resume station all survive regardless.
 func (s *Store) PruneStale(before time.Time, keepUUID string) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM stations WHERE fetched_at < ?
+	res, err := s.q.Exec(`DELETE FROM stations WHERE fetched_at < ?
 		AND uuid NOT LIKE 'seed:%'
 		AND uuid != ?
 		AND uuid NOT IN (SELECT DISTINCT station_uuid FROM bandit)
@@ -272,14 +292,14 @@ func (s *Store) PruneStale(before time.Time, keepUUID string) (int64, error) {
 }
 
 func (s *Store) BumpFailCount(uuid string, delta int) error {
-	_, err := s.db.Exec(`UPDATE stations SET fail_count = MAX(0, fail_count + ?) WHERE uuid = ?`, delta, uuid)
+	_, err := s.q.Exec(`UPDATE stations SET fail_count = MAX(0, fail_count + ?) WHERE uuid = ?`, delta, uuid)
 	return err
 }
 
 // --- listens / tracks / loved ---
 
 func (s *Store) InsertListen(station string, start time.Time, daypart string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO listens(station_uuid, started_at, daypart) VALUES(?,?,?)`,
+	res, err := s.q.Exec(`INSERT INTO listens(station_uuid, started_at, daypart) VALUES(?,?,?)`,
 		station, start.Unix(), daypart)
 	if err != nil {
 		return 0, err
@@ -288,19 +308,19 @@ func (s *Store) InsertListen(station string, start time.Time, daypart string) (i
 }
 
 func (s *Store) FinishListen(id int64, end time.Time, skipFast, duringAd bool) error {
-	_, err := s.db.Exec(`UPDATE listens SET ended_at=?, skip_fast=?, during_ad=? WHERE id=?`,
+	_, err := s.q.Exec(`UPDATE listens SET ended_at=?, skip_fast=?, during_ad=? WHERE id=?`,
 		end.Unix(), b2i(skipFast), b2i(duringAd), id)
 	return err
 }
 
 func (s *Store) InsertTrack(station, artistKey, artist, title, raw string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO tracks_heard(station_uuid,artist_key,artist,title,raw,heard_at)
+	_, err := s.q.Exec(`INSERT INTO tracks_heard(station_uuid,artist_key,artist,title,raw,heard_at)
 		VALUES(?,?,?,?,?,?)`, station, artistKey, artist, title, raw, at.Unix())
 	return err
 }
 
 func (s *Store) InsertLoved(station, artistKey, artist, title string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO loved(station_uuid,artist_key,artist,title,loved_at)
+	_, err := s.q.Exec(`INSERT INTO loved(station_uuid,artist_key,artist,title,loved_at)
 		VALUES(?,?,?,?,?)`, station, artistKey, artist, title, at.Unix())
 	return err
 }
@@ -328,7 +348,7 @@ type LovedTrack struct {
 }
 
 func (s *Store) RecentlyHeard(n int) ([]RecentTrack, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		SELECT t.station_uuid, COALESCE(st.name, t.station_uuid), t.artist, t.title,
 		       t.heard_at, EXISTS(
 		         SELECT 1 FROM loved l
@@ -356,7 +376,7 @@ func (s *Store) RecentlyHeard(n int) ([]RecentTrack, error) {
 }
 
 func (s *Store) LovedTracks(n int) ([]LovedTrack, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		WITH ranked AS (
 			SELECT l.station_uuid, COALESCE(st.name, l.station_uuid) AS station_name,
 			       l.artist_key, l.artist, l.title, l.loved_at,
@@ -399,7 +419,7 @@ func (s *Store) LovedTracks(n int) ([]LovedTrack, error) {
 }
 
 func (s *Store) ForgetLovedTrack(artistKey, title string) (bool, error) {
-	result, err := s.db.Exec(`DELETE FROM loved
+	result, err := s.q.Exec(`DELETE FROM loved
 		WHERE artist_key=? AND lower(trim(title))=lower(trim(?))`, artistKey, title)
 	if err != nil {
 		return false, err
@@ -414,7 +434,7 @@ func (s *Store) ForgetLovedTrack(artistKey, title string) (bool, error) {
 // must be a row that unlove can actually delete.
 func (s *Store) LovedTrackExists(artistKey, title string) (bool, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM loved
 		WHERE artist_key=? AND lower(trim(title))=lower(trim(?))`, artistKey, title).Scan(&n)
 	return n > 0, err
 }
@@ -425,7 +445,7 @@ func (s *Store) LovedTrackExists(artistKey, title string) (bool, error) {
 // stream must never read as un-loving a different silent stream.
 func (s *Store) TracklessStationLoveExists(stationUUID string) (bool, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM loved
 		WHERE station_uuid=? AND artist_key='' AND trim(title)=''`, stationUUID).Scan(&n)
 	return n > 0, err
 }
@@ -433,7 +453,7 @@ func (s *Store) TracklessStationLoveExists(stationUUID string) (bool, error) {
 // ForgetTracklessStationLove removes one station's trackless love rows and
 // leaves every other station's alone.
 func (s *Store) ForgetTracklessStationLove(stationUUID string) (bool, error) {
-	res, err := s.db.Exec(`DELETE FROM loved
+	res, err := s.q.Exec(`DELETE FROM loved
 		WHERE station_uuid=? AND artist_key='' AND trim(title)=''`, stationUUID)
 	if err != nil {
 		return false, err
@@ -447,12 +467,12 @@ func (s *Store) ForgetTracklessStationLove(stationUUID string) (bool, error) {
 // loved track by them is gone.
 func (s *Store) CountLovedArtist(artistKey string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved WHERE artist_key=?`, artistKey).Scan(&n)
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM loved WHERE artist_key=?`, artistKey).Scan(&n)
 	return n, err
 }
 
 func (s *Store) LovedArtistKeys() (map[string]bool, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT artist_key FROM loved WHERE artist_key != ''`)
+	rows, err := s.q.Query(`SELECT DISTINCT artist_key FROM loved WHERE artist_key != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +490,7 @@ func (s *Store) LovedArtistKeys() (map[string]bool, error) {
 
 // StationArtists returns station -> set of artist keys observed there.
 func (s *Store) StationArtists() (map[string]map[string]bool, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT station_uuid, artist_key FROM tracks_heard WHERE artist_key != ''`)
+	rows, err := s.q.Query(`SELECT DISTINCT station_uuid, artist_key FROM tracks_heard WHERE artist_key != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +519,7 @@ type banditRow struct {
 func (s *Store) GetBandit(station, daypart string) (banditRow, bool, error) {
 	var r banditRow
 	var ts int64
-	err := s.db.QueryRow(`SELECT alpha,beta,updated_at FROM bandit WHERE station_uuid=? AND daypart=?`,
+	err := s.q.QueryRow(`SELECT alpha,beta,updated_at FROM bandit WHERE station_uuid=? AND daypart=?`,
 		station, daypart).Scan(&r.Alpha, &r.Beta, &ts)
 	if err == sql.ErrNoRows {
 		return r, false, nil
@@ -512,7 +532,7 @@ func (s *Store) GetBandit(station, daypart string) (banditRow, bool, error) {
 }
 
 func (s *Store) PutBandit(station, daypart string, alpha, beta float64, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO bandit(station_uuid,daypart,alpha,beta,updated_at) VALUES(?,?,?,?,?)
+	_, err := s.q.Exec(`INSERT INTO bandit(station_uuid,daypart,alpha,beta,updated_at) VALUES(?,?,?,?,?)
 		ON CONFLICT(station_uuid,daypart) DO UPDATE SET alpha=excluded.alpha, beta=excluded.beta, updated_at=excluded.updated_at`,
 		station, daypart, alpha, beta, at.Unix())
 	return err
@@ -520,7 +540,7 @@ func (s *Store) PutBandit(station, daypart string, alpha, beta float64, at time.
 
 // AllBandit loads every bandit row grouped by station then daypart.
 func (s *Store) AllBandit() (map[string]map[string]banditRow, error) {
-	rows, err := s.db.Query(`SELECT station_uuid,daypart,alpha,beta,updated_at FROM bandit`)
+	rows, err := s.q.Query(`SELECT station_uuid,daypart,alpha,beta,updated_at FROM bandit`)
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +565,7 @@ func (s *Store) AllBandit() (map[string]map[string]banditRow, error) {
 // --- tag affinity ---
 
 func (s *Store) AllTagAffinity() (map[string]banditRow, error) { // reuse: Alpha=weight
-	rows, err := s.db.Query(`SELECT tag,weight,updated_at FROM tag_affinity`)
+	rows, err := s.q.Query(`SELECT tag,weight,updated_at FROM tag_affinity`)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +585,7 @@ func (s *Store) AllTagAffinity() (map[string]banditRow, error) { // reuse: Alpha
 }
 
 func (s *Store) PutTagAffinity(tag string, weight float64, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO tag_affinity(tag,weight,updated_at) VALUES(?,?,?)
+	_, err := s.q.Exec(`INSERT INTO tag_affinity(tag,weight,updated_at) VALUES(?,?,?)
 		ON CONFLICT(tag) DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at`,
 		tag, weight, at.Unix())
 	return err
@@ -575,7 +595,7 @@ func (s *Store) PutTagAffinity(tag string, weight float64, at time.Time) error {
 
 func (s *Store) GetMeta(key string) (string, error) {
 	var v string
-	err := s.db.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&v)
+	err := s.q.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&v)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -583,7 +603,7 @@ func (s *Store) GetMeta(key string) (string, error) {
 }
 
 func (s *Store) SetMeta(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO meta(key,value) VALUES(?,?)
+	_, err := s.q.Exec(`INSERT INTO meta(key,value) VALUES(?,?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err
 }
@@ -610,7 +630,7 @@ type SavedStation struct {
 // first. A station qualifies by being a preset or having any loved rows —
 // the two ways a user says "remember this one".
 func (s *Store) SavedStations() ([]SavedStation, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		WITH listen_time AS (
 			SELECT station_uuid,
 			       SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)) AS total
@@ -655,21 +675,33 @@ func (s *Store) SavedStations() ([]SavedStation, error) {
 
 // RemoveStation forgets a saved station: clears its preset slot (if any)
 // and deletes the loved rows credited to it. Listen history and bandit
-// counts stay — they're historical fact, not recall state.
+// counts stay — they're historical fact, not recall state. The two deletes
+// run in one transaction so recall state is never left half-removed.
 func (s *Store) RemoveStation(uuid string) (presetCleared bool, lovesRemoved int, err error) {
-	res, err := s.db.Exec(`DELETE FROM presets WHERE station_uuid=?`, uuid)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM presets WHERE station_uuid=?`, uuid)
 	if err != nil {
 		return false, 0, err
 	}
 	if n, e := res.RowsAffected(); e == nil {
 		presetCleared = n > 0
 	}
-	res, err = s.db.Exec(`DELETE FROM loved WHERE station_uuid=?`, uuid)
+	res, err = tx.Exec(`DELETE FROM loved WHERE station_uuid=?`, uuid)
 	if err != nil {
 		return presetCleared, 0, err
 	}
 	n, e := res.RowsAffected()
-	return presetCleared, int(n), e
+	if e != nil {
+		return presetCleared, 0, e
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, err
+	}
+	return presetCleared, int(n), nil
 }
 
 // StationTotal is how long this station has been listened to across every
@@ -678,7 +710,7 @@ func (s *Store) RemoveStation(uuid string) (presetCleared bool, lovesRemoved int
 // itself. Open listens contribute nothing rather than counting to now.
 func (s *Store) StationTotal(uuid string) (time.Duration, error) {
 	var secs int64
-	err := s.db.QueryRow(`SELECT COALESCE(SUM(MAX(0,
+	err := s.q.QueryRow(`SELECT COALESCE(SUM(MAX(0,
 		COALESCE(ended_at, started_at) - started_at)), 0)
 		FROM listens WHERE station_uuid = ?`, uuid).Scan(&secs)
 	return time.Duration(secs) * time.Second, err
@@ -689,7 +721,7 @@ func (s *Store) StationTotal(uuid string) (time.Duration, error) {
 // wants the whole distribution, including the long tail of stations you
 // only ever heard once.
 func (s *Store) ListenTotals() (map[string]time.Duration, error) {
-	rows, err := s.db.Query(`SELECT station_uuid,
+	rows, err := s.q.Query(`SELECT station_uuid,
 		SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)) AS total
 		FROM listens GROUP BY station_uuid HAVING total > 0`)
 	if err != nil {
@@ -713,7 +745,7 @@ func (s *Store) ListenTotals() (map[string]time.Duration, error) {
 // heard count never disagree.
 func (s *Store) TrackPlayCount(artistKey, title string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks_heard
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM tracks_heard
 		WHERE artist_key = ? AND lower(trim(title)) = lower(trim(?))`,
 		artistKey, title).Scan(&n)
 	return n, err
@@ -723,7 +755,7 @@ func (s *Store) TrackPlayCount(artistKey, title string) (int, error) {
 // yet) count as zero; stations pruned from the cache keep their logged name
 // via the join fallback.
 func (s *Store) TopListened(n int) ([]HistEntry, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		SELECT l.station_uuid,
 		       COALESCE(st.name, l.station_uuid) AS name,
 		       SUM(MAX(0, COALESCE(l.ended_at, l.started_at) - l.started_at)) AS total
@@ -753,7 +785,7 @@ func (s *Store) TopListened(n int) ([]HistEntry, error) {
 // --- presets ---
 
 func (s *Store) Presets() (map[int]string, error) {
-	rows, err := s.db.Query(`SELECT slot, station_uuid FROM presets`)
+	rows, err := s.q.Query(`SELECT slot, station_uuid FROM presets`)
 	if err != nil {
 		return nil, err
 	}
@@ -771,14 +803,14 @@ func (s *Store) Presets() (map[int]string, error) {
 }
 
 func (s *Store) SetPreset(slot int, uuid string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO presets(slot, station_uuid, saved_at) VALUES(?,?,?)
+	_, err := s.q.Exec(`INSERT INTO presets(slot, station_uuid, saved_at) VALUES(?,?,?)
 		ON CONFLICT(slot) DO UPDATE SET station_uuid=excluded.station_uuid, saved_at=excluded.saved_at`,
 		slot, uuid, at.Unix())
 	return err
 }
 
 func (s *Store) DeletePreset(slot int) error {
-	_, err := s.db.Exec(`DELETE FROM presets WHERE slot=?`, slot)
+	_, err := s.q.Exec(`DELETE FROM presets WHERE slot=?`, slot)
 	return err
 }
 

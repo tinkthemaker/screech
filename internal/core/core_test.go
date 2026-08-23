@@ -71,7 +71,7 @@ func TestListenLoveRoundtrip(t *testing.T) {
 		t.Fatalf("artist key: %q", tr.ArtistKey)
 	}
 
-	loved, hadTrack, lovedNow := c.Love(now.Add(2 * time.Minute))
+	loved, hadTrack, lovedNow, _ := c.Love(now.Add(2 * time.Minute))
 	if !hadTrack || !lovedNow || loved.ArtistKey != "stellardrone" {
 		t.Fatalf("Love: hadTrack=%v lovedNow=%v key=%q", hadTrack, lovedNow, loved.ArtistKey)
 	}
@@ -229,7 +229,7 @@ func TestUnloveReturnsBoosts(t *testing.T) {
 	}
 
 	baseAlpha := alphaOf()
-	if _, _, lovedNow := c.Love(now.Add(2 * time.Minute)); !lovedNow {
+	if _, _, lovedNow, _ := c.Love(now.Add(2 * time.Minute)); !lovedNow {
 		t.Fatal("love should apply")
 	}
 	lovedAlpha := alphaOf()
@@ -246,7 +246,7 @@ func TestUnloveReturnsBoosts(t *testing.T) {
 	}
 
 	// Second press on the same track unloves.
-	_, hadTrack, lovedNow := c.Love(now.Add(3 * time.Minute))
+	_, hadTrack, lovedNow, _ := c.Love(now.Add(3 * time.Minute))
 	if !hadTrack || lovedNow {
 		t.Fatalf("second press should unlove the same track: hadTrack=%v lovedNow=%v", hadTrack, lovedNow)
 	}
@@ -275,10 +275,10 @@ func TestTracklessLoveToggles(t *testing.T) {
 	}
 	c.StartListen(p.Station.UUID, now)
 	// No NoteTitle: the stream never sent one, so hasTrack is false.
-	if _, hadTrack, lovedNow := c.Love(now.Add(time.Minute)); hadTrack || !lovedNow {
+	if _, hadTrack, lovedNow, _ := c.Love(now.Add(time.Minute)); hadTrack || !lovedNow {
 		t.Fatalf("trackless love: hadTrack=%v lovedNow=%v", hadTrack, lovedNow)
 	}
-	if _, _, lovedNow := c.Love(now.Add(2 * time.Minute)); lovedNow {
+	if _, _, lovedNow, _ := c.Love(now.Add(2 * time.Minute)); lovedNow {
 		t.Fatal("second trackless press should unlove the station")
 	}
 	var n int

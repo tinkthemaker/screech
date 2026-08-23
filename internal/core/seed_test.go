@@ -11,7 +11,7 @@ func TestPresetToggleAndRecall(t *testing.T) {
 	now := time.Now()
 
 	// No station playing: toggle is a no-op.
-	if slot, saved, full := c.TogglePreset(now); slot != 0 || saved || full {
+	if slot, saved, full, _ := c.TogglePreset(now); slot != 0 || saved || full {
 		t.Fatalf("toggle with nothing playing: %d %v %v", slot, saved, full)
 	}
 
@@ -21,7 +21,7 @@ func TestPresetToggleAndRecall(t *testing.T) {
 	}
 	c.StartListen(p.Station.UUID, now)
 
-	slot, saved, full := c.TogglePreset(now)
+	slot, saved, full, _ := c.TogglePreset(now)
 	if !saved || slot != 1 || full {
 		t.Fatalf("first save should land in slot 1: %d %v %v", slot, saved, full)
 	}
@@ -30,7 +30,7 @@ func TestPresetToggleAndRecall(t *testing.T) {
 	}
 
 	// Toggle again: unsave.
-	slot, saved, _ = c.TogglePreset(now)
+	slot, saved, _, _ = c.TogglePreset(now)
 	if saved || slot != 1 {
 		t.Fatalf("second toggle should clear slot 1: %d %v", slot, saved)
 	}
@@ -39,7 +39,7 @@ func TestPresetToggleAndRecall(t *testing.T) {
 	}
 
 	// Save again, then recall via TuneTo after moving elsewhere.
-	c.TogglePreset(now)
+	_, _, _, _ = c.TogglePreset(now)
 	p2, err := c.Tune(now.Add(10 * time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -62,13 +62,13 @@ func TestPresetsFillUp(t *testing.T) {
 	// Save nine different stations.
 	for i := 0; i < 9; i++ {
 		c.StartListen(c.stations[i].UUID, now)
-		if _, saved, full := c.TogglePreset(now); !saved || full {
+		if _, saved, full, _ := c.TogglePreset(now); !saved || full {
 			t.Fatalf("save %d failed", i)
 		}
 	}
 	// Tenth: full.
 	c.StartListen(c.stations[9].UUID, now)
-	if _, saved, full := c.TogglePreset(now); saved || !full {
+	if _, saved, full, _ := c.TogglePreset(now); saved || !full {
 		t.Fatal("tenth save should report full")
 	}
 }

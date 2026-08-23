@@ -21,12 +21,12 @@ func TestTracklessLoveIsScopedToItsStation(t *testing.T) {
 	now := time.Now()
 
 	c.StartListen(a, now)
-	if _, _, loved := c.Love(now); !loved {
+	if _, _, loved, _ := c.Love(now); !loved {
 		t.Fatal("first trackless love did not take")
 	}
 
 	c.StartListen(b, now)
-	if _, _, loved := c.Love(now); !loved {
+	if _, _, loved, _ := c.Love(now); !loved {
 		t.Fatal("loving station B read as un-loving station A")
 	}
 
@@ -48,11 +48,11 @@ func TestUnloveNeverPushesCountsBelowThePrior(t *testing.T) {
 	loved := time.Now()
 
 	c.StartListen(a, loved)
-	c.Love(loved)
+	_, _, _, _ = c.Love(loved)
 
 	// Decay eats part of the boost before the user changes their mind.
 	returned := loved.Add(30 * 24 * time.Hour)
-	if _, _, still := c.Love(returned); still {
+	if _, _, still, _ := c.Love(returned); still {
 		t.Fatal("second press did not un-love")
 	}
 
@@ -74,7 +74,10 @@ func TestUnloveDoesNotStrandTagAffinityBelowThePrior(t *testing.T) {
 	c := openTestCore(t)
 	now := time.Now()
 	c.mu.Lock()
-	c.bumpTagLocked("ambient", -5.0, now)
+	if err := c.bumpTagLocked("ambient", -5.0, now); err != nil {
+		c.mu.Unlock()
+		t.Fatal(err)
+	}
 	weight := c.tags["ambient"].Alpha
 	c.mu.Unlock()
 	if weight < countFloor {
@@ -99,7 +102,7 @@ func TestLoveTogglesOnATrackWithNoArtist(t *testing.T) {
 		t.Fatalf("expected an empty artist key, got %q", c.curTrack.ArtistKey)
 	}
 
-	if _, hadTrack, loved := c.Love(now); !loved || !hadTrack {
+	if _, hadTrack, loved, _ := c.Love(now); !loved || !hadTrack {
 		t.Fatalf("love on a bare title: loved=%v hadTrack=%v, want true/true", loved, hadTrack)
 	}
 	c.mu.Lock()
@@ -108,7 +111,7 @@ func TestLoveTogglesOnATrackWithNoArtist(t *testing.T) {
 	if !shown {
 		t.Error("a loved bare-title track does not report as loved, so its heart never lights")
 	}
-	if _, _, loved := c.Love(now); loved {
+	if _, _, loved, _ := c.Love(now); loved {
 		t.Error("second press did not un-love a bare-title track")
 	}
 }
