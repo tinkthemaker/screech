@@ -30,6 +30,10 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      - name: Vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
       # Windows and macOS are the platforms screech actually ships to, and
       # the IPC layer is build-tagged per OS. Compiling them here catches a
       # broken named-pipe path without waiting for a release.
