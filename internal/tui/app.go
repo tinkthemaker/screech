@@ -58,9 +58,10 @@ const (
 )
 
 type Options struct {
-	Accent    string
-	ASCII     bool
-	SyncLimit int
+	Accent        string
+	ASCII         bool
+	SyncLimit     int
+	ReducedMotion bool
 }
 
 type Model struct {
@@ -98,13 +99,14 @@ type Model struct {
 	dial      *Spring
 	dialTgt   float64
 
-	track      string
-	haveTrack  bool
-	trackAt    time.Time
-	lovedTrack bool
-	loveAt     time.Time
-	suspect    bool
-	stereo     bool // the backend is metering two distinct channels
+	track        string
+	haveTrack    bool
+	trackAt      time.Time
+	lovedTrack   bool
+	loveAt       time.Time
+	reduceMotion bool
+	suspect      bool
+	stereo       bool // the backend is metering two distinct channels
 
 	// Panel readouts. Both are fetched off the UI thread on change and
 	// cached here; a faceplate that blocked its own render on a SQL count
@@ -193,26 +195,27 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 	themeName := normalizeThemeName(c.Theme())
 	dp := core.DaypartFor(now)
 	return Model{
-		syncLimit:   sl,
-		core:        c,
-		pl:          pl,
-		th:          NewDaypartTheme(themeName, opts.Accent, opts.ASCII, dp),
-		themeName:   themeName,
-		themeAccent: opts.Accent,
-		themeASCII:  opts.ASCII,
-		start:       now,
-		now:         now,
-		lastKey:     now,
-		lastAct:     now,
-		daypart:     dp,
-		wave:        NewWave(32),
-		dial:        NewSpring(0.5),
-		dialTgt:     0.5,
-		syncing:     syncing,
-		virgin:      virgin,
-		prompt:      false,
-		presets:     c.Presets(),
-		volume:      c.Volume(),
+		syncLimit:    sl,
+		core:         c,
+		pl:           pl,
+		th:           NewDaypartTheme(themeName, opts.Accent, opts.ASCII, dp),
+		themeName:    themeName,
+		themeAccent:  opts.Accent,
+		themeASCII:   opts.ASCII,
+		start:        now,
+		now:          now,
+		lastKey:      now,
+		lastAct:      now,
+		daypart:      dp,
+		reduceMotion: opts.ReducedMotion,
+		wave:         NewWave(32),
+		dial:         NewSpring(0.5),
+		dialTgt:      0.5,
+		syncing:      syncing,
+		virgin:       virgin,
+		prompt:       false,
+		presets:      c.Presets(),
+		volume:       c.Volume(),
 	}
 }
 
@@ -559,7 +562,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.lovedTrack = lovedNow
 		if lovedNow {
-			m.loveAt = m.now
+			if !m.reduceMotion {
+				m.loveAt = m.now
+			}
 			if track {
 				m.setFeedback("LOVED  Track and station")
 			} else {

@@ -17,8 +17,41 @@ import (
 // internal/version so the mpv and radio-browser User-Agents move with it.
 var version = versionpkg.Current
 
+var usage = "screech " + version + " - terminal internet radio\n\n" +
+	"Usage:\n" +
+	"  screech                 start the TUI (default)\n" +
+	"  screech doctor          run a read-only diagnostic check\n" +
+	"  screech --help          show this message\n" +
+	"  screech --version       show the version\n\n" +
+	"Environment:\n" +
+	"  SCREECH_REDUCED_MOTION  set to any value to disable the love-heart flash\n"
+
+var reducedMotion bool
+
 func main() {
+	if code, exit := maybeHandleFlags(); exit {
+		os.Exit(code)
+	}
 	os.Exit(run())
+}
+
+func maybeHandleFlags() (int, bool) {
+	if len(os.Args) <= 1 {
+		return 0, false
+	}
+	switch os.Args[1] {
+	case "-h", "--help", "help":
+		fmt.Print(usage)
+		return 0, true
+	case "-v", "--version", "version":
+		fmt.Println(version)
+		return 0, true
+	case "--reduced-motion":
+		reducedMotion = true
+		// Continue so "screech --reduced-motion" still launches the TUI.
+		return 0, false
+	}
+	return 0, false
 }
 
 func run() (exit int) {
@@ -64,7 +97,13 @@ func run() (exit int) {
 	defer pl.Close()
 	logLine("mpv connected over IPC")
 
-	if err := tui.Run(c, pl, tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII, SyncLimit: cfg.SyncLimit}); err != nil {
+	if w, h, ok := terminalSize(); ok && (w < 80 || h < 24) {
+		return fail("terminal is %dx%d; screech needs at least 80 columns by 24 rows", w, h)
+	}
+	if os.Getenv("SCREECH_REDUCED_MOTION") != "" {
+		reducedMotion = true
+	}
+	if err := tui.Run(c, pl, tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII, SyncLimit: cfg.SyncLimit, ReducedMotion: reducedMotion}); err != nil {
 		return fail("ui: %v", err)
 	}
 	logLine("clean exit")
