@@ -15,9 +15,18 @@ import (
 	"screech/internal/player"
 )
 
+const (
+	ecConfig   = 1 << iota // bad or missing config
+	ecDatabase             // database missing or unreadable
+	ecMpv                  // mpv not on PATH
+	ecIpc                  // mpv found but IPC handshake failed
+	ecNetwork              // radio-browser unreachable
+)
+
 // runDoctor checks every joint screech depends on and reports what it finds.
-// All checks run even after failures; the output is made to be pasted.
-func runDoctor() {
+// It is read-only: it does not create files, directories, or database entries.
+// The returned exit code is a bit mask of the failures it encountered.
+func runDoctor() int {
 	ok := func(b bool) string {
 		if b {
 			return " ok "
@@ -35,42 +44,42 @@ func runDoctor() {
 	if base, err := os.UserConfigDir(); err == nil {
 		cfgFile = filepath.Join(base, "screech", "config.toml")
 	}
-	cfg, dbPath, cfgErr := config.Load()
+	cfg, dbPath, dataDir, cfgErr := config.Read()
+	exitCode := 0
 	fmt.Printf("[%s] config   %s\n", ok(cfgErr == nil), cfgFile)
 	if cfgErr != nil {
 		fmt.Printf("        -> %v\n", cfgErr)
+		exitCode |= ecConfig
 	}
 
-	dataDir := cfg.DataDir
+	stations := 0
+	store, dbErr := core.OpenStoreReadOnly(dbPath)
+	if dbErr == nil {
+		stations, _ = store.StationCount()
+		_ = store.Close()
+	}
+	fmt.Printf("[%s] database %s\n", ok(dbErr == nil), dbPath)
+	if dbErr != nil {
+		fmt.Printf("        -> %v\n", dbErr)
+		exitCode |= ecDatabase
+	}
+
+	// The doctor command must not touch the user's data directory. The IPC
+	// test uses a temporary sandbox that is created and removed in one go.
+	ipcDataDir := dataDir
 	var cleanupDataDir func()
 	cleanupDataDir = func() {}
-	if dataDir == "" {
-		d, err := os.MkdirTemp("", "screech-doctor-*")
-		if err == nil {
-			dataDir = d
+	if cfgErr != nil {
+		if d, err := os.MkdirTemp("", "screech-doctor-*"); err == nil {
+			ipcDataDir = d
 			cleanupDataDir = func() { _ = os.RemoveAll(d) }
 		}
 	}
 	defer cleanupDataDir()
 
-	stations := 0
-	var dbErr error
-	if cfgErr == nil {
-		var c *core.Core
-		c, dbErr = core.Open(dbPath)
-		if dbErr == nil {
-			stations = c.StationCount()
-			_ = c.Close()
-		}
-		fmt.Printf("[%s] database %s (%d stations)\n", ok(dbErr == nil), dbPath, stations)
-		if dbErr != nil {
-			fmt.Printf("        -> %v\n", dbErr)
-		}
-	}
-
-	mpvPath := "mpv"
-	if cfgErr == nil && cfg.MpvPath != "" {
-		mpvPath = cfg.MpvPath
+	mpvPath := cfg.MpvPath
+	if mpvPath == "" {
+		mpvPath = "mpv"
 	}
 	resolved, lookErr := exec.LookPath(mpvPath)
 	if resolved == "" {
@@ -80,6 +89,7 @@ func runDoctor() {
 	switch {
 	case lookErr != nil:
 		fmt.Printf("        -> %v\n        -> install mpv (scoop/choco/brew/apt) or set mpv_path in config.toml\n        -> just installed? PATH refreshes only in NEW terminals\n", lookErr)
+		exitCode |= ecMpv
 	default:
 		if out, err := exec.Command(resolved, "--version").Output(); err == nil {
 			fmt.Printf("        -> %s\n", strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0]))
@@ -87,8 +97,8 @@ func runDoctor() {
 		// The joint that matters: spawn mpv and shake hands over IPC
 		// (unix socket / Windows named pipe).
 		var ipcErr error
-		if dataDir != "" {
-			pl, err := player.NewMPV(resolved, dataDir)
+		if ipcDataDir != "" {
+			pl, err := player.NewMPV(resolved, ipcDataDir)
 			if err != nil {
 				ipcErr = err
 			} else {
@@ -100,6 +110,7 @@ func runDoctor() {
 		fmt.Printf("[%s] mpv IPC  spawn + handshake\n", ok(ipcErr == nil))
 		if ipcErr != nil {
 			fmt.Printf("        -> %v\n", ipcErr)
+			exitCode |= ecIpc
 		}
 	}
 
@@ -118,9 +129,14 @@ func runDoctor() {
 	fmt.Printf("[%s] network  radio-browser directory\n", ok(netErr == nil))
 	if netErr != nil {
 		fmt.Printf("        -> %v (seed stations still work offline)\n", netErr)
+		exitCode |= ecNetwork
 	}
 
-	fmt.Println()
-	fmt.Println("log of last run: " + logPath())
-	holdConsoleOnExit()
+	if stations > 0 {
+		fmt.Printf("\nstations cached: %d\n", stations)
+	}
+	if exitCode != 0 {
+		holdConsoleOnExit()
+	}
+	return exitCode
 }

@@ -3,6 +3,7 @@ package core
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -92,6 +93,22 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// OpenStoreReadOnly opens an existing database for inspection without
+// creating files, writing schema, or touching user data. It is used by the
+// doctor command and is intentionally read-only.
+func OpenStoreReadOnly(path string) (*Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&mode=ro", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

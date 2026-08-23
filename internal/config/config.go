@@ -52,35 +52,64 @@ auto_hop_ads = false
 sync_limit = 20000
 `
 
-// Load reads (creating if needed) the config and returns it plus the
-// database path.
-func Load() (Config, string, error) {
+// Read finds an existing config and returns it along with the resolved
+// database path and data directory. It does not create files or directories;
+// use Load for first-run setup.
+func Read() (Config, string, string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		base = "."
 	}
 	dir := filepath.Join(base, "screech")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return defaults(), "", err
-	}
 	path := filepath.Join(dir, "config.toml")
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.WriteFile(path, []byte(defaultFile), 0o644); err != nil {
-			return defaults(), "", err
-		}
-	}
 	cfg := defaults()
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return defaults(), "", err
-	}
 	dataDir := cfg.DataDir
 	if dataDir == "" {
 		dataDir = dir
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, filepath.Join(dataDir, "screech.db"), dataDir, err
+	}
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return cfg, filepath.Join(dataDir, "screech.db"), dataDir, err
+	}
+	dataDir = cfg.DataDir
+	if dataDir == "" {
+		dataDir = dir
+	}
+	return cfg, filepath.Join(dataDir, "screech.db"), dataDir, nil
+}
+
+// Load reads (creating if needed) the config and returns it plus the
+// database path. On first run it creates the config directory with 0700
+// permissions and a default config file.
+func Load() (Config, string, error) {
+	cfg, dbPath, dataDir, err := Read()
+	if os.IsNotExist(err) {
+		base, berr := os.UserConfigDir()
+		if berr != nil {
+			base = "."
+		}
+		dir := filepath.Join(base, "screech")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return cfg, "", err
+		}
+		_ = os.Chmod(dir, 0o700)
+		path := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(path, []byte(defaultFile), 0o644); err != nil {
+			return cfg, "", err
+		}
+		_ = os.Chmod(path, 0o600)
+		cfg, dbPath, dataDir, err = Read()
+	}
+	if err != nil {
+		return cfg, "", err
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return cfg, "", err
 	}
 	_ = os.Chmod(dataDir, 0o700)
 	cfg.DataDir = dataDir
-	return cfg, filepath.Join(dataDir, "screech.db"), nil
+	return cfg, dbPath, nil
 }

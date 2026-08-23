@@ -18,17 +18,10 @@ import (
 var version = versionpkg.Current
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "doctor", "--doctor":
-			runDoctor()
-			return
-		case "version", "--version", "-v":
-			fmt.Println("screech " + version)
-			return
-		}
-	}
+	os.Exit(run())
+}
 
+func run() (exit int) {
 	// Nothing may die silently: panics land in the log and the console stays
 	// open when Windows created it just for us (double-click launch).
 	defer func() {
@@ -37,37 +30,45 @@ func main() {
 			logLine("%s", msg)
 			fmt.Fprintf(os.Stderr, "screech crashed. Details written to:\n  %s\n\n%s\n", logPath(), msg)
 			holdConsoleOnExit()
-			os.Exit(2)
+			exit = 2
 		}
 	}()
 
 	openLog()
+	defer closeLog()
 	logLine("screech %s starting", version)
 
 	cfg, dbPath, err := config.Load()
 	if err != nil {
-		fail("config: %v", err)
+		return fail("config: %v", err)
 	}
 	logLine("config ok; db at %s", dbPath)
 
+	release, err := acquireSingleInstance(cfg.DataDir)
+	if err != nil {
+		return fail("single instance lock: %v", err)
+	}
+	defer release()
+
 	c, err := core.Open(dbPath)
 	if err != nil {
-		fail("opening database: %v", err)
+		return fail("opening database: %v", err)
 	}
 	defer c.Close()
 	logLine("database open; %d stations cached", c.StationCount())
 
 	pl, err := player.NewMPV(cfg.MpvPath, cfg.DataDir)
 	if err != nil {
-		fail("%v\n\nscreech needs mpv for playback.\n  windows:  scoop install mpv   (or choco install mpv, or https://mpv.io)\n  macos:    brew install mpv\n  linux:    apt/dnf/pacman install mpv\n\nJust installed it? Open a NEW terminal so PATH refreshes.\nmpv somewhere odd? Set mpv_path in the config file.\nRun `screech doctor` for a full checkup.", err)
+		return fail("%v\n\nscreech needs mpv for playback.\n  windows:  scoop install mpv   (or choco install mpv, or https://mpv.io)\n  macos:    brew install mpv\n  linux:    apt/dnf/pacman install mpv\n\nJust installed it? Open a NEW terminal so PATH refreshes.\nmpv somewhere odd? Set mpv_path in the config file.\nRun `screech doctor` for a full checkup.", err)
 	}
 	defer pl.Close()
 	logLine("mpv connected over IPC")
 
 	if err := tui.Run(c, pl, tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII, SyncLimit: cfg.SyncLimit}); err != nil {
-		fail("ui: %v", err)
+		return fail("ui: %v", err)
 	}
 	logLine("clean exit")
+	return 0
 }
 
 var logF *os.File
@@ -85,9 +86,16 @@ func logPath() string {
 // openLog starts a fresh last-run log: one launch, one file, easy to paste.
 func openLog() {
 	p := logPath()
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
 	if f, err := os.Create(p); err == nil {
 		logF = f
+	}
+}
+
+func closeLog() {
+	if logF != nil {
+		_ = logF.Close()
+		logF = nil
 	}
 }
 
@@ -99,10 +107,10 @@ func logLine(format string, args ...any) {
 	_ = logF.Sync()
 }
 
-func fail(format string, args ...any) {
+func fail(format string, args ...any) int {
 	msg := fmt.Sprintf(format, args...)
 	logLine("FATAL: %s", msg)
 	fmt.Fprintln(os.Stderr, "screech: "+msg)
 	holdConsoleOnExit()
-	os.Exit(1)
+	return 1
 }
