@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,7 +70,7 @@ type Store struct {
 	q  queryer
 }
 
-func OpenStore(path string) (*Store, error) {
+func openOne(path string) (*Store, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -78,6 +79,10 @@ func OpenStore(path string) (*Store, error) {
 	db.SetMaxOpenConns(1) // single writer; screech is a one-process app
 	s := &Store{db: db, q: db}
 	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.quickCheck(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -101,6 +106,45 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func OpenStore(path string) (*Store, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			// The first attempt found corruption: move the bad file aside
+			// and try to build a fresh database. Seed stations will be
+			// restored on the next directory sync.
+			if err := archiveCorruptDB(path); err != nil {
+				return nil, err
+			}
+		}
+		s, err := openOne(path)
+		if err == nil {
+			return s, nil
+		}
+		lastErr = err
+		if !isCorruption(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("could not open database after corruption recovery: %w", lastErr)
+}
+
+func isCorruption(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "database disk image is malformed") ||
+		strings.Contains(s, "database is malformed") ||
+		strings.Contains(s, "file is not a database") ||
+		strings.Contains(s, "database corruption")
+}
+
+func archiveCorruptDB(path string) error {
+	bak := path + ".corrupt." + strconv.FormatInt(time.Now().Unix(), 10)
+	return os.Rename(path, bak)
 }
 
 // OpenStoreReadOnly opens an existing database for inspection without
@@ -133,8 +177,13 @@ func (s *Store) Begin() (*sql.Tx, error) { return s.db.Begin() }
 // transaction. Use it to group multiple persistence operations atomically.
 func (s *Store) WithTx(tx *sql.Tx) *Store { return &Store{q: tx} }
 
-func (s *Store) migrate() error {
-	_, err := s.q.Exec(`
+type migration struct {
+	version int
+	sql     string
+}
+
+var migrations = []migration{
+	{1, `
 CREATE TABLE IF NOT EXISTS stations(
 	uuid TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -204,8 +253,47 @@ CREATE TABLE IF NOT EXISTS presets(
 	station_uuid TEXT NOT NULL,
 	saved_at INTEGER NOT NULL
 );
-`)
-	return err
+`},
+}
+
+func (s *Store) migrate() error {
+	var v int
+	if err := s.q.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	for _, m := range migrations {
+		if m.version <= v {
+			continue
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(m.sql); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if _, err := s.q.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// quickCheck runs PRAGMA quick_check and returns an error if the database
+// is anything other than healthy.
+func (s *Store) quickCheck() error {
+	var ok string
+	if err := s.q.QueryRow(`PRAGMA quick_check`).Scan(&ok); err != nil {
+		return err
+	}
+	if ok != "ok" {
+		return fmt.Errorf("database integrity check failed: %s", ok)
+	}
+	return nil
 }
 
 // --- stations ---
