@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -18,13 +19,14 @@ import (
 // linux/mac, named pipe on windows — see ipc_*.go). mpv does the heavy
 // lifting: codecs, ICY metadata, reconnects, buffering.
 type MPV struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	conn   net.Conn
-	events chan Event
-	reqID  int
-	closed bool
-	sawIcy bool
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	conn    net.Conn
+	events  chan Event
+	reqID   int
+	closed  bool
+	sawIcy  bool
+	ipcPath string
 
 	lastLevelEmit time.Time
 
@@ -35,11 +37,17 @@ type MPV struct {
 	sawL, sawR bool
 }
 
-func NewMPV(mpvPath string) (*MPV, error) {
+func NewMPV(mpvPath, dataDir string) (*MPV, error) {
 	if mpvPath == "" {
 		mpvPath = "mpv"
 	}
-	path := ipcPath()
+	if dataDir == "" {
+		return nil, fmt.Errorf("data directory is required for the mpv IPC socket")
+	}
+	if err := prepareIPCDir(dataDir); err != nil {
+		return nil, fmt.Errorf("preparing IPC directory: %w", err)
+	}
+	path := ipcPath(dataDir)
 	cmd := exec.Command(mpvPath,
 		"--idle=yes",
 		"--no-video",
@@ -74,7 +82,7 @@ func NewMPV(mpvPath string) (*MPV, error) {
 		return nil, fmt.Errorf("connecting to mpv IPC: %w", err)
 	}
 
-	m := &MPV{cmd: cmd, conn: conn, events: make(chan Event, 64)}
+	m := &MPV{cmd: cmd, conn: conn, events: make(chan Event, 64), ipcPath: path}
 	for i, prop := range []string{"metadata", "media-title", "core-idle", "paused-for-cache",
 		"af-metadata/lavfi.astats.Overall.RMS_level",
 		"af-metadata/lavfi.astats.1.RMS_level",
@@ -94,14 +102,18 @@ func NewMPV(mpvPath string) (*MPV, error) {
 
 func (m *MPV) Events() <-chan Event { return m.events }
 
-func (m *MPV) Play(url string) error {
+func (m *MPV) Play(streamURL string) error {
+	u, err := url.Parse(streamURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("invalid stream URL %q: only http/https are supported", streamURL)
+	}
 	m.mu.Lock()
 	m.sawIcy = false
 	// Channel reporting is a property of the stream, not the process: a
 	// mono station following a stereo one must not inherit its stereo flag.
 	m.sawL, m.sawR = false, false
 	m.mu.Unlock()
-	return m.send("loadfile", url)
+	return m.send("loadfile", streamURL)
 }
 
 func (m *MPV) SetVolume(percent int) error {
@@ -130,6 +142,7 @@ func (m *MPV) Close() error {
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
 	}
+	_ = cleanupIPC(m.ipcPath)
 	return nil
 }
 

@@ -13,8 +13,9 @@ import (
 	winio "github.com/Microsoft/go-winio"
 )
 
-// mpv on Windows serves JSON IPC over a named pipe, not a unix socket.
-func ipcPath() string {
+func prepareIPCDir(dir string) error { return nil }
+
+func ipcPath(dir string) string {
 	return fmt.Sprintf(`\\.\pipe\screech-mpv-%d`, os.Getpid())
 }
 
@@ -23,7 +24,8 @@ func dialIPC(path string) (net.Conn, error) {
 	return winio.DialPipe(path, &timeout)
 }
 
-// configureCmd hides the mpv console window.
 func configureCmd(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 }
+
+func cleanupIPC(path string) error { return nil }

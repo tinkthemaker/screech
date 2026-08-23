@@ -41,6 +41,18 @@ func runDoctor() {
 		fmt.Printf("        -> %v\n", cfgErr)
 	}
 
+	dataDir := cfg.DataDir
+	var cleanupDataDir func()
+	cleanupDataDir = func() {}
+	if dataDir == "" {
+		d, err := os.MkdirTemp("", "screech-doctor-*")
+		if err == nil {
+			dataDir = d
+			cleanupDataDir = func() { _ = os.RemoveAll(d) }
+		}
+	}
+	defer cleanupDataDir()
+
 	stations := 0
 	var dbErr error
 	if cfgErr == nil {
@@ -74,9 +86,16 @@ func runDoctor() {
 		}
 		// The joint that matters: spawn mpv and shake hands over IPC
 		// (unix socket / Windows named pipe).
-		pl, ipcErr := player.NewMPV(resolved)
-		if ipcErr == nil {
-			_ = pl.Close()
+		var ipcErr error
+		if dataDir != "" {
+			pl, err := player.NewMPV(resolved, dataDir)
+			if err != nil {
+				ipcErr = err
+			} else {
+				_ = pl.Close()
+			}
+		} else {
+			ipcErr = fmt.Errorf("no data directory available for IPC test")
 		}
 		fmt.Printf("[%s] mpv IPC  spawn + handshake\n", ok(ipcErr == nil))
 		if ipcErr != nil {

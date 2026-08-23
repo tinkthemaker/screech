@@ -77,8 +77,10 @@ func Load() (Config, string, error) {
 	if dataDir == "" {
 		dataDir = dir
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return cfg, "", err
 	}
+	_ = os.Chmod(dataDir, 0o700)
+	cfg.DataDir = dataDir
 	return cfg, filepath.Join(dataDir, "screech.db"), nil
 }

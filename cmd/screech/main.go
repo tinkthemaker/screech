@@ -57,7 +57,7 @@ func main() {
 	defer c.Close()
 	logLine("database open; %d stations cached", c.StationCount())
 
-	pl, err := player.NewMPV(cfg.MpvPath)
+	pl, err := player.NewMPV(cfg.MpvPath, cfg.DataDir)
 	if err != nil {
 		fail("%v\n\nscreech needs mpv for playback.\n  windows:  scoop install mpv   (or choco install mpv, or https://mpv.io)\n  macos:    brew install mpv\n  linux:    apt/dnf/pacman install mpv\n\nJust installed it? Open a NEW terminal so PATH refreshes.\nmpv somewhere odd? Set mpv_path in the config file.\nRun `screech doctor` for a full checkup.", err)
 	}
