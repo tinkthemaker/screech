@@ -41,7 +41,10 @@ two controls:
   un-loving the first.
 - **dead streams** (`TuneDead`) — a stream that fails to lock closes its
   listen with no skip semantics and no bandit reward; fail_count is the
-  whole penalty. Network trouble is not dislike.
+  whole penalty. Network trouble is not dislike — and an outage is not the
+  stations' fault either: three consecutive failures read as the network,
+  so those strikes are returned (`ForgiveFailure`) and the UI goes offline
+  instead of burning through the cache (see Playback).
 
 Shipped in v0.2, still within the austerity budget:
 
@@ -99,6 +102,41 @@ IPC transport differs by OS: unix socket on linux/mac, **named pipe on Windows**
 (`\\.\pipe\…`, via go-winio). The thin client (~150 lines) supports both behind
 build tags. Observe `metadata` (prefer `icy-title` key) and `media-title` as
 fallback; watch `core-idle` / `paused-for-cache` for the connect spinner.
+
+**Stream lifecycle (v0.7).** Live radio drops constantly, and mpv does not
+reconnect non-seekable ICY streams by default, so a dropped server used to
+leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
+
+- `end-file` events are filtered by load generation: between a `loadfile`
+  and the next `start-file`, any `end-file` belongs to the file being
+  replaced (mpv always reports the old file's `stop` before the new
+  `start-file`) and is dropped. What remains is about the current stream:
+  `error` → stream failed, `eof` → stream ended on its own.
+- `--stream-lavf-o=reconnect_streamed=1` lets ffmpeg ride out brief drops
+  inside one connection; the app-level rules below are the backstop.
+  `--ytdl=no`: radio never needs yt-dlp, and mpv's hook would otherwise run
+  it on every URL that fails to load, delaying the failure everything below
+  keys on.
+- Until an ICY title arrives, `media-title` is just the URL's basename
+  (`aac-128`, `kexp128.mp3`; KEXP sends an empty `icy-title`, so its stays
+  that forever). That fallback is suppressed; it used to show as the track
+  and log a junk heard-track on every tune (migration 4 purged them).
+- A failure *before* lock (error, eof, or 12s of nothing) is the station's:
+  one strike, move on. A failure *after* lock (eof, error, or a 20s buffer
+  stall) is a drop: re-`loadfile` the same station without touching the open
+  listen, so dwell credit and the readout clock carry across the gap. More
+  than three drops without a stable minute in between counts as a failure.
+- Three consecutive pre-lock failures mean the network, not the stations
+  (offline DNS fails in milliseconds; striking each would bench the whole
+  cache in a minute). The strikes are returned, the listen closes without
+  semantics, and the UI enters `OFFLINE`: retries back off 5s → 60s,
+  alternating the last station that locked with a fresh pick, and never
+  strike. Any lock clears it.
+- A crashed mpv is respawned (same volume, new IPC endpoint) and the station
+  resumed as a reconnect, at most three times per five minutes.
+- mpv is a child that must not outlive screech: a kill-on-close job object
+  on Windows, `PDEATHSIG` on Linux. macOS has no kernel equivalent; a clean
+  quit, SIGTERM, SIGHUP, or panic all still stop it.
 
 ## Station data
 
@@ -215,7 +253,18 @@ Curation does the real work; runtime detection is a bonus, and expectations stay
   as ground truth.
 - `bandit` — (station, daypart) → alpha, beta, updated_at  (daypart 'all' = all-time row)
 - `tag_affinity` — tag → weight, updated_at
-- `meta` — key/value (schema version, last station, last sync)
+- `meta` — key/value (last station, last sync, volume, theme)
+- `presets` — slot 1-9 → station, saved_at
+
+Schema changes are numbered migrations recorded in `PRAGMA user_version`,
+each applied with its version stamp inside one transaction. Opening runs
+`quick_check`; a database that fails it (or isn't SQLite at all) is moved
+aside with its WAL/SHM as `screech.db.corrupt.<ts>` and rebuilt, and the
+status line says so. Text arriving from the network (station metadata, ICY
+titles) is stripped of terminal escapes, controls, and bidi overrides at
+ingest and again on read; migration 3 normalized rows stored before that
+(re-deriving artist keys), so loves recorded by older versions still toggle,
+forget, and count.
 
 ## UI — visual language
 
@@ -456,12 +505,21 @@ status line, keeping the whole display a single 12–14-line object.
 function of elapsed time; no per-effect goroutines. Fixed zone heights so frames
 never reflow. All truncation through go-runewidth, ellipsis, never wrap.
 Degradation ladder: <50 cols drop wave + band line; <40 drop readout; never break.
+"Never break" is enforced, not hoped for: `TestViewFitsEveryTerminalSize`
+renders every overlay at every width 1–30 and height 1–16 (sampled beyond)
+and fails on any panic or overflowing row. There is no minimum terminal size
+at startup.
 `ascii = true` in TOML swaps every fancy glyph for ASCII (bad SSH insurance).
 
 ## Config
 
 One TOML at `os.UserConfigDir()/screech/config.toml`, created with commented
-defaults on first run: `accent`, `ascii`, `mpv_path`, `data_dir`, `auto_hop_ads`.
+defaults on first run: `accent`, `ascii`, `mpv_path`, `data_dir`, `auto_hop_ads`,
+`sync_limit`. `data_dir` expands `~` and resolves relative paths against the
+config directory (a double-click launch has a different CWD than a shell).
+Bad values never stop the radio: unknown keys, a malformed accent, and an
+out-of-range `sync_limit` (1–50,000) are repaired with a warning in the log
+and in `screech doctor`; only invalid TOML is fatal.
 
 ## Stack
 

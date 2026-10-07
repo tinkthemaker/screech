@@ -42,11 +42,22 @@ collapse back to a compact stacked layout.
 ## Run
 
 ```
-go run ./cmd/screech   # from source (Go 1.25+)
+go run ./cmd/screech   # from source (Go 1.26+)
 ```
 
 Prebuilt binaries for Windows, macOS, and Linux are attached to each tagged
 release. Building writes to `dist/`, which is not tracked.
+
+```
+screech                   start the radio (default)
+screech doctor            read-only checkup of config, database, mpv, IPC, network
+screech --version         print the version
+screech --help            usage
+screech --reduced-motion  no love-heart flash (or set SCREECH_REDUCED_MOTION=1)
+```
+
+Only one screech runs per data directory; a second launch says so and exits
+without touching the first one's log.
 
 First launch starts playing immediately from the built-in stations while the
 radio-browser.info directory fills in behind it. If the directory is
@@ -89,12 +100,16 @@ stations show as ticks on the dial line. Nine slots stay nine: they're
 muscle memory, not a list. Everything past that lives in the library.
 
 **v** — open Screech's volume slider. Left/right arrows or `-`/`+` adjust
-the player in five-percent steps without changing system volume. The level
-is remembered across launches; `v`, enter, or esc closes the slider.
+the player in five-percent steps without changing system volume; `-`/`+`
+(or `[`/`]`) also work straight from the main screen. The level is
+remembered across launches; `v`, enter, or esc closes the slider.
 
-**t** — open the theme picker. Move with arrows or `j`/`k` to preview a finish
-live, Enter applies and remembers it, and Escape restores the previous theme.
-The initial choices are Receiver (warm phosphor) and Austere (monochrome).
+**t** — open the theme picker. Move with arrows or `j`/`k` (or press a
+digit) to preview a finish live, Enter applies and remembers it, and Escape
+restores the previous theme. Receiver is the warm phosphor default and
+Austere is strict monochrome; Verdant, Azure, Violet, and Slayer are the
+same faceplate in other hues, and Charm and Lagoon carry a two-hue
+gradient. Every finish tempers with the time of day.
 
 **h** — recently heard tracks, newest first. Loved tracks carry an ember
 heart.
@@ -156,13 +171,61 @@ The wave under the station name moves with the stream's real loudness,
 measured by mpv and reported over the same pipe that carries titles. Texture
 is synthetic; amplitude is true.
 
+## When the signal drops
+
+Internet radio drops constantly, and none of it should need you.
+
+- A station that was playing and loses its stream (the server hangs up, or
+  the buffer stalls for 20 seconds) is reconnected in place: same station,
+  same listen, `RECONNECTING` in the header. Only a station that drops
+  more than three times without a steady minute in between gets a strike
+  and is left behind.
+- A station that never locks (12 seconds of nothing, or an outright error)
+  gets one strike and screech moves on. Three strikes benches it until a
+  directory refresh vouches for it again.
+- When three stations in a row fail, the problem is the network, not the
+  stations: screech takes back the strikes it just handed out, shows
+  `OFFLINE`, and retries on its own (5s, 10s, 20s… up to a minute),
+  alternating between the last station that played and a fresh one.
+  `SPACE` tries immediately. The first stream that locks clears it.
+- If mpv itself crashes, screech restarts it and picks the station back up,
+  up to three times in five minutes before it asks you to restart.
+- If screech is killed outright, the mpv it started goes with it on Windows
+  and Linux, instead of playing on with nothing to stop it.
+
 ## Config
 
-`%AppData%\screech\config.toml` on Windows and
-`~/.config/screech/config.toml` elsewhere. The commented defaults cover the
-accent color, ASCII fallback, mpv path, data directory, ad hopping, and
-directory cache size. The theme picker and volume are remembered in the local
-SQLite file. Everything Screech learns lives there too.
+`%AppData%\screech\config.toml` on Windows,
+`~/Library/Application Support/screech/config.toml` on macOS, and
+`~/.config/screech/config.toml` on Linux. First launch writes it with
+commented defaults covering the accent color, ASCII fallback, mpv path, data
+directory, ad hopping, and directory cache size (`sync_limit`, at most
+50,000). `data_dir` accepts `~` and paths relative to the config file.
+
+A typo never stops the radio: unknown keys, a malformed accent, or an
+out-of-range `sync_limit` are repaired or ignored, and each one is listed
+in the log and by `screech doctor`. A config that isn't valid TOML is the
+one thing that does stop startup, with the line number.
+
+The theme picker and volume are remembered in the local SQLite file.
+Everything Screech learns lives there too.
+
+## Your data
+
+Everything stays on your machine: `config.toml`, `screech.db` (stations,
+listens, loved tracks, the taste model), and `screech.log` (the last run
+only). The network traffic is the streams you listen to and the
+radio-browser.info directory: the weekly catalog refresh, `/` searches, and
+the click report their etiquette asks for when a station starts. Nothing
+else, and no telemetry.
+
+To start over, quit and delete the data directory. If the database is ever
+damaged, screech moves it aside as `screech.db.corrupt.<timestamp>`, starts
+fresh, and says so on the status line.
+
+Station names and track titles come from strangers' servers, so screech
+strips terminal control sequences and layout-breaking characters before it
+displays or stores them.
 
 ## Building
 
@@ -175,9 +238,16 @@ workflow. SQLite is pure Go, so cross-compilation does not require CGO.
 
 ## Troubleshooting
 
-Run `screech doctor` for dependency, database, IPC, and network checks.
-Set `ascii = true` if terminal glyphs render poorly. The last-run log lives
-next to the config file.
+Run `screech doctor` for dependency, database, IPC, and network checks. It
+changes nothing on disk (the mpv handshake runs in a throwaway temp
+directory), reports files a fresh install hasn't created yet as `--` rather
+than failures, and exits with a bitmask of what failed: 1 config, 2
+database, 4 mpv, 8 IPC, 16 network.
+
+Set `ascii = true` if terminal glyphs render poorly. Small windows are fine:
+the layout sheds detail step by step, down to a few columns, rather than
+refusing to start.
+The last-run log lives next to the config file.
 
 ## Design
 
