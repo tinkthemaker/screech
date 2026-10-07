@@ -1398,7 +1398,7 @@ func (m Model) statusRow(text string, iw int, active bool) string {
 	text = strings.Replace(text, "  ", " "+m.th.G.Dot+" ", 1)
 	text = runewidth.Truncate(text, iw, m.th.G.Ellipsis)
 	parts := strings.SplitN(text, " "+m.th.G.Dot+" ", 2)
-	labelStyle, detailStyle := m.th.AccentDim.Bold(true), m.th.Dim
+	labelStyle, detailStyle := m.th.Dim, m.th.Dim
 	glyph := m.th.G.Pointer
 	if active {
 		labelStyle, detailStyle = m.th.Accent.Bold(true), m.th.Mid
@@ -1413,7 +1413,8 @@ func (m Model) statusRow(text string, iw int, active bool) string {
 			labelStyle = m.th.Mid.Bold(true)
 			glyph = m.th.G.Tick
 		default:
-			labelStyle = m.th.Dim
+			// The dim label the row already starts with; only the glyph
+			// steps down to the quietest mark.
 			glyph = m.th.G.Dot
 		}
 	}

@@ -27,21 +27,29 @@ type Station struct {
 	LastCheckOK bool
 	AdRisk      float64
 	FailCount   int
+
+	// tagList memoizes TagList. Tags is treated as immutable once a
+	// Station exists: the cache and the directory both rebuild whole
+	// Station values rather than editing one in place.
+	tagList []string
 }
 
-// TagList returns the station's tags split and trimmed.
+// TagList returns the station's tags split and trimmed. The result is
+// memoized because the tune path walks it once per candidate per pick, and
+// the cache holds twenty thousand stations by default.
 func (s *Station) TagList() []string {
-	if s.Tags == "" {
-		return nil
+	if s.tagList != nil || s.Tags == "" {
+		return s.tagList
 	}
 	parts := strings.Split(s.Tags, ",")
-	out := parts[:0]
+	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		p = strings.ToLower(strings.TrimSpace(p))
 		if p != "" {
 			out = append(out, p)
 		}
 	}
+	s.tagList = out
 	return out
 }
 
@@ -71,7 +79,11 @@ type Store struct {
 }
 
 func openOne(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", path)
+	// The path is escaped: a data_dir carrying '?', '#', or '&' would
+	// otherwise truncate the DSN into an unrelated (or invalid) one, and the
+	// driver error that follows says nothing about the real cause.
+	dsn := "file:" + escapeDSNPath(path) +
+		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -131,6 +143,15 @@ func OpenStore(path string) (*Store, error) {
 	return nil, fmt.Errorf("could not open database after corruption recovery: %w", lastErr)
 }
 
+// escapeDSNPath percent-encodes the three characters that change how a
+// file: DSN is parsed. Everything else (drive letters, backslashes, spaces)
+// is left alone so the DSN stays readable in error messages.
+func escapeDSNPath(path string) string {
+	return dsnPathEscaper.Replace(path)
+}
+
+var dsnPathEscaper = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
+
 func isCorruption(err error) bool {
 	if err == nil {
 		return false
@@ -154,7 +175,7 @@ func OpenStoreReadOnly(path string) (*Store, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&mode=ro", path)
+	dsn := "file:" + escapeDSNPath(path) + "?_pragma=busy_timeout(5000)&mode=ro"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -253,6 +274,13 @@ CREATE TABLE IF NOT EXISTS presets(
 	station_uuid TEXT NOT NULL,
 	saved_at INTEGER NOT NULL
 );
+`},
+	// The love toggle, the heart on every title change, and unlove all
+	// look up loved rows by (artist_key, title) or by station; without
+	// these each one is a full scan of a table that only grows.
+	{2, `
+CREATE INDEX IF NOT EXISTS idx_loved_artist_title ON loved(artist_key, title);
+CREATE INDEX IF NOT EXISTS idx_loved_station ON loved(station_uuid);
 `},
 }
 
@@ -612,21 +640,6 @@ func (s *Store) StationArtists() (map[string]map[string]bool, error) {
 type banditRow struct {
 	Alpha, Beta float64
 	UpdatedAt   time.Time
-}
-
-func (s *Store) GetBandit(station, daypart string) (banditRow, bool, error) {
-	var r banditRow
-	var ts int64
-	err := s.q.QueryRow(`SELECT alpha,beta,updated_at FROM bandit WHERE station_uuid=? AND daypart=?`,
-		station, daypart).Scan(&r.Alpha, &r.Beta, &ts)
-	if err == sql.ErrNoRows {
-		return r, false, nil
-	}
-	if err != nil {
-		return r, false, err
-	}
-	r.UpdatedAt = time.Unix(ts, 0)
-	return r, true, nil
 }
 
 func (s *Store) PutBandit(station, daypart string, alpha, beta float64, at time.Time) error {
