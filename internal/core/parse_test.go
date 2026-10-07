@@ -45,6 +45,8 @@ func TestNormalizeArtist(t *testing.T) {
 		"  BONOBO  ":                   "bonobo",
 		"Massive Attack ft. Tracey":    "massive attack",
 		"A Winged Victory featuring X": "a winged victory",
+		"Sleeping With Sirens":         "sleeping with sirens",
+		"Dance With The Dead":          "dance with the dead",
 		"":                             "",
 	}
 	for in, want := range cases {

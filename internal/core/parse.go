@@ -83,13 +83,19 @@ func ParseTitle(raw, stationName string) (Track, bool) {
 
 // NormalizeArtist produces the matching key for an artist name.
 // Case-folded, "the " stripped, feat./ft. suffixes cut, whitespace collapsed.
+//
+// The guest-credit markers stay limited to the unambiguous ones. " with " was
+// one of them until it turned out to truncate band names that merely contain
+// the word: "Sleeping With Sirens" keyed as "sleeping". Missing an "Artist
+// with Guest" collapse costs one unlinked play; a false merge corrupts the
+// loved set and the fingerprint IDF that weights it.
 func NormalizeArtist(a string) string {
 	s := strings.ToLower(strings.TrimSpace(a))
 	if s == "" {
 		return ""
 	}
 	s = strings.TrimPrefix(s, "the ")
-	for _, sep := range []string{" feat.", " feat ", " featuring ", " ft.", " ft ", " with "} {
+	for _, sep := range []string{" feat.", " feat ", " featuring ", " ft.", " ft "} {
 		if i := strings.Index(s, sep); i > 0 {
 			s = s[:i]
 		}

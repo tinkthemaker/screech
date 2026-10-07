@@ -298,6 +298,16 @@ func (s *Store) quickCheck() error {
 
 // --- stations ---
 
+// UpsertStations merges a directory slice into the station cache. Every
+// column here is directory-owned and refreshed wholesale, with two
+// exceptions: fail_count is local and only ever forgiven a strike, and
+// ad_risk is the one value Screech computes rather than receives.
+//
+// ComputeAdRisk is deterministic over the very columns being refreshed, so
+// overwriting it costs nothing today. That stops being true the moment a
+// second source of ad-risk exists (a lazily judged score, a user override):
+// this clause would erase it on the next weekly sync. Keep such a value in
+// its own table keyed by uuid rather than widening this one.
 func (s *Store) UpsertStations(sts []Station, fetchedAt time.Time) error {
 	tx, err := s.db.Begin()
 	if err != nil {
