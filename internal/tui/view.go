@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
 	"screech/internal/core"
@@ -149,6 +150,16 @@ func (m Model) settleScale() float64 {
 	return k
 }
 
+// hasColor reports whether c carries a real color. lipgloss getters return
+// NoColor{} — never nil — for "unset", so both answers mean "no color here".
+func hasColor(c lipgloss.TerminalColor) bool {
+	if c == nil {
+		return false
+	}
+	_, none := c.(lipgloss.NoColor)
+	return !none
+}
+
 // scaleStyle multiplies a style's foreground and background colors by k at
 // the application layer. Colors that aren't set or aren't 7-char hex pass
 // through untouched.
@@ -164,10 +175,10 @@ func scaleStyle(s lipgloss.Style, k float64) lipgloss.Style {
 		r, g, b := hexRGB(hex)
 		return lipgloss.Color(rgbHex(int(float64(r)*k), int(float64(g)*k), int(float64(b)*k)))
 	}
-	if fg := s.GetForeground(); fg != nil {
+	if fg := s.GetForeground(); hasColor(fg) {
 		s = s.Foreground(scale(fg))
 	}
-	if bg := s.GetBackground(); bg != nil {
+	if bg := s.GetBackground(); hasColor(bg) {
 		s = s.Background(scale(bg))
 	}
 	return s
@@ -185,7 +196,7 @@ func (m Model) borderStyle() lipgloss.Style {
 func (m Model) loveWash() lipgloss.TerminalColor {
 	base := m.th.LoveFill.GetBackground()
 	since := m.now.Sub(m.loveAt)
-	if base == nil || since < 0 || since >= 2*time.Second {
+	if !hasColor(base) || since < 0 || since >= 2*time.Second {
 		return base
 	}
 	bhex, lhex := fmt.Sprint(base), fmt.Sprint(m.th.Love.GetForeground())
@@ -295,6 +306,7 @@ func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 		if !m.haveSt {
 			micro = "STANDBY"
 		}
+		micro = runewidth.Truncate(micro, iw, m.th.G.Ellipsis)
 		rows = append(rows, scaleStyle(m.th.Dim, m.settleScale()).Render(micro))
 	}
 	rows = append(rows, m.heroRow(iw, m.idle()))
@@ -391,7 +403,8 @@ func (m Model) staticRows(width int, th Theme) []string {
 func (m Model) themeRows(iw, budget int) []string {
 	choices := ThemeChoices()
 	if iw < 50 || budget < len(choices)+5 {
-		rows := []string{m.th.Accent.Bold(true).Render("THEME")}
+		rows := []string{m.th.Accent.Bold(true).Render(
+			runewidth.Truncate("THEME", iw, m.th.G.Ellipsis))}
 		for i, choice := range choices {
 			pointer := "  "
 			style := m.th.Mid
@@ -1009,7 +1022,7 @@ func (m Model) frameRule(width int, top bool, label string) string {
 // than competing with the chassis edge.
 func (m Model) seamStyle() lipgloss.Style {
 	s := scaleStyle(m.th.PanelBorder, 0.62*m.settleScale())
-	if bg := m.th.PanelFill.GetBackground(); bg != nil {
+	if bg := m.th.PanelFill.GetBackground(); hasColor(bg) {
 		s = s.Background(bg)
 	}
 	return s
@@ -1042,6 +1055,14 @@ func (m Model) panelFull(content string, width int, fill lipgloss.Style) string 
 }
 
 func surfaceCell(content string, width int, fill lipgloss.Style) string {
+	if width <= 0 {
+		return ""
+	}
+	// The cell owns its width: a caption longer than the bay shrinks to fit
+	// rather than pushing the right border past the chassis edge.
+	if lipgloss.Width(content) > width {
+		content = ansi.Truncate(content, width, "") + "\x1b[0m"
+	}
 	gap := maxI(0, width-lipgloss.Width(content))
 	return content + fill.Render(strings.Repeat(" ", gap))
 }
@@ -1296,7 +1317,7 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	markerStyle := th.Accent
 	if idle {
 		markerStyle = m.th.BreatheStyle(m.now.Sub(m.start).Seconds())
-		if bg := th.Accent.GetBackground(); bg != nil {
+		if bg := th.Accent.GetBackground(); hasColor(bg) {
 			markerStyle = markerStyle.Background(bg)
 		}
 	}
@@ -1304,7 +1325,7 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	// same surface as its neighbors.
 	if m.lovedTrack && m.now.Sub(m.loveAt) < 600*time.Millisecond {
 		markerStyle = th.Love
-		if bg := th.Accent.GetBackground(); bg != nil {
+		if bg := th.Accent.GetBackground(); hasColor(bg) {
 			markerStyle = markerStyle.Background(bg)
 		}
 	}
@@ -1348,7 +1369,7 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 		}
 		r, g, b := th.rampColor(bl.frac)
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(rgbHex(r, g, b)))
-		if bg := th.Accent.GetBackground(); bg != nil {
+		if bg := th.Accent.GetBackground(); hasColor(bg) {
 			style = style.Background(bg)
 		}
 		glyph := th.G.Band
@@ -1419,10 +1440,10 @@ func (m Model) statusRow(text string, iw int, active bool) string {
 		}
 	}
 	if len(parts) == 1 {
-		return m.th.Dim.Render(glyph+" ") + labelStyle.Render(parts[0])
+		return clip(m.th.Dim.Render(glyph+" ")+labelStyle.Render(parts[0]), iw)
 	}
-	return m.th.Dim.Render(glyph+" ") + labelStyle.Render(parts[0]) +
-		m.th.Dim.Render(" "+m.th.G.Dot+" ") + detailStyle.Render(parts[1])
+	return clip(m.th.Dim.Render(glyph+" ")+labelStyle.Render(parts[0])+
+		m.th.Dim.Render(" "+m.th.G.Dot+" ")+detailStyle.Render(parts[1]), iw)
 }
 
 func statusReason(reason string) string {
@@ -1460,14 +1481,14 @@ func (m Model) promptRow(iw int) string {
 			hint = "type a genre or artist " + m.th.G.Dot + " space for a wildcard"
 		}
 		hint = runewidth.Truncate(hint, maxI(0, iw-5), m.th.G.Ellipsis)
-		return prefix + m.th.Accent.Render(cur) + "  " + m.th.Dim.Render(hint)
+		return clip(prefix+m.th.Accent.Render(cur)+"  "+m.th.Dim.Render(hint), iw)
 	}
 	buf := string(m.buf)
 	avail := iw - 3
 	if bw := runewidth.StringWidth(buf); bw > avail {
 		buf = sliceCols(buf, bw-avail, avail)
 	}
-	return prefix + m.th.Bright.Render(buf) + m.th.Accent.Render(cur)
+	return clip(prefix+m.th.Bright.Render(buf)+m.th.Accent.Render(cur), iw)
 }
 
 func (m Model) volumeRow(iw int) string {
@@ -1539,7 +1560,8 @@ func (m Model) historyTabs(iw int) string {
 
 func (m Model) recentRows(rows []string, iw int, budget int) []string {
 	if len(m.recent) == 0 {
-		return append(rows, m.th.Dim.Render("nothing heard yet"))
+		return append(rows, m.th.Dim.Render(
+			runewidth.Truncate("nothing heard yet", iw, m.th.G.Ellipsis)))
 	}
 	maxRows := minI(len(m.recent), budget-len(rows))
 	for i := 0; i < maxRows; i++ {
@@ -1608,7 +1630,7 @@ func (m Model) lovedRows(rows []string, iw int, budget int) []string {
 			left := selText.Render(" ") + m.th.Love.Background(bg).Render(m.th.G.Heart) + selText.Render(" "+label)
 			right := selMeta.Render(count + " ")
 			gap := maxI(0, iw-lipgloss.Width(left)-lipgloss.Width(right))
-			rows = append(rows, left+selFill.Render(strings.Repeat(" ", gap))+right)
+			rows = append(rows, clip(left+selFill.Render(strings.Repeat(" ", gap))+right, iw))
 		} else {
 			left := " " + m.th.Love.Render(m.th.G.Heart) + " " + m.th.Mid.Render(label)
 			right := m.th.Dim.Render(count + " ")
@@ -1631,9 +1653,9 @@ func (m Model) libraryFindRow(iw, matches int) string {
 		}
 		query := string(m.libraryQuery)
 		if query == "" {
-			return m.th.AccentDim.Bold(true).Render("FIND") + "  " +
-				m.th.Dim.Render(runewidth.Truncate("artist, title, or station", maxI(0, iw-7), m.th.G.Ellipsis)) +
-				m.th.Accent.Render(cursor)
+			return clip(m.th.AccentDim.Bold(true).Render("FIND")+"  "+
+				m.th.Dim.Render(runewidth.Truncate("artist, title, or station", maxI(0, iw-7), m.th.G.Ellipsis))+
+				m.th.Accent.Render(cursor), iw)
 		}
 		prefix := m.th.AccentDim.Bold(true).Render("FIND") + "  "
 		count := m.th.Dim.Render(fmt.Sprintf("%d", matches))
@@ -1709,7 +1731,7 @@ func (m Model) stationHistoryRows(rows []string, iw int, budget int) []string {
 			left := m.th.SelText.Render(" " + m.th.G.Pointer + " " + name)
 			right := m.th.SelMeta.Render(meta + " ")
 			gap := maxI(0, iw-lipgloss.Width(left)-lipgloss.Width(right))
-			rows = append(rows, left+m.th.SelFill.Render(strings.Repeat(" ", gap))+right)
+			rows = append(rows, clip(left+m.th.SelFill.Render(strings.Repeat(" ", gap))+right, iw))
 		} else {
 			var leftStyle lipgloss.Style
 			if i == 0 && len(m.savedQuery) == 0 {
@@ -1738,9 +1760,9 @@ func (m Model) savedFindRow(iw, matches int) string {
 		}
 		query := string(m.savedQuery)
 		if query == "" {
-			return m.th.AccentDim.Bold(true).Render("FIND") + "  " +
-				m.th.Dim.Render(runewidth.Truncate("station name", maxI(0, iw-7), m.th.G.Ellipsis)) +
-				m.th.Accent.Render(cursor)
+			return clip(m.th.AccentDim.Bold(true).Render("FIND")+"  "+
+				m.th.Dim.Render(runewidth.Truncate("station name", maxI(0, iw-7), m.th.G.Ellipsis))+
+				m.th.Accent.Render(cursor), iw)
 		}
 		prefix := m.th.AccentDim.Bold(true).Render("FIND") + "  "
 		count := m.th.Dim.Render(fmt.Sprintf("%d", matches))
@@ -1901,9 +1923,24 @@ func lrRow(left, right string, w int) string {
 	rw := lipgloss.Width(right)
 	gap := w - lw - rw
 	if gap < 1 {
-		return left
+		return clip(left, w)
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// clip is the escape hatch for the pathologically narrow end: most rows
+// negotiate their width up front, but rows assembled from fixed furniture
+// (prompt chevrons, status glyphs, find prefixes) can still outgrow a
+// handful of columns. ansi.Truncate is sequence-aware, so a styled row
+// cut mid-segment keeps its SGR runs well-formed.
+func clip(line string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(line) <= w {
+		return line
+	}
+	return ansi.Truncate(line, w, "") + "\x1b[0m"
 }
 
 func fmtElapsed(d time.Duration) string {

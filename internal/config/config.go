@@ -4,8 +4,12 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -17,14 +21,26 @@ type Config struct {
 	DataDir    string `toml:"data_dir"`
 	AutoHopAds bool   `toml:"auto_hop_ads"`
 	SyncLimit  int    `toml:"sync_limit"`
+
+	// Warnings carries what Read repaired or ignored while loading. Every
+	// entry is advisory — nothing here ever fails the load.
+	Warnings []string `toml:"-"`
 }
+
+const (
+	defaultAccent    = "#FFB000"
+	defaultSyncLimit = 20000
+	maxSyncLimit     = 50000 // beyond the directory's working-station count
+)
+
+var accentRe = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 
 func defaults() Config {
 	return Config{
-		Accent:    "#FFB000",
+		Accent:    defaultAccent,
 		ASCII:     false,
 		MpvPath:   "mpv",
-		SyncLimit: 20000,
+		SyncLimit: defaultSyncLimit,
 	}
 }
 
@@ -39,7 +55,8 @@ ascii = false
 # Path to the mpv binary if it isn't on PATH.
 mpv_path = "mpv"
 
-# Where the database lives. Empty = next to this file.
+# Where the database lives. Empty = next to this file. "~" and relative
+# paths resolve against home and this file's directory respectively.
 data_dir = ""
 
 # Auto-hop away from suspected ad breaks. Placeholder: this key is read but
@@ -56,42 +73,59 @@ sync_limit = 20000
 // database path and data directory. It does not create files or directories;
 // use Load for first-run setup.
 func Read() (Config, string, string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		base = "."
-	}
-	dir := filepath.Join(base, "screech")
-	path := filepath.Join(dir, "config.toml")
-	cfg := defaults()
-	dataDir := cfg.DataDir
-	if dataDir == "" {
-		dataDir = dir
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, filepath.Join(dataDir, "screech.db"), dataDir, err
-	}
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
-		return cfg, filepath.Join(dataDir, "screech.db"), dataDir, err
-	}
-	dataDir = cfg.DataDir
-	if dataDir == "" {
-		dataDir = dir
-	}
-	return cfg, filepath.Join(dataDir, "screech.db"), dataDir, nil
+	return readFrom(configDir())
 }
 
 // Load reads (creating if needed) the config and returns it plus the
 // database path. On first run it creates the config directory with 0700
 // permissions and a default config file.
 func Load() (Config, string, error) {
-	cfg, dbPath, dataDir, err := Read()
+	return loadFrom(configDir())
+}
+
+func configDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		base = "."
+	}
+	return filepath.Join(base, "screech")
+}
+
+func readFrom(dir string) (Config, string, string, error) {
+	path := filepath.Join(dir, "config.toml")
+	cfg := defaults()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, filepath.Join(dir, "screech.db"), dir, err
+	}
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return cfg, filepath.Join(dir, "screech.db"), dir, err
+	}
+	for _, k := range md.Undecoded() {
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("unknown key %q (ignored)", k.String()))
+	}
+	if !accentRe.MatchString(cfg.Accent) {
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("accent %q is not #RRGGBB; using %s", cfg.Accent, defaultAccent))
+		cfg.Accent = defaultAccent
+	}
+	switch {
+	case cfg.SyncLimit <= 0:
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("sync_limit %d is not positive; using %d", cfg.SyncLimit, defaultSyncLimit))
+		cfg.SyncLimit = defaultSyncLimit
+	case cfg.SyncLimit > maxSyncLimit:
+		// Radio-browser etiquette: the directory has fewer working
+		// stations than that anyway, so a bigger ask is pure waste.
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("sync_limit %d exceeds %d; clamped", cfg.SyncLimit, maxSyncLimit))
+		cfg.SyncLimit = maxSyncLimit
+	}
+	dataDir := resolveDataDir(cfg.DataDir, dir)
+	return cfg, filepath.Join(dataDir, "screech.db"), dataDir, nil
+}
+
+func loadFrom(dir string) (Config, string, error) {
+	cfg, dbPath, dataDir, err := readFrom(dir)
 	if os.IsNotExist(err) {
-		base, berr := os.UserConfigDir()
-		if berr != nil {
-			base = "."
-		}
-		dir := filepath.Join(base, "screech")
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return cfg, "", err
 		}
@@ -101,7 +135,7 @@ func Load() (Config, string, error) {
 			return cfg, "", err
 		}
 		_ = os.Chmod(path, 0o600)
-		cfg, dbPath, dataDir, err = Read()
+		cfg, dbPath, dataDir, err = readFrom(dir)
 	}
 	if err != nil {
 		return cfg, "", err
@@ -112,4 +146,25 @@ func Load() (Config, string, error) {
 	_ = os.Chmod(dataDir, 0o700)
 	cfg.DataDir = dataDir
 	return cfg, dbPath, nil
+}
+
+// resolveDataDir turns the configured data_dir into an absolute path.
+// A leading "~" means the user's home; a relative path anchors to the
+// config file's directory rather than the process CWD, which is not the
+// same place when screech is double-clicked instead of launched from a
+// shell. Empty stays "next to the config file".
+func resolveDataDir(dataDir, cfgDir string) string {
+	if dataDir == "" {
+		return cfgDir
+	}
+	if dataDir == "~" || strings.HasPrefix(dataDir, "~/") ||
+		(runtime.GOOS == "windows" && strings.HasPrefix(dataDir, `~\`)) {
+		if home, err := os.UserHomeDir(); err == nil {
+			dataDir = filepath.Join(home, dataDir[1:])
+		}
+	}
+	if !filepath.IsAbs(dataDir) {
+		dataDir = filepath.Join(cfgDir, dataDir)
+	}
+	return dataDir
 }

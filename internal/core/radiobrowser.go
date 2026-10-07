@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -63,7 +64,8 @@ func (rb *RadioBrowser) get(ctx context.Context, u string, out any) error {
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	// A hostile or broken mirror gets 64MB to be wrong in, not the whole heap.
+	return json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out)
 }
 
 // pickServer resolves a server per radio-browser etiquette: ask the pool,
@@ -163,17 +165,14 @@ func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, boo
 			return nil, false, err
 		}
 		for _, r := range raw {
-			if r.UUID == "" || seen[r.UUID] || (r.URL == "" && r.URLResolved == "") {
+			if seen[r.UUID] {
+				continue
+			}
+			st, ok := toStation(r)
+			if !ok {
 				continue
 			}
 			seen[r.UUID] = true
-			st := Station{
-				UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
-				Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
-				Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
-				LastCheckOK: r.LastCheckOK >= 1,
-			}
-			st.AdRisk = ComputeAdRisk(&st)
 			out = append(out, st)
 		}
 		if len(raw) < n {
@@ -215,20 +214,39 @@ func (rb *RadioBrowser) search(ctx context.Context, q url.Values, limit int) ([]
 		return nil, err
 	}
 	out := make([]Station, 0, len(raw))
+	seen := map[string]bool{}
 	for _, r := range raw {
-		if r.URL == "" && r.URLResolved == "" {
+		if seen[r.UUID] {
 			continue
 		}
-		st := Station{
-			UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
-			Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
-			Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
-			LastCheckOK: r.LastCheckOK >= 1,
+		st, ok := toStation(r)
+		if !ok {
+			continue
 		}
-		st.AdRisk = ComputeAdRisk(&st)
+		seen[r.UUID] = true
 		out = append(out, st)
 	}
 	return out, nil
+}
+
+// toStation maps one directory record onto the cache shape. A record with
+// no UUID or no URL at all can't be tuned to and is rejected; display text
+// is sanitized at ingest (the directory is user-submitted); ad-risk is
+// precomputed since it only ever derives from these columns.
+func toStation(r rbStation) (Station, bool) {
+	if r.UUID == "" || (r.URL == "" && r.URLResolved == "") {
+		return Station{}, false
+	}
+	st := Station{
+		UUID: r.UUID, Name: CleanText(r.Name),
+		URL: r.URL, URLResolved: r.URLResolved,
+		Homepage: CleanText(r.Homepage), Tags: CleanText(r.Tags),
+		Country: CleanText(r.Country), Codec: CleanText(r.Codec),
+		Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
+		LastCheckOK: r.LastCheckOK >= 1,
+	}
+	st.AdRisk = ComputeAdRisk(&st)
+	return st, true
 }
 
 // Click reports a tune-in to radio-browser (their etiquette; improves their

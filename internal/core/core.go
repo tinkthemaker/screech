@@ -188,6 +188,13 @@ func (c *Core) ResumeUUID() string {
 	return v
 }
 
+// RecoveredFrom is the archive path a corrupted database was moved to on
+// open ("" when the store was healthy). Startup surfaces it so a fresh
+// cache doesn't read as data loss with no explanation.
+func (c *Core) RecoveredFrom() string {
+	return c.store.recoveredFrom
+}
+
 // TopListened returns the listen-time leaderboard for the history view.
 func (c *Core) TopListened(n int) ([]HistEntry, error) {
 	return c.store.TopListened(n)
@@ -449,6 +456,10 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 func (c *Core) NoteTitle(raw string, now time.Time) (Track, bool, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// ICY titles come from arbitrary stream servers: sanitize before the
+	// dedupe compare so an escape-only difference can't defeat it, before
+	// the parse, and before the raw is stored.
+	raw = CleanText(raw)
 	if raw == c.lastRawTitle || c.currentUUID == "" {
 		return c.curTrack, c.hasTrack, c.suspectAd, c.trackLovedLocked()
 	}
@@ -628,6 +639,18 @@ func (c *Core) MarkStationHealthy(uuid string) {
 	}
 }
 
+// ForgiveFailure undoes one failure strike, floored at zero. The UI uses it
+// to roll back strikes a station earned while the network was down —
+// blaming the station for an outage isn't fair to either of them.
+func (c *Core) ForgiveFailure(uuid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.store.BumpFailCount(uuid, -1)
+	if st := c.stationByUUIDLocked(uuid); st != nil && st.FailCount > 0 {
+		st.FailCount--
+	}
+}
+
 func (c *Core) SuspectedAd() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -776,7 +799,7 @@ func (c *Core) Seed(ctx context.Context, query string, now time.Time) (SeedResul
 			return false
 		})
 	}
-	if cd, _, err := c.pickFrom(cands, now, c.rng); err == nil {
+	if cd, err := c.pickFrom(cands, now, c.rng); err == nil {
 		c.endListenLocked(now, true)
 		return SeedResult{Pick: Pick{Station: *cd.st, Reason: "seeded: " + q}, Kind: "artist", Label: q}, true
 	}
@@ -798,7 +821,7 @@ func (c *Core) tuneTagLocked(tag string, now time.Time) (Pick, bool) {
 		}
 		return false
 	})
-	if cd, _, err := c.pickFrom(cands, now, c.rng); err == nil {
+	if cd, err := c.pickFrom(cands, now, c.rng); err == nil {
 		c.endListenLocked(now, true)
 		return Pick{Station: *cd.st, Reason: "seeded: " + tag}, true
 	}
@@ -828,7 +851,7 @@ func (c *Core) pickSeededLocked(q string, now time.Time) (Pick, bool) {
 	cands := c.candidatesFor(now, func(st *Station) bool {
 		return strings.Contains(strings.ToLower(st.Name), q)
 	})
-	if cd, _, err := c.pickFrom(cands, now, c.rng); err == nil {
+	if cd, err := c.pickFrom(cands, now, c.rng); err == nil {
 		c.endListenLocked(now, true)
 		return Pick{Station: *cd.st, Reason: "seeded: " + q}, true
 	}

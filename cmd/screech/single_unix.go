@@ -3,7 +3,7 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -21,7 +21,10 @@ func acquireSingleInstance(dataDir string) (func(), error) {
 	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("another screech is already running")
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, errAlreadyRunning
+		}
+		return nil, err
 	}
 	return func() { _ = f.Close() }, nil
 }

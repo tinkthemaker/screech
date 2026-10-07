@@ -26,17 +26,21 @@ jobs:
             gofmt -d .
             exit 1
           fi
+      - name: Module tidy
+        run: go mod tidy -diff
       - name: Vet
         run: go vet ./...
+      # Pinned, not latest: the tool must understand the go.mod language
+      # version, and a release that predates it fails opaque.
       - name: Staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
           staticcheck ./...
       - name: Test
         run: go test -race ./...
       - name: Vulnerability check
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           govulncheck ./...
       # Windows and macOS are the platforms screech actually ships to, and
       # the IPC layer is build-tagged per OS. Compiling them here catches a

@@ -5,7 +5,6 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -21,7 +20,11 @@ func acquireSingleInstance(dataDir string) (func(), error) {
 	h, err := windows.CreateMutex(nil, false, name)
 	if err != nil {
 		if err == windows.ERROR_ALREADY_EXISTS {
-			return nil, fmt.Errorf("another screech is already running")
+			// CreateMutex still hands back a handle to the existing
+			// mutex alongside the error; leaving it open leaks one
+			// per failed launch.
+			_ = windows.CloseHandle(h)
+			return nil, errAlreadyRunning
 		}
 		return nil, err
 	}

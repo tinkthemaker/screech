@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"sort"
@@ -62,6 +63,9 @@ type Options struct {
 	ASCII         bool
 	SyncLimit     int
 	ReducedMotion bool
+	// Notice seeds the status line with something the user should see once
+	// (e.g. a recovered database), without failing startup.
+	Notice string
 }
 
 type Model struct {
@@ -216,11 +220,17 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 		prompt:       false,
 		presets:      c.Presets(),
 		volume:       c.Volume(),
+		note:         opts.Notice,
 	}
 }
 
 func Run(c *core.Core, pl player.Player, opts Options) error {
 	_, err := tea.NewProgram(New(c, pl, opts), tea.WithAltScreen()).Run()
+	// An external SIGINT is a clean exit, not a UI failure to report as
+	// "screech: ui: program was interrupted".
+	if errors.Is(err, tea.ErrInterrupted) {
+		return nil
+	}
 	return err
 }
 
@@ -1375,7 +1385,9 @@ func (m Model) innerWidth() int {
 		iw = 92
 	}
 	if iw < 16 {
-		iw = maxI(m.w-2, 10)
+		// The 10-column floor only applies while it fits: a narrower
+		// terminal gets iw == w rather than rows overflowing the edge.
+		iw = maxI(m.w-2, minI(10, m.w))
 	}
 	return iw
 }

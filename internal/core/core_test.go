@@ -1,17 +1,41 @@
 package core
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
+// errNoTestNetwork is what any directory call out of a plain test core
+// hits. Tests that exercise the directory use pointCoreAt / openTestCoreAt
+// to aim at an httptest server instead.
+var errNoTestNetwork = errors.New("test core has no network; use pointCoreAt")
+
+type deadTransport struct{}
+
+func (deadTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errNoTestNetwork
+}
+
+// openTestCore builds a Core whose directory client is dead on arrival: the
+// httptest server is closed before the core returns, and the transport
+// refuses outright, so neither a stray call nor the pickServer fallback
+// (which fires after dropServer wipes the dead base) can reach the real
+// radio-browser.
 func openTestCore(t *testing.T) *Core {
 	t.Helper()
+	srv := httptest.NewServer(http.NewServeMux())
 	c, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
+		srv.Close()
 		t.Fatalf("Open: %v", err)
 	}
+	pointCoreAt(c, srv)
+	srv.Close()
+	c.rb.client = &http.Client{Transport: deadTransport{}}
 	t.Cleanup(func() { c.Close() })
 	return c
 }

@@ -2,13 +2,15 @@ package core
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Station is a cached radio-browser entry plus screech's own columns.
@@ -61,11 +63,6 @@ func (s *Station) StreamURL() string {
 	return s.URL
 }
 
-// schemaVersion is stamped into meta on open. Nothing reads it yet, which
-// is the point: the first migration that needs to tell an old database from
-// a new one can't retroactively ask a database that never recorded this.
-const schemaVersion = "1"
-
 // queryer is the small surface the store needs from *sql.DB or *sql.Tx.
 type queryer interface {
 	Exec(query string, args ...any) (sql.Result, error)
@@ -76,6 +73,9 @@ type queryer interface {
 type Store struct {
 	db *sql.DB
 	q  queryer
+	// recoveredFrom records where a corrupted database was archived during
+	// OpenStore, so the app can tell the user the cache started over.
+	recoveredFrom string
 }
 
 func openOne(path string) (*Store, error) {
@@ -98,14 +98,6 @@ func openOne(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	// Stamp the schema version, leaving an existing stamp alone. Every
-	// database that has ever existed is at version 1, so claiming it for
-	// the unstamped ones is accurate rather than optimistic.
-	if _, err := s.q.Exec(`INSERT INTO meta(key,value) VALUES('schema_version', ?)
-		ON CONFLICT(key) DO NOTHING`, schemaVersion); err != nil {
-		db.Close()
-		return nil, err
-	}
 	// Reap listens left open by a dead previous process (window close,
 	// SIGKILL, power loss). Screech is single-instance against this
 	// database, so any open listen at startup is definitionally dead.
@@ -122,17 +114,21 @@ func openOne(path string) (*Store, error) {
 
 func OpenStore(path string) (*Store, error) {
 	var lastErr error
+	var archived string
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
 			// The first attempt found corruption: move the bad file aside
 			// and try to build a fresh database. Seed stations will be
 			// restored on the next directory sync.
-			if err := archiveCorruptDB(path); err != nil {
+			bak, err := archiveCorruptDB(path)
+			if err != nil {
 				return nil, err
 			}
+			archived = bak
 		}
 		s, err := openOne(path)
 		if err == nil {
+			s.recoveredFrom = archived
 			return s, nil
 		}
 		lastErr = err
@@ -152,9 +148,24 @@ func escapeDSNPath(path string) string {
 
 var dsnPathEscaper = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
 
+// errIntegrity marks a database that opened fine but failed quick_check.
+// It is corruption by definition — a clean open only proves the header
+// parsed — so OpenStore recovers from it like any other damaged file.
+var errIntegrity = errors.New("database failed integrity check")
+
 func isCorruption(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, errIntegrity) {
+		return true
+	}
+	var se *sqlite.Error
+	if errors.As(err, &se) {
+		switch se.Code() & 0xff {
+		case sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB:
+			return true
+		}
 	}
 	s := err.Error()
 	return strings.Contains(s, "database disk image is malformed") ||
@@ -163,9 +174,20 @@ func isCorruption(err error) bool {
 		strings.Contains(s, "database corruption")
 }
 
-func archiveCorruptDB(path string) error {
+// archiveCorruptDB moves a damaged database (and its WAL/SHM companions —
+// a stale journal left next to a fresh database can be replayed into it)
+// aside, and returns the stem they were moved to.
+func archiveCorruptDB(path string) (string, error) {
 	bak := path + ".corrupt." + strconv.FormatInt(time.Now().Unix(), 10)
-	return os.Rename(path, bak)
+	if err := os.Rename(path, bak); err != nil {
+		return "", err
+	}
+	for _, ext := range []string{"-wal", "-shm"} {
+		if err := os.Rename(path+ext, bak+ext); err != nil && !os.IsNotExist(err) {
+			return bak, err
+		}
+	}
+	return bak, nil
 }
 
 // OpenStoreReadOnly opens an existing database for inspection without
@@ -181,7 +203,13 @@ func OpenStoreReadOnly(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	return &Store{db: db, q: db}, nil
+	s := &Store{db: db, q: db}
+	// sql.Open is lazy: without a probe a garbage file would report ok.
+	if err := s.quickCheck(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Store) Close() error {
@@ -301,10 +329,14 @@ func (s *Store) migrate() error {
 			_ = tx.Rollback()
 			return err
 		}
-		if err := tx.Commit(); err != nil {
+		// The version stamp belongs to the migration's transaction: a
+		// crash between commit and stamp would re-run a migration that
+		// may not be idempotent.
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+			_ = tx.Rollback()
 			return err
 		}
-		if _, err := s.q.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+		if err := tx.Commit(); err != nil {
 			return err
 		}
 	}
@@ -319,9 +351,17 @@ func (s *Store) quickCheck() error {
 		return err
 	}
 	if ok != "ok" {
-		return fmt.Errorf("database integrity check failed: %s", ok)
+		return fmt.Errorf("%w: %s", errIntegrity, ok)
 	}
 	return nil
+}
+
+// SchemaVersion reports the schema stamp, PRAGMA user_version: the
+// authoritative record of which migrations this database has had.
+func (s *Store) SchemaVersion() (int, error) {
+	var v int
+	err := s.q.QueryRow(`PRAGMA user_version`).Scan(&v)
+	return v, err
 }
 
 // --- stations ---
@@ -336,7 +376,26 @@ func (s *Store) quickCheck() error {
 // second source of ad-risk exists (a lazily judged score, a user override):
 // this clause would erase it on the next weekly sync. Keep such a value in
 // its own table keyed by uuid rather than widening this one.
+// upsertChunk bounds one transaction's size. The store runs on a single
+// connection, so a 20k-row sync transaction would hold the writer for its
+// whole duration and block every UI-thread read (love, titles, presets).
+const upsertChunk = 500
+
 func (s *Store) UpsertStations(sts []Station, fetchedAt time.Time) error {
+	ts := fetchedAt.Unix()
+	for start := 0; start < len(sts); start += upsertChunk {
+		end := start + upsertChunk
+		if end > len(sts) {
+			end = len(sts)
+		}
+		if err := s.upsertStations(sts[start:end], ts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) upsertStations(sts []Station, ts int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -356,7 +415,6 @@ func (s *Store) UpsertStations(sts []Station, fetchedAt time.Time) error {
 		return err
 	}
 	defer stmt.Close()
-	ts := fetchedAt.Unix()
 	for _, st := range sts {
 		ok := 0
 		if st.LastCheckOK {
@@ -387,6 +445,13 @@ func (s *Store) LoadStations() ([]Station, error) {
 			return nil, err
 		}
 		st.LastCheckOK = ok == 1
+		// Rows written before display-text sanitization existed can still
+		// carry terminal escapes; clean at read so old data is safe too.
+		st.Name = CleanText(st.Name)
+		st.Tags = CleanText(st.Tags)
+		st.Country = CleanText(st.Country)
+		st.Codec = CleanText(st.Codec)
+		st.Homepage = CleanText(st.Homepage)
 		out = append(out, st)
 	}
 	return out, rows.Err()
@@ -495,6 +560,9 @@ func (s *Store) RecentlyHeard(n int) ([]RecentTrack, error) {
 		if err := rows.Scan(&r.StationUUID, &r.StationName, &r.Artist, &r.Title, &heard, &r.Loved); err != nil {
 			return nil, err
 		}
+		r.StationName = CleanText(r.StationName)
+		r.Artist = CleanText(r.Artist)
+		r.Title = CleanText(r.Title)
 		r.HeardAt = time.Unix(heard, 0)
 		out = append(out, r)
 	}
@@ -538,6 +606,9 @@ func (s *Store) LovedTracks(n int) ([]LovedTrack, error) {
 			&entry.Artist, &entry.Title, &lovedAt, &entry.LoveCount, &entry.HeardCount); err != nil {
 			return nil, err
 		}
+		entry.StationName = CleanText(entry.StationName)
+		entry.Artist = CleanText(entry.Artist)
+		entry.Title = CleanText(entry.Title)
 		entry.LovedAt = time.Unix(lovedAt, 0)
 		out = append(out, entry)
 	}
@@ -778,6 +849,7 @@ func (s *Store) SavedStations() ([]SavedStation, error) {
 		if err := rows.Scan(&e.UUID, &e.Name, &secs, &e.PresetSlot, &e.LoveCount); err != nil {
 			return nil, err
 		}
+		e.Name = CleanText(e.Name)
 		e.Total = time.Duration(secs) * time.Second
 		out = append(out, e)
 	}
@@ -887,6 +959,7 @@ func (s *Store) TopListened(n int) ([]HistEntry, error) {
 		if err := rows.Scan(&e.UUID, &e.Name, &secs); err != nil {
 			return nil, err
 		}
+		e.Name = CleanText(e.Name)
 		e.Total = time.Duration(secs) * time.Second
 		out = append(out, e)
 	}

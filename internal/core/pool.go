@@ -69,9 +69,13 @@ func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 	}
 
 	cands := make([]candidate, len(eligible))
+	// One walk of the loved set through the inverted index scores every
+	// station; the alternative — probing loved artists per candidate —
+	// costs stations × loved on every skip under the core lock.
+	overlaps := c.fp.lovedOverlaps(c.loved)
 	for i, st := range eligible {
-		score, matches := c.fp.lovedOverlap(st.UUID, c.loved)
-		cands[i] = candidate{st: st, tagScore: c.tagScore(st, now), overlap: score, matches: matches}
+		o := overlaps[st.UUID]
+		cands[i] = candidate{st: st, tagScore: c.tagScore(st, now), overlap: o.score, matches: o.matches}
 	}
 
 	selected := map[string]candidate{}
@@ -138,7 +142,7 @@ func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 // the shared hygiene: never the current or previous station, never repeat
 // failures, never URL-less entries.
 func (c *Core) candidatesFor(now time.Time, keep func(*Station) bool) []candidate {
-	var out []candidate
+	var kept []*Station
 	for i := range c.stations {
 		st := &c.stations[i]
 		if st.UUID == c.currentUUID || st.UUID == c.previousUUID {
@@ -150,8 +154,13 @@ func (c *Core) candidatesFor(now time.Time, keep func(*Station) bool) []candidat
 		if keep != nil && !keep(st) {
 			continue
 		}
-		score, matches := c.fp.lovedOverlap(st.UUID, c.loved)
-		out = append(out, candidate{st: st, tagScore: c.tagScore(st, now), overlap: score, matches: matches})
+		kept = append(kept, st)
+	}
+	overlaps := c.fp.lovedOverlaps(c.loved)
+	out := make([]candidate, 0, len(kept))
+	for _, st := range kept {
+		o := overlaps[st.UUID]
+		out = append(out, candidate{st: st, tagScore: c.tagScore(st, now), overlap: o.score, matches: o.matches})
 	}
 	return out
 }
@@ -159,24 +168,22 @@ func (c *Core) candidatesFor(now time.Time, keep func(*Station) bool) []candidat
 // pickFrom runs Thompson sampling over candidates: sample each Beta, take the
 // argmax. Uncertainty does the explore/exploit balancing; there is
 // deliberately no exploration knob to tune.
-func (c *Core) pickFrom(cands []candidate, now time.Time, rng *rand.Rand) (candidate, float64, error) {
+func (c *Core) pickFrom(cands []candidate, now time.Time, rng *rand.Rand) (candidate, error) {
 	if len(cands) == 0 {
-		return candidate{}, 0, fmt.Errorf("no eligible stations")
+		return candidate{}, fmt.Errorf("no eligible stations")
 	}
 	daypart := DaypartFor(now)
 	best := -1.0
 	var bestCd candidate
-	var bestEvidence float64
 	for _, cd := range cands {
 		a, b := c.effectiveCounts(cd, daypart, now)
 		sample := sampleBeta(rng, a, b)
 		if sample > best {
 			best = sample
 			bestCd = cd
-			bestEvidence = (a - 1) + (b - 1)
 		}
 	}
-	return bestCd, bestEvidence, nil
+	return bestCd, nil
 }
 
 func (c *Core) pick(now time.Time, rng *rand.Rand) (Pick, error) {
@@ -194,11 +201,11 @@ func (c *Core) pick(now time.Time, rng *rand.Rand) (Pick, error) {
 			pool = seeded
 		}
 	}
-	cd, evidence, err := c.pickFrom(pool, now, rng)
+	cd, err := c.pickFrom(pool, now, rng)
 	if err != nil {
 		return Pick{}, fmt.Errorf("no eligible stations (station cache empty?)")
 	}
-	reason := c.reason(cd, DaypartFor(now), evidence)
+	reason := c.reason(cd, DaypartFor(now), now)
 	if c.seedPicks > 0 {
 		for _, tag := range cd.st.TagList() {
 			if tag == c.seedTag {
@@ -233,13 +240,13 @@ func (c *Core) effectiveCounts(cd candidate, daypart string, now time.Time) (flo
 	return blend(dpA, dpB, allA, allB)
 }
 
-func (c *Core) reason(cd candidate, daypart string, evidence float64) string {
+func (c *Core) reason(cd candidate, daypart string, now time.Time) string {
 	switch {
 	case cd.matches == 1:
 		return "plays an artist you love"
 	case cd.matches > 1:
 		return fmt.Sprintf("plays %d artists you love", cd.matches)
-	case evidence >= 3:
+	case c.isFavorite(cd, daypart, now):
 		return fmt.Sprintf("a %s favorite", daypart)
 	case cd.tagScore > 0.1:
 		if t := c.bestTag(cd.st); t != "" {
@@ -249,6 +256,19 @@ func (c *Core) reason(cd candidate, daypart string, evidence float64) string {
 	default:
 		return "wildcard"
 	}
+}
+
+// isFavorite decides whether "a <daypart> favorite" is an honest label for
+// the pick. Skips count as evidence neither of love nor of habit, and a
+// strong curation prior on a never-heard station is a guess, not a
+// favorite — so the label needs real bandit rows whose effective (decayed,
+// blended) counts show both volume (a-1 >= 3) and direction (a >= 2b).
+func (c *Core) isFavorite(cd candidate, daypart string, now time.Time) bool {
+	if len(c.bandit[cd.st.UUID]) == 0 {
+		return false
+	}
+	a, b := c.effectiveCounts(cd, daypart, now)
+	return a-1 >= 3 && a >= 2*b
 }
 
 func (c *Core) bestTag(st *Station) string {
