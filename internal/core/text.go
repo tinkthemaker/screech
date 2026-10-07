@@ -12,6 +12,11 @@ import "strings"
 // reorder its neighbors. Everything else — emoji, ZWJ sequences, CJK —
 // is kept.
 func CleanText(s string) string {
+	// Fast path: a title that is already clean printable ASCII — the common
+	// case for station names — returns itself without allocating.
+	if cleanASCII(s) {
+		return s
+	}
 	s = strings.ToValidUTF8(s, "")
 	rs := []rune(s)
 	var b strings.Builder
@@ -37,6 +42,24 @@ func CleanText(s string) string {
 	}
 	// Fields also trims: whitespace runs collapse to single spaces.
 	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// cleanASCII reports whether s is already in CleanText's output form:
+// printable ASCII only, no leading/trailing space, no space runs.
+func cleanASCII(s string) bool {
+	if s == "" || s[0] == ' ' || s[len(s)-1] == ' ' {
+		return s == ""
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c == ' ' {
+			if s[i+1] == ' ' {
+				return false
+			}
+		} else if c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // skipEscape consumes a control sequence beginning at rune index i — ESC in

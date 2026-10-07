@@ -3,6 +3,7 @@ package tui
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,20 +15,87 @@ import (
 )
 
 type stubPlayer struct {
-	ch     chan player.Event
-	volume int
+	mu       sync.Mutex // like MPV's: the event channel swaps under it
+	ch       chan player.Event
+	volume   int
+	playURLs []string
+	playErr  error // injected Play failure
+	restarts int
+	closed   bool
 }
 
-func newStubPlayer() *stubPlayer            { return &stubPlayer{ch: make(chan player.Event, 8)} }
-func (s *stubPlayer) Play(url string) error { return nil }
+func newStubPlayer() *stubPlayer { return &stubPlayer{ch: make(chan player.Event, 8)} }
+func (s *stubPlayer) Play(url string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.playURLs = append(s.playURLs, url)
+	return s.playErr
+}
 func (s *stubPlayer) SetVolume(percent int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.volume = percent
 	return nil
 }
 func (s *stubPlayer) Events() <-chan player.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.ch
 }
-func (s *stubPlayer) Close() error { close(s.ch); return nil }
+
+// Restart swaps in a fresh event channel like a real backend respawn; the
+// old channel is left open — nobody should be listening to it anymore.
+func (s *stubPlayer) Restart() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restarts++
+	s.ch = make(chan player.Event, 8)
+	return nil
+}
+func (s *stubPlayer) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+	return nil
+}
+
+// emit pushes an event the way a live backend would.
+func (s *stubPlayer) emit(ev player.Event) {
+	s.mu.Lock()
+	ch := s.ch
+	s.mu.Unlock()
+	ch <- ev
+}
+
+func (s *stubPlayer) lastPlay() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.playURLs) == 0 {
+		return ""
+	}
+	return s.playURLs[len(s.playURLs)-1]
+}
+
+func (s *stubPlayer) restartCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.restarts
+}
+
+func (s *stubPlayer) volumeLevel() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.volume
+}
+
+func (s *stubPlayer) failPlay(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.playErr = err
+}
 
 func testModel(t *testing.T) Model {
 	t.Helper()

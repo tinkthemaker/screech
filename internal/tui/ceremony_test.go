@@ -203,13 +203,16 @@ func (m Model) broadcastRow(t *testing.T) string {
 }
 
 // The dead path is intentional: the meter fizzles to its ember baseline.
+// Deaths inside the restart budget respawn instead, so park the window at
+// the limit to reach phDead.
 func TestDeadPathFizzles(t *testing.T) {
 	m := tuneModel(t)
+	m.restarts = []time.Time{m.now.Add(-time.Minute), m.now.Add(-2 * time.Minute), m.now.Add(-3 * time.Minute)}
 	m.wave.SetEnergy(1)
 	mm, _ := m.handlePlayerEvent(player.Event{Type: player.EventDied})
 	m = mm.(Model)
 	if m.ph != phDead {
-		t.Fatal("EventDied should park the phase machine at phDead")
+		t.Fatal("EventDied past the restart budget should park the phase machine at phDead")
 	}
 	if m.wave.targetEnergy > 0.1 {
 		t.Errorf("dead path energy = %.2f, want a fizzle toward the baseline", m.wave.targetEnergy)

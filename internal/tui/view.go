@@ -104,6 +104,11 @@ func (m Model) headerBar() string {
 		} else {
 			right = "BUFFERING"
 		}
+	case m.ph == phOffline:
+		right = "OFFLINE"
+		rightStyle = m.th.Love // coral is the warning color
+	case m.ph == phTune && m.reconnecting:
+		right = "RECONNECTING" + m.th.G.Ellipsis
 	case m.ph == phTune:
 		right = "TUNING" + m.th.G.Ellipsis
 	case m.ph == phPlay && m.haveSt:
@@ -858,6 +863,8 @@ func (m Model) receiverStatusRow(iw int) string {
 		label, detail, hot = "ERROR", m.fatal, true
 	case m.feedback != "" && m.now.Sub(m.feedbackAt) < feedbackDur:
 		label, detail, hot = "UPDATED", strings.ToLower(m.feedback), true
+	case m.ph == phOffline:
+		label, detail, hot = "OFFLINE", m.offlineDetail(), true
 	case m.suspect && m.ph == phPlay:
 		label, detail, hot = "POSSIBLE BREAK", "Space skips without teaching against this station", true
 	case m.note != "":
@@ -1391,6 +1398,22 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	return strings.Join(cells, "")
 }
 
+// offlineRetrySeconds is the countdown shown on the status line while
+// offline: whole seconds until the scheduled retry, floored at zero so a
+// lapsed timer waiting on the next tick never reads negative.
+func (m Model) offlineRetrySeconds() int {
+	return maxI(0, int(m.retryAt.Sub(m.now).Seconds()+0.999))
+}
+
+// offlineDetail is the status-row text while offline: a countdown while the
+// timer is armed, "retrying now" in the window where a retry is in flight.
+func (m Model) offlineDetail() string {
+	if m.retryAt.IsZero() {
+		return "retrying now"
+	}
+	return fmt.Sprintf("retrying in %ds "+m.th.G.Dot+" SPACE tries now", m.offlineRetrySeconds())
+}
+
 func (m Model) reasonRow(iw int) string {
 	if m.fatal != "" {
 		return m.statusRow("ERROR  "+m.fatal, iw, true)
@@ -1400,6 +1423,9 @@ func (m Model) reasonRow(iw int) string {
 	}
 	if m.feedback != "" && m.now.Sub(m.feedbackAt) < feedbackDur {
 		return m.statusRow(m.feedback, iw, true)
+	}
+	if m.ph == phOffline {
+		return m.statusRow("OFFLINE  "+m.offlineDetail(), iw, true)
 	}
 	// A suspected ad break earns a contextual hint: this is the moment the
 	// user wants the skip and shouldn't have to remember which key it is.

@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -229,6 +232,9 @@ func (s *Store) WithTx(tx *sql.Tx) *Store { return &Store{q: tx} }
 type migration struct {
 	version int
 	sql     string
+	// fn runs after sql inside the same transaction, for migrations that
+	// need to touch rows (rewrite, backfill) rather than only schema.
+	fn func(tx *sql.Tx) error
 }
 
 var migrations = []migration{
@@ -302,14 +308,22 @@ CREATE TABLE IF NOT EXISTS presets(
 	station_uuid TEXT NOT NULL,
 	saved_at INTEGER NOT NULL
 );
-`},
+`, nil},
 	// The love toggle, the heart on every title change, and unlove all
 	// look up loved rows by (artist_key, title) or by station; without
 	// these each one is a full scan of a table that only grows.
 	{2, `
 CREATE INDEX IF NOT EXISTS idx_loved_artist_title ON loved(artist_key, title);
 CREATE INDEX IF NOT EXISTS idx_loved_station ON loved(station_uuid);
-`},
+`, nil},
+	// Rows written before CleanText existed can carry double spaces or
+	// control bytes that the cleaned ingest now differs from: a track
+	// loved under an older version must still toggle, forget, and count
+	// under its cleaned name.
+	{3, "", normalizeTextRows},
+	// Before the player suppressed mpv's URL-basename media-title, every
+	// tune logged the stream filename ("aac-128") as a heard track.
+	{4, "", purgeFilenameTracks},
 }
 
 func (s *Store) migrate() error {
@@ -325,9 +339,17 @@ func (s *Store) migrate() error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(m.sql); err != nil {
-			_ = tx.Rollback()
-			return err
+		if m.sql != "" {
+			if _, err := tx.Exec(m.sql); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if m.fn != nil {
+			if err := m.fn(tx); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
 		}
 		// The version stamp belongs to the migration's transaction: a
 		// crash between commit and stamp would re-run a migration that
@@ -337,6 +359,177 @@ func (s *Store) migrate() error {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// normalizeTextRows rewrites each table's display text through CleanText,
+// in place. A changed artist also gets its key recomputed — artist_key is
+// NormalizeArtist's output — while an unchanged artist keeps the stored
+// key (seeding writes pseudo-love rows whose key exists with an empty
+// title). Changed rows are collected before any UPDATE runs: exec while
+// iterating deadlocks on this single-connection database.
+func normalizeTextRows(tx *sql.Tx) error {
+	for _, table := range []struct {
+		name string
+		cols []string
+	}{
+		{"loved", []string{"artist_key", "artist", "title"}},
+		{"tracks_heard", []string{"artist_key", "artist", "title", "raw"}},
+	} {
+		if err := cleanTableRows(tx, table.name, table.cols); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cleanTableRows(tx *sql.Tx, table string, cols []string) error {
+	keyIdx, artIdx := -1, -1
+	for i, col := range cols {
+		switch col {
+		case "artist_key":
+			keyIdx = i
+		case "artist":
+			artIdx = i
+		}
+	}
+	rows, err := tx.Query(`SELECT id,` + strings.Join(cols, `,`) + ` FROM ` + table)
+	if err != nil {
+		return err
+	}
+	var updates [][]any
+	for rows.Next() {
+		var id int64
+		vals := make([]string, len(cols))
+		dest := make([]any, 0, len(cols)+1)
+		dest = append(dest, &id)
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			rows.Close()
+			return err
+		}
+		cleaned := make([]string, len(cols))
+		for i, v := range vals {
+			cleaned[i] = CleanText(v)
+		}
+		if artIdx >= 0 && keyIdx >= 0 && cleaned[artIdx] != vals[artIdx] {
+			cleaned[keyIdx] = NormalizeArtist(cleaned[artIdx])
+		}
+		changed := false
+		for i := range vals {
+			if cleaned[i] != vals[i] {
+				changed = true
+				break
+			}
+		}
+		if changed {
+			args := make([]any, 0, len(cols)+1)
+			for _, v := range cleaned {
+				args = append(args, v)
+			}
+			updates = append(updates, append(args, id))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(updates) == 0 {
+		return nil
+	}
+	sets := make([]string, len(cols))
+	for i, col := range cols {
+		sets[i] = col + "=?"
+	}
+	stmt, err := tx.Prepare(`UPDATE ` + table + ` SET ` + strings.Join(sets, `,`) + ` WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, args := range updates {
+		if _, err := stmt.Exec(args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// urlBasenames returns the unescaped and escaped last path segment of a
+// stream URL — the values mpv may report as media-title before ICY metadata
+// arrives. Mirrors the player's curFile rule; duplicated here rather than
+// shared so core doesn't import the player package.
+func urlBasenames(rawurl string) (string, string) {
+	u, err := url.Parse(rawurl)
+	if err != nil || u.Path == "" || u.Path == "/" {
+		return "", ""
+	}
+	return path.Base(u.Path), path.Base(u.EscapedPath())
+}
+
+// purgeFilenameTracks deletes tracks_heard rows that are only mpv's
+// URL-basename media-title masquerading as a track: no artist, and a title
+// equal to the basename of that row's station URL. loved rows are left
+// alone — loving one was a deliberate act.
+func purgeFilenameTracks(tx *sql.Tx) error {
+	names := map[string][]string{}
+	srows, err := tx.Query(`SELECT uuid, url, url_resolved FROM stations`)
+	if err != nil {
+		return err
+	}
+	for srows.Next() {
+		var uuid, u, ur string
+		if err := srows.Scan(&uuid, &u, &ur); err != nil {
+			srows.Close()
+			return err
+		}
+		for _, raw := range []string{u, ur} {
+			if base, esc := urlBasenames(raw); base != "" {
+				names[uuid] = append(names[uuid], base, esc)
+			}
+		}
+	}
+	srows.Close()
+	if err := srows.Err(); err != nil {
+		return err
+	}
+
+	var ids []int64
+	trows, err := tx.Query(`SELECT id, station_uuid, title FROM tracks_heard
+		WHERE artist_key = '' AND artist = '' AND title <> ''`)
+	if err != nil {
+		return err
+	}
+	for trows.Next() {
+		var id int64
+		var uuid, title string
+		if err := trows.Scan(&id, &uuid, &title); err != nil {
+			trows.Close()
+			return err
+		}
+		if slices.Contains(names[uuid], title) {
+			ids = append(ids, id)
+		}
+	}
+	trows.Close()
+	if err := trows.Err(); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`DELETE FROM tracks_heard WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		if _, err := stmt.Exec(id); err != nil {
 			return err
 		}
 	}

@@ -38,7 +38,31 @@ const (
 	// long enough to read as a tuner between stations, short enough that
 	// the happy path resolves well under a second.
 	staticDur = 400 * time.Millisecond
+
+	// Connectivity: a stream drop reconnects in place; drops beyond
+	// maxDrops without a stable minute earn a strike. Three stations
+	// failing in a row means it's almost certainly our network, not
+	// theirs — go offline and forgive the strikes.
+	offlineAfter = 3
+	maxDrops     = 3
+	stableAfter  = 60 * time.Second
+	bufferStall  = 20 * time.Second
+
+	// mpv itself gets maxRestarts inside restartWindow before we call it
+	// dead; a crash loop is reported, not chased forever.
+	maxRestarts   = 3
+	restartWindow = 5 * time.Minute
 )
+
+// retryBackoff spaces offline retries: 5s, 10s, 20s, … capped at a minute.
+// n counts failures since the outage began.
+func retryBackoff(n int) time.Duration {
+	d := 5 * time.Second << n
+	if d > time.Minute {
+		d = time.Minute
+	}
+	return d
+}
 
 type historyView int
 
@@ -55,6 +79,7 @@ const (
 	phTune                   // waiting for the stream to lock
 	phPlay
 	phBuffer
+	phOffline // every tune is failing — the network, not the stations
 	phDead
 )
 
@@ -153,6 +178,21 @@ type Model struct {
 	feedback   string
 	feedbackAt time.Time
 	fatal      string
+	quitting   bool // a quit is in flight; backend death is expected noise
+
+	// Connectivity bookkeeping. retryN doubles as the offline flag:
+	// nonzero means the current tune attempt came out of an offline retry
+	// and its failure extends the backoff instead of striking the station.
+	reconnecting bool
+	drops        int
+	lockAt       time.Time
+	bufferAt     time.Time
+	failStreak   []string
+	retryN       int
+	retryAt      time.Time
+	lastGood     core.Station
+	haveLastGood bool
+	restarts     []time.Time
 }
 
 type (
@@ -164,16 +204,26 @@ type (
 		err  error
 	}
 	syncedMsg struct {
-		n          int
-		pruned     int
-		err        error
-		background bool
+		n      int
+		pruned int
+		err    error
 	}
 	seededMsg struct {
 		res core.SeedResult
 		ok  bool
 	}
 	volumeMsg struct{ err error }
+	// playFailedMsg reports a Play() that returned an error — the station's
+	// own URL was rejected, which is a strike against the station, not a
+	// network event. It deliberately isn't an evMsg: the listener goroutine
+	// owns evMsg production, and a synthetic one would leave an extra
+	// listen() armed per failure.
+	playFailedMsg struct {
+		uuid string
+		err  error
+	}
+	playerRestartedMsg struct{ err error }
+	hangupMsg          struct{}
 	// Panel readouts arrive asynchronously and are matched against what's
 	// playing now: a slow query returning after the user has already
 	// skipped must not stamp the previous station's figures on the new one.
@@ -225,7 +275,10 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 }
 
 func Run(c *core.Core, pl player.Player, opts Options) error {
-	_, err := tea.NewProgram(New(c, pl, opts), tea.WithAltScreen()).Run()
+	p := tea.NewProgram(New(c, pl, opts), tea.WithAltScreen())
+	stop := notifyHangup(p)
+	_, err := p.Run()
+	stop()
 	// An external SIGINT is a clean exit, not a UI failure to report as
 	// "screech: ui: program was interrupted".
 	if errors.Is(err, tea.ErrInterrupted) {
@@ -239,7 +292,7 @@ func (m Model) Init() tea.Cmd {
 	cmds = append(cmds, m.resumeCmd())
 	if m.syncing || m.core.SyncStale(m.syncLimit) {
 		// Weekly directory refresh, in the background. Playback never waits.
-		cmds = append(cmds, m.syncCmd(true))
+		cmds = append(cmds, m.syncCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -265,14 +318,14 @@ func (m Model) listen() tea.Cmd {
 	}
 }
 
-func (m Model) syncCmd(background bool) tea.Cmd {
+func (m Model) syncCmd() tea.Cmd {
 	c := m.core
 	limit := m.syncLimit
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		n, pruned, err := c.Sync(ctx, limit)
-		return syncedMsg{n: n, pruned: pruned, err: err, background: background}
+		return syncedMsg{n: n, pruned: pruned, err: err}
 	}
 }
 
@@ -360,10 +413,36 @@ func (m Model) playCmd() tea.Cmd {
 	st := m.st
 	return func() tea.Msg {
 		if err := pl.Play(st.StreamURL()); err != nil {
-			return evMsg(player.Event{Type: player.EventStreamError, Err: err})
+			return playFailedMsg{uuid: st.UUID, err: err}
 		}
 		c.StartListen(st.UUID, time.Now())
 		return nil
+	}
+}
+
+// reconnectCmd re-points the player at the same stream after a drop. No
+// StartListen: the listen in core stays open across the reconnect so the
+// drop doesn't split the session or charge the station a skip.
+func (m Model) reconnectCmd() tea.Cmd {
+	pl, uuid, url := m.pl, m.st.UUID, m.st.StreamURL()
+	return func() tea.Msg {
+		if err := pl.Play(url); err != nil {
+			return playFailedMsg{uuid: uuid, err: err}
+		}
+		return nil
+	}
+}
+
+// restartCmd brings up a fresh backend after a crash, then re-points it at
+// the current station so playback resumes without waiting for a retune.
+func (m Model) restartCmd() tea.Cmd {
+	pl, st, haveSt := m.pl, m.st, m.haveSt
+	return func() tea.Msg {
+		err := pl.Restart()
+		if err == nil && haveSt {
+			err = pl.Play(st.StreamURL())
+		}
+		return playerRestartedMsg{err: err}
 	}
 }
 
@@ -387,6 +466,13 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	m.lovedTrack = false
 	m.suspect = false
 	m.playStart = time.Time{}
+	m.drops = 0
+	m.reconnecting = false
+	m.lockAt = time.Time{}
+	m.bufferAt = time.Time{}
+	// retryN deliberately survives: during an offline retry this pick IS
+	// the retry, and retryN > 0 is how a failure finds its way back to the
+	// backoff branch instead of striking the station.
 	m.dialTgt = stationDialPos(m.st.UUID)
 	m.wave.SetEnergy(0.05)
 	// Readouts belong to the outgoing station; clear them so the new one
@@ -445,45 +531,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daypart = dp
 			m.previewTheme(m.themeName)
 		}
-		// A station that never locks is a corpse: mark it and move on. The
-		// dead listen closes without skip semantics — a stream that never
-		// played teaches nothing about taste.
-		if m.ph == phTune && m.haveSt && m.now.Sub(m.tuneAt) > tuneStall {
-			m.core.MarkStationFailed(m.st.UUID)
-			m.note = "no signal " + m.th.G.Dot + " moving on"
-			m.tuneAt = m.now
-			return m, tea.Batch(m.tick(), m.tuneDeadCmd())
+		// Connectivity housekeeping lives on the frame clock: a tune that
+		// never locks fails through the same path as a stream error, a
+		// buffer that stalls for good counts as a drop, an offline retry
+		// fires when its timer lapses, and a stable minute forgives drops.
+		switch {
+		case m.ph == phTune && m.haveSt && m.now.Sub(m.tuneAt) > tuneStall:
+			nm, cmd := m.failTune("no signal")
+			return nm, tea.Batch(m.tick(), cmd)
+		case m.ph == phBuffer && !m.bufferAt.IsZero() && m.now.Sub(m.bufferAt) > bufferStall:
+			nm, cmd := m.dropStream("signal stalled")
+			return nm, tea.Batch(m.tick(), cmd)
+		case m.ph == phOffline && !m.retryAt.IsZero() && !m.now.Before(m.retryAt):
+			nm, cmd := m.offlineRetry()
+			return nm, tea.Batch(m.tick(), cmd)
+		}
+		if m.ph == phPlay && m.drops > 0 && !m.lockAt.IsZero() && m.now.Sub(m.lockAt) >= stableAfter {
+			m.drops = 0
 		}
 		return m, m.tick()
 
 	case syncedMsg:
 		m.syncing = false
-		if msg.background {
-			// Refresh landed while playing; absorb quietly.
-			m.presets = m.core.Presets()
-			if msg.err != nil {
-				m.setFeedback("DIRECTORY  Refresh failed; using cache")
-			} else {
-				m.setFeedback(fmt.Sprintf("DIRECTORY  %d stations refreshed", msg.n))
-			}
-			return m, nil
-		}
+		// Refresh landed while playing; absorb quietly.
+		m.presets = m.core.Presets()
 		if msg.err != nil {
-			m.note = "directory unreachable " + m.th.G.Dot + " running on seed stations"
+			m.setFeedback("DIRECTORY  Refresh failed; using cache")
+		} else {
+			m.setFeedback(fmt.Sprintf("DIRECTORY  %d stations refreshed", msg.n))
 		}
-		if m.virgin {
-			m.prompt = true
-			return m, nil
-		}
-		return m, m.resumeCmd()
+		return m, nil
 
 	case tunedMsg:
 		if msg.err != nil {
-			if !m.haveSt {
+			switch {
+			case !m.haveSt:
 				m.fatal = msg.err.Error()
 				m.ph = phDead
-			} else {
+			case m.retryN > 0:
+				// A pick that fails inside an offline retry reschedules
+				// instead of stranding the model offline with no timer.
+				m.ph = phOffline
+				m.retryAt = m.now.Add(retryBackoff(m.retryN))
+				m.retryN++
+			default:
 				m.note = msg.err.Error()
+				// A skip that found nothing must not strand the still-
+				// playing stream in phTune, where the stall watchdog
+				// would strike a healthy station every 12s.
+				if !m.playStart.IsZero() && !m.reconnecting {
+					m.ph = phPlay
+				}
 			}
 			return m, nil
 		}
@@ -523,12 +621,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case evMsg:
 		return m.handlePlayerEvent(player.Event(msg))
 
-	case evClosedMsg:
-		if m.ph != phDead {
-			m.ph = phDead
-			m.fatal = "player backend closed"
+	case playFailedMsg:
+		// Play itself refused the URL — that is the station's fault, not
+		// the network's: strike it and move on, but never touch the
+		// offline bookkeeping. A stale failure (station already moved on)
+		// is ignored. No listen() here: the event listener is already armed.
+		if !m.haveSt || msg.uuid != m.st.UUID {
+			return m, nil
 		}
-		return m, nil
+		m.core.MarkStationFailed(msg.uuid)
+		m.note = "stream rejected " + m.th.G.Dot + " moving on"
+		return m, m.tuneDeadCmd()
+
+	case playerRestartedMsg:
+		if msg.err != nil {
+			m.ph = phDead
+			m.fatal = "mpv exited " + m.th.G.Dot + " restart screech " + m.th.G.Dot + " " + msg.err.Error()
+			m.wave.SetEnergy(0.05)
+			return m, nil
+		}
+		if m.haveSt {
+			m.ph = phTune
+			m.tuneAt = m.now
+			m.reconnecting = true
+		}
+		// Events() now yields the new process's channel; re-arm the
+		// listener that died with the old one.
+		return m, m.listen()
+
+	case evClosedMsg:
+		// The event channel closed: either EventDied was emitted (a full
+		// buffer can drop it) or the backend went away silently. Both are
+		// the same fact — treat it as a death.
+		return m.backendDied(nil)
+
+	case hangupMsg:
+		m.quitting = true
+		m.core.EndListen(time.Now())
+		_ = m.pl.Close()
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -537,6 +668,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "q", "ctrl+c":
+		m.quitting = true
 		m.core.EndListen(time.Now())
 		_ = m.pl.Close()
 		return m, tea.Quit
@@ -544,6 +676,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ", "n":
 		if m.ph == phDead {
 			return m, nil
+		}
+		if m.ph == phOffline {
+			// Offline SPACE is "tries now", not skip: fire the pending
+			// retry early rather than tuning away from the outage.
+			return m.offlineRetry()
 		}
 		m.ph = phTune
 		m.tuneAt = m.now
@@ -693,6 +830,7 @@ func (m Model) handleThemeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	choices := ThemeChoices()
 	switch key {
 	case "ctrl+c", "q":
+		m.quitting = true
 		m.core.EndListen(time.Now())
 		_ = m.pl.Close()
 		return m, tea.Quit
@@ -728,6 +866,7 @@ func (m Model) handleThemeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleVolumeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		m.quitting = true
 		m.core.EndListen(time.Now())
 		_ = m.pl.Close()
 		return m, tea.Quit
@@ -808,6 +947,7 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "q", "ctrl+c":
+		m.quitting = true
 		m.core.EndListen(time.Now())
 		_ = m.pl.Close()
 		return m, tea.Quit
@@ -1003,6 +1143,7 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleSavedFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		m.quitting = true
 		m.core.EndListen(time.Now())
 		_ = m.pl.Close()
 		return m, tea.Quit
@@ -1044,6 +1185,7 @@ func (m Model) handleSavedFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleLibraryFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		m.quitting = true
 		m.core.EndListen(time.Now())
 		_ = m.pl.Close()
 		return m, tea.Quit
@@ -1239,6 +1381,7 @@ func (m *Model) setFeedback(text string) {
 func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		m.quitting = true
 		m.core.EndListen(time.Now())
 		_ = m.pl.Close()
 		return m, tea.Quit
@@ -1325,9 +1468,29 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 		}
 
 	case player.EventPlaying:
-		if m.ph == phTune {
+		if m.ph == phTune || m.ph == phOffline {
+			if m.ph == phOffline {
+				// Going offline closed the listen; a lock that lands late
+				// is still a session worth crediting.
+				m.core.StartListen(m.st.UUID, time.Now())
+			}
 			m.core.MarkStationHealthy(m.st.UUID)
-			m.playStart = m.now
+			// A reconnect keeps the listen clock: playStart only opens
+			// once per tune, not once per stream.
+			if m.playStart.IsZero() {
+				m.playStart = m.now
+			}
+			m.lockAt = m.now
+			m.failStreak = nil
+			m.reconnecting = false
+			m.lastGood = m.st
+			m.haveLastGood = true
+			if m.retryN > 0 {
+				m.retryN = 0
+				m.retryAt = time.Time{}
+				m.setFeedback("ONLINE  Signal restored")
+			}
+			m.note = ""
 		}
 		if m.ph != phDead {
 			m.ph = phPlay
@@ -1337,6 +1500,7 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 	case player.EventBuffering:
 		if m.ph == phPlay {
 			m.ph = phBuffer
+			m.bufferAt = m.now
 		}
 		m.wave.SetEnergy(0.2)
 
@@ -1349,23 +1513,127 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 		m.stereo = ev.Stereo
 		m.wave.SetStereoLevels(l, r, ev.Peak, m.now.Sub(m.start).Seconds())
 
-	case player.EventStreamError:
-		if m.haveSt {
-			m.core.MarkStationFailed(m.st.UUID)
+	case player.EventStreamError, player.EventStreamEnded:
+		reason := "signal lost"
+		if ev.Type == player.EventStreamError {
+			reason = "stream failed"
 		}
-		m.note = "stream failed " + m.th.G.Dot + " moving on"
-		return m, tea.Batch(m.listen(), m.tuneDeadCmd())
+		switch m.ph {
+		case phPlay, phBuffer:
+			nm, cmd := m.dropStream(reason)
+			return nm, tea.Batch(m.listen(), cmd)
+		case phTune:
+			nm, cmd := m.failTune(reason)
+			return nm, tea.Batch(m.listen(), cmd)
+		}
+		return m, m.listen()
 
 	case player.EventDied:
-		m.ph = phDead
-		m.fatal = "mpv exited " + m.th.G.Dot + " restart screech"
-		m.wave.SetEnergy(0.05) // the meter fizzles to its ember baseline
-		return m, nil
+		// The dead process's channel is gone; restartCmd brings up the
+		// replacement and playerRestartedMsg re-arms listen() on it.
+		return m.backendDied(ev.Err)
 	}
 	if extra != nil {
 		return m, tea.Batch(m.listen(), extra)
 	}
 	return m, m.listen()
+}
+
+// dropStream handles a live stream that ended or errored underneath us:
+// reconnect the same URL in place. Drops beyond maxDrops without a stable
+// minute fail the tune instead.
+func (m Model) dropStream(reason string) (Model, tea.Cmd) {
+	m.drops++
+	if m.drops > maxDrops {
+		return m.failTune(reason)
+	}
+	m.ph = phTune
+	m.tuneAt = m.now
+	m.reconnecting = true
+	m.note = reason + " " + m.th.G.Dot + " reconnecting"
+	m.wave.SetEnergy(0.05)
+	return m, m.reconnectCmd()
+}
+
+// failTune is the single exit for a tune that can't play: during an offline
+// retry it just extends the backoff, otherwise it strikes the station, and
+// a third consecutive strike means the network is the culprit — forgive
+// them all and go offline.
+func (m Model) failTune(reason string) (Model, tea.Cmd) {
+	if m.retryN > 0 {
+		// This attempt came out of an offline retry: its failure is the
+		// outage, not the station. Back off further and stay offline.
+		m.core.EndListen(time.Now())
+		m.retryAt = m.now.Add(retryBackoff(m.retryN))
+		m.retryN++
+		m.ph = phOffline
+		m.reconnecting = false
+		return m, nil
+	}
+	m.core.MarkStationFailed(m.st.UUID)
+	m.failStreak = append(m.failStreak, m.st.UUID)
+	if len(m.failStreak) >= offlineAfter {
+		for _, uuid := range m.failStreak {
+			m.core.ForgiveFailure(uuid)
+		}
+		m.failStreak = nil
+		m.core.EndListen(time.Now())
+		m.retryN = 1
+		m.retryAt = m.now.Add(retryBackoff(0))
+		m.ph = phOffline
+		m.reconnecting = false
+		return m, nil
+	}
+	m.note = reason + " " + m.th.G.Dot + " moving on"
+	return m, m.tuneDeadCmd()
+}
+
+// offlineRetry fires the scheduled retry: odd attempts go back to the last
+// station that actually locked, even ones take a fresh pick. retryN is left
+// alone — it is what routes a failure back into the backoff branch.
+// retryAt is consumed so the next tick can't fire a second attempt while
+// this one is still in flight.
+func (m Model) offlineRetry() (Model, tea.Cmd) {
+	m.retryAt = time.Time{}
+	if m.retryN%2 == 1 {
+		uuid := m.st.UUID
+		if m.haveLastGood {
+			uuid = m.lastGood.UUID
+		}
+		if pick, err := m.core.TuneTo(uuid, time.Now()); err == nil {
+			pick.Reason = "where you left off"
+			return m.applyPick(pick)
+		}
+	}
+	return m, m.tuneDeadCmd()
+}
+
+// backendDied handles the backend process going away: within the restart
+// budget, spawn a fresh one; past it, report the crash loop and stop.
+func (m Model) backendDied(err error) (Model, tea.Cmd) {
+	if m.quitting {
+		return m, nil // the event stream closing behind Close() is expected
+	}
+	cutoff := m.now.Add(-restartWindow)
+	recent := m.restarts[:0]
+	for _, at := range m.restarts {
+		if at.After(cutoff) {
+			recent = append(recent, at)
+		}
+	}
+	m.restarts = recent
+	if len(m.restarts) >= maxRestarts {
+		m.ph = phDead
+		m.fatal = "mpv exited " + m.th.G.Dot + " restart screech"
+		if err != nil {
+			m.fatal += " " + m.th.G.Dot + " " + err.Error()
+		}
+		m.wave.SetEnergy(0.05) // the meter fizzles to its ember baseline
+		return m, nil
+	}
+	m.restarts = append(m.restarts, m.now)
+	m.note = "player crashed " + m.th.G.Dot + " restarting"
+	return m, m.restartCmd()
 }
 
 // staticActive reports whether the tuning ceremony's static collapse is

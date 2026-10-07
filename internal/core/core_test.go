@@ -348,3 +348,48 @@ func TestVolumePersistsAndClamps(t *testing.T) {
 		t.Fatalf("low clamp=%d, want 0", got)
 	}
 }
+
+// A superseding Play at the same stream must not split a session into two
+// listen rows, and a different station must bank the first before opening
+// its own — the late-lock-while-offline fix depends on both.
+func TestStartListenIsIdempotent(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+
+	c.StartListen("s1", now)
+	c.StartListen("s1", now.Add(5*time.Second)) // same stream: keep the row
+	var n int
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("double StartListen on one station left %d rows, want 1", n)
+	}
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens WHERE ended_at IS NULL`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("the kept listen should still be open, %d open rows", n)
+	}
+
+	c.StartListen("s2", now.Add(10*time.Second)) // different station: bank the first
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("switching stations should leave 2 rows, got %d", n)
+	}
+	var ended int64
+	if err := c.store.db.QueryRow(`SELECT ended_at FROM listens WHERE station_uuid='s1'`).Scan(&ended); err != nil {
+		t.Fatal(err)
+	}
+	if ended <= now.Unix() {
+		t.Fatalf("the superseded listen should be banked, ended_at=%d", ended)
+	}
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens WHERE ended_at IS NULL`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("only the current listen may be open, %d open rows", n)
+	}
+}

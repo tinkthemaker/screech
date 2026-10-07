@@ -125,7 +125,7 @@ func TestVolumeSliderControlsPlayerAndPersists(t *testing.T) {
 		t.Fatalf("right should raise volume: %d", m.volume)
 	}
 	msg := cmd()
-	if got := m.pl.(*stubPlayer).volume; got != 55 {
+	if got := m.pl.(*stubPlayer).volumeLevel(); got != 55 {
 		t.Fatalf("player volume=%d, want 55", got)
 	}
 	mm, _ = m.Update(msg)

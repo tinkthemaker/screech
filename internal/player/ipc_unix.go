@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -17,15 +16,13 @@ func prepareIPCDir(dir string) error {
 	return os.Chmod(dir, 0o700)
 }
 
-func ipcPath(dir string) string {
-	return filepath.Join(dir, fmt.Sprintf("mpv-%d.sock", os.Getpid()))
+func ipcPath(dir string, gen int) string {
+	return filepath.Join(dir, fmt.Sprintf("mpv-%d-%d.sock", os.Getpid(), gen))
 }
 
 func dialIPC(path string) (net.Conn, error) {
 	return net.Dial("unix", path)
 }
-
-func configureCmd(cmd *exec.Cmd) {}
 
 func cleanupIPC(path string) error {
 	return os.Remove(path)

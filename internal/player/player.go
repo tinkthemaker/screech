@@ -14,6 +14,10 @@ const (
 	EventBuffering
 	// EventStreamError: the current stream failed to play.
 	EventStreamError
+	// EventStreamEnded: the current stream ended on its own. For live
+	// radio that means the server dropped us — mpv does not reconnect
+	// non-seekable ICY streams — not that the programme finished.
+	EventStreamEnded
 	// EventDied: the backend itself is gone (mpv exited).
 	EventDied
 	// EventLevel: real audio loudness, 0 (silence) to 1 (loud). Sourced from
@@ -49,6 +53,9 @@ type Player interface {
 	SetVolume(percent int) error
 	// Events is the stream of title/state changes. Closed when the backend dies.
 	Events() <-chan Event
+	// Restart replaces a dead backend with a fresh process; Events()
+	// returns the new stream afterwards.
+	Restart() error
 	// Close shuts the backend down.
 	Close() error
 }

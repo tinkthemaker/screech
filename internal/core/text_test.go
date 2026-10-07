@@ -37,8 +37,41 @@ func TestCleanText(t *testing.T) {
 			if got := CleanText(tc.in); got != tc.want {
 				t.Errorf("CleanText(%q) = %q, want %q", tc.in, got, tc.want)
 			}
+			if again := CleanText(tc.want); again != tc.want {
+				t.Errorf("CleanText not idempotent: %q -> %q", tc.want, again)
+			}
 		})
 	}
+}
+
+// Clean output is the common case (station names, most titles); the fast
+// path must return the input itself, allocation-free.
+func TestCleanTextFastPath(t *testing.T) {
+	clean := "SomaFM Groove Salad"
+	if got := CleanText(clean); got != clean {
+		t.Errorf("clean input rewritten: %q", got)
+	}
+	if n := testing.AllocsPerRun(50, func() { CleanText(clean) }); n != 0 {
+		t.Errorf("clean input should not allocate, got %v allocs", n)
+	}
+	for _, dirty := range []string{"a\x1b[0mb", "a\nb", "a  b", " a", "a ", "a\x00b", "é"} {
+		if cleanASCII(dirty) {
+			t.Errorf("cleanASCII(%q) = true, want false", dirty)
+		}
+	}
+}
+
+func BenchmarkCleanText(b *testing.B) {
+	b.Run("clean ascii", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			CleanText("SomaFM Groove Salad (Downtempo)")
+		}
+	})
+	b.Run("dirty", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			CleanText("\x1b]52;c;AAAA\x07Bad  \tTitle\x1b[31m With Styling")
+		}
+	})
 }
 
 // An ICY title carrying escapes must never reach the stored track or the

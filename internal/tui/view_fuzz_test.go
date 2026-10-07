@@ -85,6 +85,14 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 			m.fatal = "player backend closed"
 			m.ph = phDead
 		}},
+		{"offline", func(m *Model) {
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.ph = phOffline
+			m.retryN = 1
+			m.retryAt = m.now.Add(8 * time.Second)
+			m.reason = "because you love stations like this"
+		}},
 	}
 
 	for _, st := range states {

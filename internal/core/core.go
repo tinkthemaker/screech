@@ -396,6 +396,16 @@ func (c *Core) TuneDead(now time.Time) (Pick, error) {
 func (c *Core) StartListen(uuid string, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.listenID != 0 {
+		if c.currentUUID == uuid {
+			// A superseding Play at the same stream (late lock, reconnect)
+			// must not split the session into two listen rows.
+			return
+		}
+		// A different station wins the slot: bank the old listen with no
+		// skip semantics — its dwell credit counts as on any clean close.
+		c.endListenLocked(now, false)
+	}
 	if c.currentUUID != "" && c.currentUUID != uuid {
 		c.previousUUID = c.currentUUID
 	}
