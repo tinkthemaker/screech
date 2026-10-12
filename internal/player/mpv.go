@@ -122,7 +122,7 @@ func (m *MPV) spawn() error {
 		"--input-ipc-server=" + path,
 	}
 	args = append(args, testExtraArgs...)
-	cmd := exec.Command(resolveMpv(m.mpvPath), args...)
+	cmd := exec.Command(ResolveMpv(m.mpvPath), args...)
 	cmd.Stderr = stderr
 	configureCmd(cmd)
 	if err := cmd.Start(); err != nil {

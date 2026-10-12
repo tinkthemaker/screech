@@ -27,9 +27,10 @@ var usage = "screech " + version + " - terminal internet radio\n\n" +
 	"  screech --help          show this message\n" +
 	"  screech --version       show the version\n\n" +
 	"Flags:\n" +
-	"  --reduced-motion        disable the love-heart flash\n\n" +
+	"  --reduced-motion        calm the animations (no boot, scramble, static,\n" +
+	"                          scrolling titles, blinking, or love flash)\n\n" +
 	"Environment:\n" +
-	"  SCREECH_REDUCED_MOTION  set to any value to disable the love-heart flash\n"
+	"  SCREECH_REDUCED_MOTION  set to any value for the same effect as --reduced-motion\n"
 
 var reducedMotion bool
 

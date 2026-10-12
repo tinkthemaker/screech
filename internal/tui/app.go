@@ -39,6 +39,11 @@ const (
 	// the happy path resolves well under a second.
 	staticDur = 400 * time.Millisecond
 
+	// volumeLinger keeps the volume strip up past the last adjustment:
+	// long enough to glance at the number, short enough that a stale
+	// overlay doesn't park on screen forever.
+	volumeLinger = 4 * time.Second
+
 	// Connectivity: a stream drop reconnects in place; drops beyond
 	// maxDrops without a stable minute earn a strike. Three stations
 	// failing in a row means it's almost certainly our network, not
@@ -129,6 +134,7 @@ type Model struct {
 	dialTgt   float64
 
 	track        string
+	trackArtist  string // m.track is artist+title joined; the receiver needs them apart
 	haveTrack    bool
 	trackAt      time.Time
 	lovedTrack   bool
@@ -158,6 +164,7 @@ type Model struct {
 	history      bool
 	hist         []core.HistEntry
 	recent       []core.RecentTrack
+	recentTop    int // scroll offset — RECENT has no cursor, the window moves
 	historyView  historyView
 	library      []core.LovedTrack
 	libraryQuery []rune
@@ -171,9 +178,11 @@ type Model struct {
 	forgetAt     time.Time
 	volumeOpen   bool
 	volume       int
+	volumeAt     time.Time // last volume touch; the overlay lingers briefly
 
 	tuneAt     time.Time
 	playStart  time.Time
+	notice     string // startup notice from Options; survives picks, dies on first key
 	note       string
 	feedback   string
 	feedbackAt time.Time
@@ -270,7 +279,7 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 		prompt:       false,
 		presets:      c.Presets(),
 		volume:       c.Volume(),
-		note:         opts.Notice,
+		notice:       opts.Notice,
 	}
 }
 
@@ -458,10 +467,14 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	m.ph = phTune
 	m.tuneAt = m.now
 	m.lastAct = m.now
-	m.decrypt = NewDecrypt(heroText(cleanStationName(m.st.Name), 72, m.th.G.Ellipsis), m.now)
-	m.stDecrypt = NewDecrypt(strings.ToUpper(cleanStationName(m.st.Name)), m.now)
+	if m.motion() {
+		// Decrypts hold only the clock; the views pass the settled text at
+		// render time so the ceremony resolves into exactly what's drawn.
+		m.decrypt = NewDecrypt(m.now)
+		m.stDecrypt = NewDecrypt(m.now)
+	}
 	m.tw = NewTypewriter(m.reason, m.now.Add(300*time.Millisecond))
-	m.track = ""
+	m.track, m.trackArtist = "", ""
 	m.haveTrack = false
 	m.lovedTrack = false
 	m.suspect = false
@@ -479,6 +492,9 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	// never briefly wears the old one's numbers.
 	m.stTotal = 0
 	m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
+	// Tags differ per station, which can flip the receiver's GENRE block
+	// and its row accounting; relayout before the density cmd lands.
+	m.relayout()
 	// The outgoing listen has just been banked, so the distribution moved.
 	return m, tea.Batch(m.playCmd(), m.stationStatsCmd(m.st.UUID), m.dialDensityCmd())
 }
@@ -488,14 +504,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		m.wave.Resize(m.waveRenderWidth())
-		m.wave.SetRows(m.waveRenderRows())
-		m.rebuildDensity()
+		m.relayout()
 		return m, nil
 
 	case tea.KeyMsg:
 		m.lastKey = m.now
 		m.lastAct = m.now
+		// The startup notice shows until the room proves it's alive —
+		// the first keypress acknowledges it.
+		m.notice = ""
 		// Boot is a heartbeat, not a gate: any key ends it early and still
 		// lands — the interface never swallows input.
 		if m.now.Sub(m.start) < bootDur {
@@ -524,7 +541,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		t := m.now.Sub(m.start).Seconds()
 		m.wave.Step(t, dt)
-		m.dial.Step(m.dialTgt, dt)
+		if m.reduceMotion {
+			// No springing under reduced motion: the needle snaps to
+			// its station like a mechanical dial finding the mark.
+			m.dial.Pos, m.dial.Vel = m.dialTgt, 0
+		} else {
+			m.dial.Step(m.dialTgt, dt)
+		}
+		// The volume strip isn't modal: it lingers a few seconds after
+		// the last touch, then folds itself away.
+		if m.volumeOpen && m.now.Sub(m.volumeAt) > volumeLinger {
+			m.volumeOpen = false
+		}
 		// Daypart turns retemper the theme (brighter midday, ember night).
 		// Never while the picker is open: a preview in progress owns th.
 		if dp := core.DaypartFor(m.now); dp != m.daypart && !m.themeOpen {
@@ -615,7 +643,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dialDensityMsg:
 		m.listenTotals = msg.totals
-		m.rebuildDensity()
+		m.relayout()
 		return m, nil
 
 	case evMsg:
@@ -732,18 +760,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.presets = m.core.Presets()
+		// Feedback only — the WHY row still describes the pick.
 		switch {
 		case full:
-			m.reason = "presets full " + m.th.G.Dot + " f on a saved station frees a slot"
-			m.setFeedback("PRESETS  All nine slots are full")
+			m.setFeedback("PRESETS  All nine full " + m.th.G.Dot + " F on a saved one frees a slot")
 		case saved:
-			m.reason = fmt.Sprintf("saved "+m.th.G.Dot+" press %d to return", slot)
-			m.setFeedback(fmt.Sprintf("SAVED  Preset %d", slot))
+			m.setFeedback(fmt.Sprintf("SAVED  Preset %d "+m.th.G.Dot+" press %d to return", slot, slot))
 		case slot > 0:
-			m.reason = fmt.Sprintf("preset %d cleared", slot)
 			m.setFeedback(fmt.Sprintf("CLEARED  Preset %d", slot))
 		}
-		m.tw = NewTypewriter(m.reason, m.now)
 		return m, nil
 
 	case "/":
@@ -756,14 +781,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "v":
 		m.volumeOpen = true
+		m.volumeAt = m.now
 		return m, nil
 
 	case "-", "[":
 		m.volumeOpen = true
+		m.volumeAt = m.now
 		return m.adjustVolume(-5)
 
 	case "+", "=", "]":
 		m.volumeOpen = true
+		m.volumeAt = m.now
 		return m.adjustVolume(5)
 
 	case "h":
@@ -790,7 +818,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		slot := int(key[0] - '0')
 		uuid, ok := m.presets[slot]
 		if !ok {
-			m.note = fmt.Sprintf("preset %d is empty "+m.th.G.Dot+" f saves", slot)
+			m.setFeedback(fmt.Sprintf("PRESET  %d is empty "+m.th.G.Dot+" F saves", slot))
 			return m, nil
 		}
 		if m.haveSt && uuid == m.st.UUID {
@@ -874,11 +902,16 @@ func (m Model) handleVolumeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.volumeOpen = false
 		return m, nil
 	case "left", "down", "-", "[":
+		m.volumeAt = m.now
 		return m.adjustVolume(-5)
 	case "right", "up", "+", "=", "]":
+		m.volumeAt = m.now
 		return m.adjustVolume(5)
 	}
-	return m, nil
+	// Not a volume key: the strip isn't a mode, it's a readout. Fold it
+	// away and let the key do what it always does.
+	m.volumeOpen = false
+	return m.handleKey(msg)
 }
 
 func (m Model) adjustVolume(delta int) (tea.Model, tea.Cmd) {
@@ -903,6 +936,7 @@ func (m *Model) loadHistory(view historyView) bool {
 			return false
 		}
 		m.recent = entries
+		m.recentTop = 0
 	case historyLoved:
 		entries, err := m.core.LovedTracks(libraryLimit)
 		if err != nil {
@@ -955,6 +989,15 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.historyView == historyLoved && len(m.libraryQuery) > 0 {
 			m.libraryQuery = nil
 			m.libraryPos = 0
+			m.forgetKey = ""
+			return m, nil
+		}
+		// Same contract as LOVED: a live filter eats the first esc —
+		// otherwise a stale query greets the next visit while the empty
+		// state swears "esc clears the filter".
+		if m.historyView == historyStations && len(m.savedQuery) > 0 {
+			m.savedQuery = nil
+			m.savedPos = 0
 			m.forgetKey = ""
 			return m, nil
 		}
@@ -1135,6 +1178,26 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.applyPick(pick)
 		}
 		return m, nil
+	}
+
+	// RECENT rows have no cursor — the whole window scrolls, clamped to
+	// the range the renderer could actually use. Free-running offsets
+	// used to bury the list under dead keypresses.
+	if m.historyView == historyRecent {
+		switch key {
+		case "up", "k":
+			m.recentTop = maxI(0, m.recentTop-1)
+		case "down", "j":
+			m.recentTop = minI(m.recentTop+1, m.recentMaxTop())
+		case "pgup":
+			m.recentTop = maxI(0, m.recentTop-5)
+		case "pgdown":
+			m.recentTop = minI(m.recentTop+5, m.recentMaxTop())
+		case "home":
+			m.recentTop = 0
+		case "end":
+			m.recentTop = m.recentMaxTop()
+		}
 	}
 	return m, nil
 }
@@ -1373,6 +1436,26 @@ func lovedTrackKey(entry core.LovedTrack) string {
 	return entry.ArtistKey + "\x00" + strings.ToLower(strings.TrimSpace(entry.Title))
 }
 
+// setTrack records a heard track: the joined display string for the
+// stacked layout, the split parts for the receiver's title/artist rows.
+func (m *Model) setTrack(artist, title string) {
+	m.track = title
+	if artist != "" {
+		m.track = artist + " " + m.th.G.Dot + " " + title
+	}
+	m.trackArtist = artist
+	m.trackTitle = title
+	m.haveTrack = title != ""
+}
+
+// relayout resizes the instruments that depend on terminal size and panel
+// shape: wave width and depth, then the density strip re-bucketed to fit.
+func (m *Model) relayout() {
+	m.wave.Resize(m.waveRenderWidth())
+	m.wave.SetRows(m.waveRenderRows())
+	m.rebuildDensity()
+}
+
 func (m *Model) setFeedback(text string) {
 	m.feedback = text
 	m.feedbackAt = m.now
@@ -1451,7 +1534,7 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 				text = tr.Artist + " " + m.th.G.Dot + " " + tr.Title
 			}
 			if text != m.track {
-				m.track = text
+				m.setTrack(tr.Artist, tr.Title)
 				m.trackAt = m.now
 				// A new title invalidates the play count. Zero it now and
 				// let the query land, rather than showing the last track's.
@@ -1462,7 +1545,7 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			m.lovedTrack = lovedNow
 		} else {
 			m.haveTrack = false
-			m.track = ""
+			m.track, m.trackArtist = "", ""
 			m.lovedTrack = false
 			m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
 		}
@@ -1641,7 +1724,7 @@ func (m Model) backendDied(err error) (Model, tea.Cmd) {
 // start that always ends at stream lock (or when the window elapses, so
 // the failure path fizzles into the baseline instead of freezing).
 func (m Model) staticActive() bool {
-	if m.ph != phTune && m.ph != phBuffer {
+	if m.reduceMotion || (m.ph != phTune && m.ph != phBuffer) {
 		return false
 	}
 	return m.now.Sub(m.tuneAt) < staticDur
@@ -1665,7 +1748,7 @@ func (m Model) innerWidth() int {
 // stacked width.
 func (m Model) waveRenderWidth() int {
 	iw := m.innerWidth()
-	if iw >= 78 && m.h >= 14 {
+	if m.receiverShape() {
 		_, _, right := receiverColumns(iw)
 		return right
 	}
@@ -1677,13 +1760,13 @@ func (m Model) waveRenderWidth() int {
 // keeps a two-row meter, where it sits directly under the track and has no
 // room to grow.
 func (m Model) waveRenderRows() int {
-	iw := m.innerWidth()
 	contentH := m.contentHeight()
-	if iw >= 78 && m.h >= 14 && contentH >= 11 {
-		perChannel, _ := receiverLayout(contentH)
+	if m.receiverShape() {
+		_, leftRows, rightFixed := m.receiverMetrics()
+		perChannel, _, _ := receiverLayout(contentH, leftRows, rightFixed)
 		return perChannel
 	}
-	if iw >= 28 && m.h >= 14 && contentH >= 8 {
+	if m.innerWidth() >= 28 && m.h >= 14 && contentH >= 8 {
 		return stackedWaveRows(contentH)
 	}
 	return 1

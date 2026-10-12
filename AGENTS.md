@@ -26,6 +26,11 @@ done
   touching `internal/player`.
 - `TestViewFitsEveryTerminalSize` renders every overlay at every small
   terminal size; any view change must keep it green (no panic, no overflow).
+- `receiverShape` is the single faceplate-vs-stacked decision; `View`, the
+  wave sizing and `relayout` all read it. `TestReceiverFitsWheneverShapeSaysSo`
+  holds the row accounting to the rendered panel, and `TestASCIIModeIsSevenBit`
+  fails on any non-ASCII cell in `ascii = true` mode — use `m.th.G` glyphs,
+  never literal `…`, `×`, `·` in view code.
 - `go test -tags live ./internal/core -run Live` hits the real radio-browser
   directory; plain unit tests must never touch the network (`openTestCore`
   points the client at a dead transport).

@@ -29,7 +29,7 @@ func (m Model) View() string {
 	left := maxI(0, (m.w-iw)/2)
 	pad := strings.Repeat(" ", left)
 
-	if boot := m.now.Sub(m.start); boot < bootDur {
+	if boot := m.now.Sub(m.start); m.motion() && boot < bootDur {
 		return m.bootView(iw, pad, float64(boot)/float64(bootDur))
 	}
 
@@ -78,51 +78,83 @@ func (m Model) View() string {
 
 func (m Model) headerBar() string {
 	style := m.th.AccentDim.Bold(true)
-	if m.idle() {
+	if m.idle() && m.motion() {
 		style = m.th.BreatheStyle(m.now.Sub(m.start).Seconds())
 	} else {
 		style = scaleStyle(style, m.settleScale())
 	}
-	left := style.Render(" " + wordmark)
-	if m.w >= 58 {
-		left += scaleStyle(m.th.Dim, m.settleScale()).Render("  PERSONAL RADIO")
-	}
+	word := style.Render(" " + wordmark)
 
-	right := ""
-	rightStyle := m.th.Dim
+	// The subtitle is a fact about what the app is doing — a directory sync
+	// matters more than the tagline — and it shows whenever it fits rather
+	// than behind a fixed width cutoff.
+	sub := "  PERSONAL RADIO"
+	if m.syncing {
+		sub = "  SYNCING DIRECTORY" + m.th.G.Ellipsis
+	}
+	sub = scaleStyle(m.th.Dim, m.settleScale()).Render(sub)
+
+	// Right-side precedence: the outage warnings outrank the ceremony
+	// states, which outrank the instrument readout. A directory sync never
+	// touches this side — it lives in the subtitle now.
+	status := ""
+	statusStyle := m.th.Dim
 	switch {
-	case m.seeking:
-		right = "SEEKING" + m.th.G.Ellipsis
-	case m.syncing:
-		right = "SYNCING DIRECTORY" + m.th.G.Ellipsis
-	case m.ph == phBuffer:
-		// Buffering blinks: the ellipsis alternates bright/dim so the stall
-		// reads as activity, not a frozen readout.
-		if (m.now.UnixMilli()/600)%2 == 0 {
-			right = "BUFFERING" + m.th.G.Ellipsis
-			rightStyle = m.th.Accent
-		} else {
-			right = "BUFFERING"
-		}
 	case m.ph == phOffline:
-		right = "OFFLINE"
-		rightStyle = m.th.Love // coral is the warning color
-	case m.ph == phTune && m.reconnecting:
-		right = "RECONNECTING" + m.th.G.Ellipsis
-	case m.ph == phTune:
-		right = "TUNING" + m.th.G.Ellipsis
-	case m.ph == phPlay && m.haveSt:
-		right = m.th.G.Knob + " LIVE"
-		if readout := m.readout(); readout != "" {
-			right += "  " + readout
+		status = "OFFLINE"
+		statusStyle = m.th.Love // coral is the warning color
+	case m.ph == phBuffer:
+		status = "BUFFERING" + m.th.G.Ellipsis
+		// Buffering blinks by style, not text: an ellipsis that comes and
+		// goes would make the right-aligned header jitter a column on
+		// every beat. Under reduced motion it just holds bright.
+		if m.motion() && (m.now.UnixMilli()/600)%2 == 1 {
+			statusStyle = m.th.Dim
+		} else {
+			statusStyle = m.th.Accent
 		}
-		rightStyle = m.th.Accent // live: the readout is the one accent-lit instrument
+	case m.ph == phTune && m.reconnecting:
+		status = "RECONNECTING" + m.th.G.Ellipsis
+	case m.seeking:
+		status = "SEEKING" + m.th.G.Ellipsis
+	case m.ph == phTune:
+		status = "TUNING" + m.th.G.Ellipsis
+	case m.ph == phPlay && m.haveSt:
+		status = m.th.G.Knob + " LIVE"
+		statusStyle = m.th.Accent // live: the readout is the one accent-lit instrument
+	case m.ph == phDead:
+		status = "STOPPED"
+		statusStyle = m.th.Love
 	}
-	rendered := rightStyle.Render(right)
-	if m.suspect && m.ph == phPlay {
-		rendered += m.th.Accent.Bold(true).Render("  BREAK")
+	breakChip := ""
+	if m.suspect && m.ph == phPlay && m.haveSt {
+		breakChip = m.th.Love.Bold(true).Render("  BREAK") // coral is the warning color
 	}
-	return lrRow(left, rendered+" ", m.w)
+	statusR := statusStyle.Render(status)
+	right := statusR
+	if m.ph == phPlay && m.haveSt {
+		if r := m.readout(); r != "" {
+			right += statusStyle.Render("  " + r)
+		}
+	}
+	right += breakChip
+
+	// Degradation ladder, first combination that fits wins: subtitle, then
+	// the readout, then BREAK, then the wordmark, then finally the status
+	// word clipped to the terminal. LIVE must survive to the last rung —
+	// "is it playing" is the one thing the header owes the listener.
+	for _, cut := range [][2]string{
+		{word + sub, right},
+		{word, right},
+		{word, statusR + breakChip},
+		{word, statusR},
+		{"", statusR},
+	} {
+		if lipgloss.Width(cut[0])+lipgloss.Width(cut[1])+1 <= m.w {
+			return lrRow(cut[0], cut[1]+" ", m.w)
+		}
+	}
+	return clip(statusR, m.w)
 }
 
 func (m Model) readout() string {
@@ -218,32 +250,45 @@ func (m Model) loveWash() lipgloss.TerminalColor {
 	return lipgloss.Color(rgbHex(cool(br, lr), cool(bg, lg), cool(bb, lb)))
 }
 
-func (m Model) footerItems() [][2]string {
+// footerItem is one key chip and its label. prio orders the labels for
+// narrow terminals: 0 drops first. State labels outrank navigation labels —
+// "100%" and "loved" tell you something a key legend doesn't.
+type footerItem struct {
+	key, label string
+	prio       int
+}
+
+func (m Model) footerItems() []footerItem {
+	item := func(k, l string) footerItem { return footerItem{k, l, 1} }
 	if m.themeOpen {
-		return [][2]string{{"J/K", "preview"}, {"ENTER", "apply"}, {"ESC", "cancel"}}
+		return []footerItem{item("J/K", "preview"), item("ENTER", "apply"), item("ESC", "cancel")}
 	}
 	if m.history {
-		items := [][2]string{{"TAB", "next view"}, {"ESC", "close"}}
-		if m.historyView == historyLoved {
+		switch m.historyView {
+		case historyLoved:
 			if m.libraryFind {
-				items = [][2]string{{"TYPE", "filter"}, {"ENTER", "done"}, {"ESC", "done"}}
-			} else {
-				items = [][2]string{{"J/K", "move"}, {"/", "find"}, {"ENTER", "similar"}, {"R", "station"}, {"X", "remove"}, {"TAB", ""}, {"ESC", ""}}
+				return []footerItem{item("TYPE", "filter"), item("ENTER", "done"), item("ESC", "done")}
 			}
-		} else if m.historyView == historyStations {
+			return []footerItem{item("J/K", "move"), item("/", "find"), item("ENTER", "similar"), item("R", "station"), item("X", "remove"), item("TAB", ""), item("ESC", "")}
+		case historyStations:
 			if m.savedFind {
-				items = [][2]string{{"TYPE", "filter"}, {"ENTER", "done"}, {"ESC", "done"}}
-			} else {
-				items = [][2]string{{"J/K", "move"}, {"/", "find"}, {"ENTER", "tune"}, {"X", "remove"}, {"1-9", "preset"}, {"TAB", ""}, {"ESC", ""}}
+				return []footerItem{item("TYPE", "filter"), item("ENTER", "done"), item("ESC", "done")}
 			}
+			return []footerItem{item("J/K", "move"), item("/", "find"), item("ENTER", "tune"), item("X", "remove"), item("1-9", "preset"), item("TAB", ""), item("ESC", "")}
+		default:
+			return []footerItem{item("J/K", "scroll"), item("TAB", "next view"), item("ESC", "close")}
 		}
-		return items
 	}
 	if m.prompt {
-		return [][2]string{{"ENTER", "tune"}, {"ESC", "cancel"}}
+		return []footerItem{item("ENTER", "tune"), item("ESC", "cancel")}
 	}
 	if m.volumeOpen {
-		return [][2]string{{"LEFT/RIGHT", "adjust"}, {"V", "close"}}
+		return []footerItem{item("LEFT/RIGHT", "adjust"), item("V", "close")}
+	}
+	if m.ph == phDead {
+		// Space/l/f// do nothing while the backend is dead; the strip shows
+		// only the keys that still work.
+		return []footerItem{item("H", "library"), item("T", "theme"), footerItem{"Q", "quit", 0}}
 	}
 	save := "save"
 	if slot := m.currentSlot(); slot > 0 {
@@ -253,9 +298,14 @@ func (m Model) footerItems() [][2]string {
 	if m.lovedTrack {
 		love = "loved"
 	}
-	return [][2]string{
-		{"SPACE", "skip"}, {"L", love}, {"F", save},
-		{"/", "discover"}, {"H", "library"}, {"V", fmt.Sprintf("%d%%", m.volume)}, {"T", "theme"}, {"Q", "quit"},
+	skip := "skip"
+	if m.ph == phOffline {
+		skip = "retry"
+	}
+	return []footerItem{
+		{"SPACE", skip, 2}, {"L", love, 3}, {"F", save, 3},
+		{"/", "discover", 1}, {"H", "library", 1}, {"V", fmt.Sprintf("%d%%", m.volume), 3},
+		{"T", "theme", 1}, {"Q", "quit", 0},
 	}
 }
 
@@ -269,29 +319,70 @@ func (m Model) footerBar() string {
 	fill := scaleStyle(m.th.FootFill, k)
 	key := scaleStyle(m.th.FootKey, k)
 	label := scaleStyle(m.th.FootLabel, k)
-	sep := fill.Render("  ")
-	var b strings.Builder
-	b.WriteString(fill.Render(" "))
-	for i, it := range items {
-		if i > 0 {
-			b.WriteString(sep)
+
+	render := func(showLabel []bool, sep string) string {
+		var b strings.Builder
+		b.WriteString(fill.Render(" "))
+		for i, it := range items {
+			if i > 0 {
+				b.WriteString(fill.Render(sep))
+			}
+			keyStyle := key
+			if m.lovedTrack && it.key == "L" {
+				keyStyle = keyStyle.Foreground(m.th.Love.GetForeground())
+			}
+			b.WriteString(keyStyle.Render(" " + it.key + " "))
+			if showLabel[i] && it.label != "" {
+				b.WriteString(label.Render(" " + it.label))
+			}
 		}
-		keyStyle := key
-		if m.lovedTrack && it[0] == "L" {
-			keyStyle = keyStyle.Foreground(m.th.Love.GetForeground())
-		}
-		b.WriteString(keyStyle.Render(" " + it[0] + " "))
-		if it[1] != "" {
-			b.WriteString(label.Render(" " + it[1]))
+		return b.String()
+	}
+	fits := func(line string) bool { return lipgloss.Width(line) <= m.w }
+
+	show := make([]bool, len(items))
+	for i := range show {
+		show[i] = true
+	}
+	allOff := func() {
+		for i := range show {
+			show[i] = false
 		}
 	}
-	line := b.String()
-	if lipgloss.Width(line) > m.w {
-		keys := make([]string, len(items))
-		for i, it := range items {
-			keys[i] = it[0]
+	line := render(show, "  ")
+	if !fits(line) {
+		line = render(show, " ")
+		// Narrow the gap between chips first; then labels come off one at
+		// a time, least important first (ties drop rightmost).
+		for !fits(line) {
+			victim := -1
+			for i, it := range items {
+				if show[i] && it.label != "" && (victim < 0 || it.prio <= items[victim].prio) {
+					victim = i
+				}
+			}
+			if victim < 0 {
+				break
+			}
+			show[victim] = false
+			line = render(show, " ")
 		}
-		line = key.Render(runewidth.Truncate(" "+strings.Join(keys, "  "), m.w, ""))
+	}
+	if !fits(line) {
+		// Labels all gone and chips still wide: keys alone, tight spacing,
+		// then a bare truncation as the last resort.
+		allOff()
+		line = render(show, "  ")
+		if !fits(line) {
+			line = render(show, " ")
+		}
+		if !fits(line) {
+			keys := make([]string, len(items))
+			for i, it := range items {
+				keys[i] = it.key
+			}
+			line = key.Render(runewidth.Truncate(" "+strings.Join(keys, " "), m.w, ""))
+		}
 	}
 	if gap := m.w - lipgloss.Width(line); gap > 0 {
 		line += fill.Render(strings.Repeat(" ", gap))
@@ -302,7 +393,7 @@ func (m Model) footerBar() string {
 // --- main screen: two tight groups with real air between them ---
 
 func (m Model) mainRows(iw int, compact bool, contentH int) []string {
-	if iw >= 78 && !compact && contentH >= 11 {
+	if m.receiverShape() {
 		return m.receiverRows(iw, contentH)
 	}
 	var rows []string
@@ -407,7 +498,9 @@ func (m Model) staticRows(width int, th Theme) []string {
 // explicit.
 func (m Model) themeRows(iw, budget int) []string {
 	choices := ThemeChoices()
-	if iw < 50 || budget < len(choices)+5 {
+	// The framed panel is six chrome rows on top of the choices; switching
+	// to it a row early used to cost 100x16 its bottom border.
+	if iw < 50 || budget < len(choices)+6 {
 		rows := []string{m.th.Accent.Bold(true).Render(
 			runewidth.Truncate("THEME", iw, m.th.G.Ellipsis))}
 		for i, choice := range choices {
@@ -519,11 +612,27 @@ func stackedWaveRows(contentH int) int {
 	return n
 }
 
-// receiverFixedRows is everything in the faceplate that doesn't stretch:
-// both frame rules, the two label rows, title, artist, the LOW/HIGH scale,
-// the station name, the preset legend and the status readout. The wave's
-// first two rows sit alongside title and artist, so they cost nothing extra.
-const receiverFixedRows = 10
+// The faceplate's fixed row budget, broken down the way the panel actually
+// spends it rather than as one guessed constant — the old receiverFixedRows
+// pretended the meter's first two rows were free, which let View's
+// truncation silently eat the status row and bottom frame on short
+// terminals.
+const (
+	// Chrome around the bays: top rule, status readout, bottom rule.
+	receiverChromeRows = 3
+	// Left bay: label, title, artist, gap, BROADCAST, station, gap.
+	receiverLeftRows = 7
+	// Left bay addition when the station carries tags: GENRE, tags, gap.
+	receiverGenreRows = 3
+	// Right bay besides the meter: SIGNAL label, LOW/HIGH, gap,
+	// STATION MEMORY, band, digits, legend — plus one when the density
+	// strip shows and 2*perChannel for the meter itself.
+	receiverRightRows = 7
+	// The two-bay faceplate needs a left bay that reads as a panel, not a
+	// sliver: 74 inner columns is a 78-wide terminal, so 80x24 — the most
+	// common terminal there is — gets the real receiver.
+	receiverMinInner = 74
+)
 
 // maxReceiverPad caps the blank rows inside the panel. Past this the
 // faceplate stops reading as a machined object and starts reading as a box
@@ -531,37 +640,66 @@ const receiverFixedRows = 10
 // margin around a well-proportioned instrument.
 const maxReceiverPad = 3
 
-// receiverLayout decides how the faceplate spends the height it's given.
-// Extra rows go to the signal bay first, since the meter is the one part of
-// the panel that's actually alive, then to padding.
+// receiverLayout decides whether the faceplate fits and how it spends the
+// height it's given. Extra rows go to the signal bay first, since the meter
+// is the one part of the panel that's actually alive, then to padding.
 //
 // This is why the panel used to sit at a fixed ten rows and float in a sea
 // of black on a tall terminal: it never asked how much room it had. Note
 // that filling the terminal completely is not the goal — a radio faceplate
 // stretched down eighty rows would be worse than the original problem. The
 // panel grows to a substantial size and then centers.
-func receiverLayout(contentH int) (wavePerChannel, pad int) {
-	spare := contentH - receiverFixedRows
-	if spare < 0 {
-		spare = 0
+func receiverLayout(contentH, leftRows, rightFixed int) (perChannel, pad int, ok bool) {
+	need := func(p int) int { return receiverChromeRows + maxI(leftRows, rightFixed+2*p) }
+	if need(1) > contentH {
+		return 1, 0, false
 	}
-	// Each extra per-channel row costs two rows of panel: both channels grow
-	// together. Keep one row in reserve so the panel never reaches the edge.
-	wavePerChannel = 1 + (spare-1)/2
-	if wavePerChannel < 1 {
-		wavePerChannel = 1
+	// Each extra per-channel row costs two rows of panel: both channels
+	// grow together. Keep one row in reserve so the panel never reaches
+	// the edge.
+	perChannel = 1
+	for p := 2; p <= maxWaveRows; p++ {
+		if need(p)+1 <= contentH {
+			perChannel = p
+		}
 	}
-	if wavePerChannel > maxWaveRows {
-		wavePerChannel = maxWaveRows
+	pad = minI(maxI(contentH-need(perChannel)-1, 0), maxReceiverPad)
+	return perChannel, pad, true
+}
+
+// receiverMetrics measures the faceplate's bays as they stand: the left
+// bay's fixed rows (taller when the station's tags give the GENRE block
+// something to say) and the right bay's fixed rows (taller when listening
+// history gives the density strip something to draw — judged from the
+// totals, not the bucketed strip, which is sized by a width that depends on
+// this very decision).
+func (m Model) receiverMetrics() (iw, leftRows, rightFixed int) {
+	iw = m.innerWidth()
+	leftW, _, _ := receiverColumns(iw)
+	leftRows = receiverLeftRows
+	if stationTags(&m.st, leftW, m.th.G.Ellipsis) != "" {
+		leftRows += receiverGenreRows
 	}
-	pad = spare - 2*(wavePerChannel-1) - 1
-	if pad < 0 {
-		pad = 0
+	rightFixed = receiverRightRows
+	for _, d := range m.listenTotals {
+		if d > 0 {
+			rightFixed++
+			break
+		}
 	}
-	if pad > maxReceiverPad {
-		pad = maxReceiverPad
+	return iw, leftRows, rightFixed
+}
+
+// receiverShape reports whether the terminal gets the two-bay faceplate or
+// the compact stack. One decision, shared by the render path and the wave
+// sizing, so the meter is never laid out for a panel that isn't drawn.
+func (m Model) receiverShape() bool {
+	iw, leftRows, rightFixed := m.receiverMetrics()
+	if iw < receiverMinInner || m.h < 14 {
+		return false
 	}
-	return
+	_, _, ok := receiverLayout(m.contentHeight(), leftRows, rightFixed)
+	return ok
 }
 
 // padColumn stretches a column of rows to height by distributing blank rows
@@ -622,19 +760,37 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	if station == "" {
 		station = "NO SIGNAL"
 	}
-	artist, title := splitTrackDisplay(m.track)
+	// The track's halves are stored fields, never re-split: the joined
+	// string's separator differs per glyph set.
 	primaryLabel := "TRACK"
-	if !m.haveTrack || strings.TrimSpace(title) == "" {
+	artist, title := m.trackArtist, m.trackTitle
+	titleAnchor := m.trackAt
+	switch {
+	case m.haveTrack && strings.TrimSpace(title) != "":
+		// A title-only track leaves the artist row blank, not populated
+		// with a label masquerading as a credit.
+	case m.haveSt:
+		// No title yet: the station name holds the slot, scrolling off
+		// the tune clock rather than a track clock that doesn't exist.
 		primaryLabel = "NOW PLAYING"
 		title = station
-		artist = "Track metadata unavailable"
+		titleAnchor = m.tuneAt
+		artist = ""
+	default:
+		primaryLabel = "STANDBY"
+		title = "No signal"
+		if m.syncing || m.seeking || m.ph == phTune {
+			title = "Searching" + m.th.G.Ellipsis
+		}
+		titleAnchor = m.tuneAt
+		artist = ""
 	}
 
 	heartW := 0
 	if m.lovedTrack {
 		heartW = runewidth.StringWidth(m.th.G.Heart) + 1
 	}
-	title = marquee(title, maxI(4, leftW-heartW), m.now, m.trackAt, m.th.G.Ellipsis)
+	title = m.marqueeText(title, maxI(4, leftW-heartW), titleAnchor)
 	titleCell := pt.Bright.Bold(true).Render(title)
 	if m.lovedTrack {
 		titleCell += pt.Mid.Render(" ") + m.receiverHeart(pt)
@@ -650,9 +806,9 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	// the station is where it comes from, so the station reads as an
 	// engraved source plate and the title is left as the only bright
 	// element on the faceplate.
-	stationCell := pt.Mid.Render(plateText(station, leftW))
-	if m.stDecrypt.Active(m.now) {
-		stationCell = m.stDecrypt.Render(m.now, pt, leftW)
+	stationCell := pt.Mid.Render(plateText(station, leftW, m.th.G.Ellipsis))
+	if m.motion() && m.stDecrypt.Active(m.now) {
+		stationCell = m.stDecrypt.Render(m.now, pt, plateText(station, leftW, m.th.G.Ellipsis), leftW)
 	}
 
 	// The bottom readout row doubles as the overlay bay: the seed prompt or
@@ -681,10 +837,24 @@ func (m Model) receiverRows(iw, contentH int) []string {
 		}
 		return surfaceLR(pt.Dim.Bold(true).Render(text), pt.Dim.Render(figure), leftW, pt.PanelFill)
 	}
+	// A blank artist slot is a styled single space, not "": padColumn
+	// treats an empty string as a stretchable gap, which would let the
+	// broadcast block swallow the missing row. After ten locked seconds
+	// with no title the blank stops reading as patience and starts
+	// reading as a hole — say why instead.
+	artistCell := pt.Mid.Render(artist)
+	if artist == "" {
+		artistCell = pt.Mid.Render(" ")
+		if m.haveSt && !m.haveTrack && m.ph == phPlay && !m.playStart.IsZero() &&
+			m.now.Sub(m.playStart) >= 10*time.Second {
+			artistCell = pt.Dim.Render(
+				runewidth.Truncate("No track info sent", leftW, m.th.G.Ellipsis))
+		}
+	}
 	left := []string{
 		label(primaryLabel, m.playCountFigure()),
 		titleCell,
-		pt.Mid.Render(artist),
+		artistCell,
 		"", // stretches: pushes the broadcast block down beside the meter
 		label("BROADCAST", fmtTotalTime(m.stTotal)),
 		stationCell,
@@ -695,7 +865,7 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	// They had no representation on screen at all, while the left bay sat
 	// empty next to a meter — so the bay gets filled with something true
 	// rather than with more blank rows.
-	if tags := stationTags(&m.st, leftW); tags != "" {
+	if tags := stationTags(&m.st, leftW, m.th.G.Ellipsis); tags != "" {
 		left = append(left, pt.Dim.Bold(true).Render("GENRE"), pt.Mid.Render(tags), "")
 	}
 	memory := ""
@@ -721,7 +891,9 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	// and opens a dead zone between BROADCAST and STATION MEMORY.
 	natural := maxI(len(left), len(right))
 	left, right = padColumn(left, natural), padColumn(right, natural)
-	_, pad := receiverLayout(contentH)
+	// Breathing room measured from what was actually composed — chrome,
+	// bays and the one-row reserve accounted — rather than re-derived.
+	pad := minI(maxI(contentH-receiverChromeRows-natural-1, 0), maxReceiverPad)
 	for i := 0; i < pad; i++ {
 		left, right = append(left, ""), append(right, "")
 	}
@@ -739,7 +911,7 @@ func (m Model) receiverRows(iw, contentH int) []string {
 // the first few, comma separated, truncated to the bay. Returns "" when the
 // station carries none, in which case the block is dropped entirely rather
 // than left as an empty label.
-func stationTags(st *core.Station, width int) string {
+func stationTags(st *core.Station, width int, ellipsis string) string {
 	tags := st.TagList()
 	if len(tags) == 0 || width < 8 {
 		return ""
@@ -747,7 +919,7 @@ func stationTags(st *core.Station, width int) string {
 	if len(tags) > 3 {
 		tags = tags[:3]
 	}
-	return runewidth.Truncate(strings.Join(tags, ", "), width, "…")
+	return runewidth.Truncate(strings.Join(tags, ", "), width, ellipsis)
 }
 
 // A dithered bevel under the top rail was tried here and removed. Low
@@ -761,7 +933,7 @@ func stationTags(st *core.Station, width int) string {
 // plateText renders a station name as an engraved source plate: uppercase,
 // letterspaced when it fits, plain uppercase when it doesn't. Same rule the
 // compact layout's hero uses, so a name reads the same in both layouts.
-func plateText(name string, width int) string {
+func plateText(name string, width int, ellipsis string) string {
 	up := strings.ToUpper(strings.TrimSpace(name))
 	// Same 14-character gate the compact layout's hero uses. Letterspacing
 	// a long directory name is legible in principle and unreadable in
@@ -770,7 +942,7 @@ func plateText(name string, width int) string {
 		runewidth.StringWidth(spaced) <= width {
 		return spaced
 	}
-	return runewidth.Truncate(up, width, "…")
+	return runewidth.Truncate(up, width, ellipsis)
 }
 
 // fmtTotalTime is the cumulative-listen readout: coarse on purpose, since a
@@ -798,7 +970,7 @@ func (m Model) playCountFigure() string {
 	if !m.haveTrack || m.trackPlays < 2 {
 		return ""
 	}
-	return fmt.Sprintf("heard %d%s", m.trackPlays, "×")
+	return fmt.Sprintf("heard %d%s", m.trackPlays, m.th.G.Times)
 }
 
 // stereoFigure is the signal bay's right-hand readout: which channel layout
@@ -825,14 +997,6 @@ func (m Model) signalLabel() string {
 	return "SIGNAL  MONO"
 }
 
-func splitTrackDisplay(track string) (artist, title string) {
-	track = strings.TrimSpace(track)
-	if parts := strings.SplitN(track, " · ", 2); len(parts) == 2 {
-		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-	}
-	return "NOW PLAYING", track
-}
-
 func (m Model) receiverHeart(pt Theme) string {
 	style := m.th.Love.Background(pt.PanelFill.GetBackground())
 	since := m.now.Sub(m.loveAt)
@@ -857,14 +1021,21 @@ func (m Model) presetLegend(width int) string {
 
 func (m Model) receiverStatusRow(iw int) string {
 	width := maxI(1, iw-4)
-	label, detail, hot := "WHY THIS STATION", m.tw.RenderOver(m.now, whyDetail(m.reason)), false
+	label, detail, hot := "WHY THIS STATION", m.typedText(whyDetail(m.reason)), false
 	switch {
 	case m.fatal != "":
 		label, detail, hot = "ERROR", m.fatal, true
 	case m.feedback != "" && m.now.Sub(m.feedbackAt) < feedbackDur:
-		label, detail, hot = "UPDATED", strings.ToLower(m.feedback), true
+		// Feedback arrives as "LABEL  detail"; the readout keeps both
+		// halves rather than flattening the detail under a generic label.
+		label, detail, hot = "UPDATED", m.feedback, true
+		if i := strings.Index(m.feedback, "  "); i > 0 {
+			label, detail = m.feedback[:i], m.feedback[i+2:]
+		}
 	case m.ph == phOffline:
 		label, detail, hot = "OFFLINE", m.offlineDetail(), true
+	case m.notice != "":
+		label, detail = "NOTICE", m.notice
 	case m.suspect && m.ph == phPlay:
 		label, detail, hot = "POSSIBLE BREAK", "Space skips without teaching against this station", true
 	case m.note != "":
@@ -876,8 +1047,8 @@ func (m Model) receiverStatusRow(iw int) string {
 	raised := m.th.PanelRaised
 	bg := raised.GetBackground()
 	labelStyle := m.th.Accent.Bold(true).Background(bg)
-	if hot && (strings.Contains(label, "BREAK") || label == "ERROR") {
-		labelStyle = m.th.Love.Bold(true).Background(bg)
+	if hot && (label == "ERROR" || label == "OFFLINE" || strings.Contains(label, "BREAK")) {
+		labelStyle = m.th.Love.Bold(true).Background(bg) // coral is the warning color
 	}
 	detailStyle := m.th.Mid.Background(bg)
 	label = runewidth.Truncate(label, width, m.th.G.Ellipsis)
@@ -941,10 +1112,7 @@ func (m Model) receiverPromptRow(iw int) string {
 	bright := m.th.Bright.Background(bg)
 	dim := m.th.Dim.Background(bg)
 
-	cur := m.th.G.Cursor
-	if (m.now.UnixMilli()/530)%2 == 1 {
-		cur = " "
-	}
+	cur := m.cursorGlyph()
 	const label = "SEED"
 	chev := accent.Render("> ")
 	// Room left for the query after label, gap, chevron, and cursor.
@@ -1082,8 +1250,9 @@ func (m Model) heroRow(iw int, idle bool) string {
 		}
 		return m.th.Dim.Render(runewidth.Truncate(text, iw, m.th.G.Ellipsis))
 	}
-	if m.decrypt.Active(m.now) {
-		return m.decrypt.Render(m.now, m.th, iw)
+	if m.motion() && m.decrypt.Active(m.now) {
+		return m.decrypt.Render(m.now, m.th,
+			heroText(cleanStationName(m.st.Name), iw, m.th.G.Ellipsis), iw)
 	}
 	style := m.th.Bright.Bold(true)
 	// A freshly resolved name glows accent for a beat, then settles to white.
@@ -1103,7 +1272,7 @@ func (m Model) trackRow(iw int, idle bool) string {
 
 	text := ""
 	if m.haveTrack && m.track != "" {
-		text = marquee(m.track, textW, m.now, m.trackAt, m.th.G.Ellipsis)
+		text = m.marqueeText(m.track, textW, m.trackAt)
 	}
 
 	// New titles fade in, hold bright for their moment, then recede.
@@ -1322,7 +1491,7 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	pos := clampF(m.dial.Pos, 0, 1)
 	col := int(math.Round(pos * float64(iw-1)))
 	markerStyle := th.Accent
-	if idle {
+	if idle && m.motion() {
 		markerStyle = m.th.BreatheStyle(m.now.Sub(m.start).Seconds())
 		if bg := th.Accent.GetBackground(); hasColor(bg) {
 			markerStyle = markerStyle.Background(bg)
@@ -1398,6 +1567,38 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	return strings.Join(cells, "")
 }
 
+// motion reports whether animated effects run. Reduced motion keeps every
+// instrument but holds them still: no boot sequence, no decrypt scramble,
+// no static collapse, no scrolling titles, no blinking or breathing.
+func (m Model) motion() bool { return !m.reduceMotion }
+
+// typedText renders a detail line on the typewriter's clock — or the full
+// text at once under reduced motion.
+func (m Model) typedText(text string) string {
+	if m.reduceMotion {
+		return text
+	}
+	return m.tw.RenderOver(m.now, text)
+}
+
+// marqueeText scrolls an overlong title once per the marquee contract —
+// or truncates with an ellipsis under reduced motion.
+func (m Model) marqueeText(text string, width int, anchor time.Time) string {
+	if m.reduceMotion {
+		return runewidth.Truncate(text, width, m.th.G.Ellipsis)
+	}
+	return marquee(text, width, m.now, anchor, m.th.G.Ellipsis)
+}
+
+// cursorGlyph is the prompt/find cursor: on the blink-off beat (never under
+// reduced motion) it's a space, otherwise the block.
+func (m Model) cursorGlyph() string {
+	if m.motion() && (m.now.UnixMilli()/530)%2 == 1 {
+		return " "
+	}
+	return m.th.G.Cursor
+}
+
 // offlineRetrySeconds is the countdown shown on the status line while
 // offline: whole seconds until the scheduled retry, floored at zero so a
 // lapsed timer waiting on the next tick never reads negative.
@@ -1427,6 +1628,11 @@ func (m Model) reasonRow(iw int) string {
 	if m.ph == phOffline {
 		return m.statusRow("OFFLINE  "+m.offlineDetail(), iw, true)
 	}
+	if m.notice != "" {
+		// The startup notice is the DB-recovered warning — active, not
+		// calm dim text nobody reads.
+		return m.statusRow("NOTICE  "+m.notice, iw, true)
+	}
 	// A suspected ad break earns a contextual hint: this is the moment the
 	// user wants the skip and shouldn't have to remember which key it is.
 	if m.suspect && m.ph == phPlay {
@@ -1435,7 +1641,7 @@ func (m Model) reasonRow(iw int) string {
 	if m.note != "" {
 		return m.statusRow("NOTICE  "+m.note, iw, false)
 	}
-	return m.statusRow(m.tw.RenderOver(m.now, statusReason(m.reason)), iw, false)
+	return m.statusRow(m.typedText(statusReason(m.reason)), iw, false)
 }
 
 // statusRow renders "LABEL  detail" input as an aligned, dotted status
@@ -1449,6 +1655,11 @@ func (m Model) statusRow(text string, iw int, active bool) string {
 	glyph := m.th.G.Pointer
 	if active {
 		labelStyle, detailStyle = m.th.Accent.Bold(true), m.th.Mid
+		// Coral is the warning color: errors, outages and the break hint
+		// all earn it in both layouts.
+		if parts[0] == "ERROR" || parts[0] == "OFFLINE" || strings.Contains(parts[0], "BREAK") {
+			labelStyle = m.th.Love.Bold(true)
+		}
 	} else {
 		// Category from the label itself, calmest first.
 		switch {
@@ -1496,10 +1707,7 @@ func statusReason(reason string) string {
 // promptRow renders the seed input: accent chevron, bright query, blinking
 // cursor, dim hint while empty.
 func (m Model) promptRow(iw int) string {
-	cur := m.th.G.Cursor
-	if (m.now.UnixMilli()/530)%2 == 1 {
-		cur = " "
-	}
+	cur := m.cursorGlyph()
 	prefix := m.th.Accent.Render("> ")
 	if len(m.buf) == 0 {
 		hint := "genre or artist " + m.th.G.Dot + " esc cancels"
@@ -1584,13 +1792,35 @@ func (m Model) historyTabs(iw int) string {
 	return strings.Join(parts, "   ")
 }
 
+// recentBudget is the row budget historyRows grants the recent list at
+// the current terminal size: content height minus the tabs row and, in
+// the non-compact layout, the spacer beneath it.
+func (m Model) recentBudget() int {
+	used := 1 // the view-tabs row
+	if m.h >= 14 && m.contentHeight() > 2 {
+		used++ // the spacer under the tabs
+	}
+	return m.contentHeight() - used
+}
+
+// recentMaxTop is the largest scroll offset the renderer would honor:
+// the entries past one screenful. The key handler clamps against this
+// exact number — derived from the same budget math recentRows uses, so
+// keys and view can't drift.
+func (m Model) recentMaxTop() int {
+	return maxI(0, len(m.recent)-minI(len(m.recent), m.recentBudget()))
+}
+
 func (m Model) recentRows(rows []string, iw int, budget int) []string {
 	if len(m.recent) == 0 {
 		return append(rows, m.th.Dim.Render(
 			runewidth.Truncate("nothing heard yet", iw, m.th.G.Ellipsis)))
 	}
 	maxRows := minI(len(m.recent), budget-len(rows))
-	for i := 0; i < maxRows; i++ {
+	// RECENT has no selection cursor — j/k scrolls a window instead. The
+	// clamp also lives here so a resize can't strand the view.
+	top := minI(maxI(0, m.recentTop), len(m.recent)-maxRows)
+	for i := top; i < top+maxRows; i++ {
 		e := m.recent[i]
 		label := e.Title
 		if e.Artist != "" {
@@ -1642,7 +1872,7 @@ func (m Model) lovedRows(rows []string, iw int, budget int) []string {
 		}
 		count := ""
 		if entry.HeardCount > 1 {
-			count = fmt.Sprintf("%dx", entry.HeardCount)
+			count = fmt.Sprintf("%d%s", entry.HeardCount, m.th.G.Times)
 		}
 		labelW := maxI(4, iw-runewidth.StringWidth(count)-5)
 		label = runewidth.Truncate(label, labelW, m.th.G.Ellipsis)
@@ -1674,8 +1904,8 @@ func (m Model) lovedRows(rows []string, iw int, budget int) []string {
 func (m Model) libraryFindRow(iw, matches int) string {
 	if m.libraryFind || len(m.libraryQuery) > 0 {
 		cursor := ""
-		if m.libraryFind && (m.now.UnixMilli()/530)%2 == 0 {
-			cursor = m.th.G.Cursor
+		if m.libraryFind {
+			cursor = m.cursorGlyph()
 		}
 		query := string(m.libraryQuery)
 		if query == "" {
@@ -1703,7 +1933,7 @@ func (m Model) libraryFindRow(iw, matches int) string {
 
 func (m Model) lovedDetailRow(entry core.LovedTrack, iw int) string {
 	if m.forgetKey == lovedTrackKey(entry) && m.now.Sub(m.forgetAt) <= 3*time.Second {
-		return m.th.Accent.Bold(true).Render(
+		return m.th.Love.Bold(true).Render(
 			runewidth.Truncate("REMOVE?  X again to forget this track", iw, m.th.G.Ellipsis))
 	}
 	parts := []string{}
@@ -1712,7 +1942,7 @@ func (m Model) lovedDetailRow(entry core.LovedTrack, iw int) string {
 	}
 	parts = append(parts, "loved "+relativeTime(entry.LovedAt, m.now))
 	if entry.HeardCount > 0 {
-		parts = append(parts, fmt.Sprintf("heard %dx", entry.HeardCount))
+		parts = append(parts, fmt.Sprintf("heard %d%s", entry.HeardCount, m.th.G.Times))
 	}
 	return m.th.Dim.Render(runewidth.Truncate(strings.Join(parts, " "+m.th.G.Dot+" "), iw, m.th.G.Ellipsis))
 }
@@ -1743,18 +1973,43 @@ func (m Model) stationHistoryRows(rows []string, iw int, budget int) []string {
 	if start+maxRows > len(entries) {
 		start = maxI(0, len(entries)-maxRows)
 	}
+	// The preset slot reads as a channel number beside the name — a bare
+	// digit in the meta column looked like a second love count (and in the
+	// 7-bit palette "<31" read as "less than 31"). The name column is then
+	// whatever the real meta width leaves, not a magic constant.
+	loveW := 0
+	for i := start; i < start+maxRows; i++ {
+		if entries[i].LoveCount > 0 {
+			if w := runewidth.StringWidth(fmt.Sprintf("%d %s", entries[i].LoveCount, m.th.G.Heart)); w > loveW {
+				loveW = w
+			}
+		}
+	}
+	metaW := 7 + 1 // listen time plus its trailing space
+	if loveW > 0 {
+		metaW += 2 + loveW
+	}
 	for i := start; i < start+maxRows; i++ {
 		e := entries[i]
-		name := runewidth.Truncate(cleanStationName(e.Name), maxI(4, iw-22), m.th.G.Ellipsis)
+		name := runewidth.Truncate(cleanStationName(e.Name), maxI(4, iw-5-metaW-1), m.th.G.Ellipsis)
 		meta := fmt.Sprintf("%7s", fmtElapsed(e.Total))
-		if e.LoveCount > 0 {
-			meta += " " + m.th.G.Heart + fmt.Sprintf("%d", e.LoveCount)
+		if loveW > 0 {
+			cell := ""
+			if e.LoveCount > 0 {
+				cell = fmt.Sprintf("%d %s", e.LoveCount, m.th.G.Heart)
+			}
+			meta += "  " + strings.Repeat(" ", maxI(0, loveW-runewidth.StringWidth(cell))) + cell
 		}
+		digit := " "
 		if e.PresetSlot > 0 {
-			meta += fmt.Sprintf(" %d", e.PresetSlot)
+			digit = strconv.Itoa(e.PresetSlot)
 		}
 		if i == m.savedPos {
-			left := m.th.SelText.Render(" " + m.th.G.Pointer + " " + name)
+			slot := m.th.SelMeta.Render(digit)
+			if e.PresetSlot > 0 {
+				slot = m.th.Accent.Background(m.th.SelFill.GetBackground()).Render(digit)
+			}
+			left := m.th.SelText.Render(" "+m.th.G.Pointer+" ") + slot + m.th.SelText.Render(" "+name)
 			right := m.th.SelMeta.Render(meta + " ")
 			gap := maxI(0, iw-lipgloss.Width(left)-lipgloss.Width(right))
 			rows = append(rows, clip(left+m.th.SelFill.Render(strings.Repeat(" ", gap))+right, iw))
@@ -1765,7 +2020,7 @@ func (m Model) stationHistoryRows(rows []string, iw int, budget int) []string {
 			} else {
 				leftStyle = m.th.Mid
 			}
-			left := "   " + leftStyle.Render(name)
+			left := "   " + m.th.AccentDim.Render(digit) + " " + leftStyle.Render(name)
 			right := m.th.Dim.Render(meta + " ")
 			rows = append(rows, lrRow(left, right, iw))
 		}
@@ -1781,8 +2036,8 @@ func (m Model) stationHistoryRows(rows []string, iw int, budget int) []string {
 func (m Model) savedFindRow(iw, matches int) string {
 	if m.savedFind || len(m.savedQuery) > 0 {
 		cursor := ""
-		if m.savedFind && (m.now.UnixMilli()/530)%2 == 0 {
-			cursor = m.th.G.Cursor
+		if m.savedFind {
+			cursor = m.cursorGlyph()
 		}
 		query := string(m.savedQuery)
 		if query == "" {
@@ -1814,7 +2069,7 @@ func (m Model) savedDetailRow(e core.SavedStation, iw int) string {
 		if e.PresetSlot > 0 {
 			msg = fmt.Sprintf("REMOVE?  X again "+m.th.G.Dot+" clears preset %d and its loves", e.PresetSlot)
 		}
-		return m.th.Accent.Bold(true).Render(runewidth.Truncate(msg, iw, m.th.G.Ellipsis))
+		return m.th.Love.Bold(true).Render(runewidth.Truncate(msg, iw, m.th.G.Ellipsis))
 	}
 	parts := []string{}
 	if e.PresetSlot > 0 {
@@ -1862,7 +2117,13 @@ func (m Model) bootView(iw int, pad string, p float64) string {
 	ruleLeft := (iw - ruleW) / 2
 	rule := strings.Repeat(" ", ruleLeft) + m.ruleLine(ruleW)
 
-	markRunes := []rune(letterspace(wordmark))
+	// The letterspaced wordmark is 13 columns; a terminal narrower than
+	// that gets the plain mark rather than a clipped scramble.
+	mark := letterspace(wordmark)
+	if runewidth.StringWidth(mark) > iw {
+		mark = wordmark
+	}
+	markRunes := []rune(mark)
 	shown := 0
 	if p > 0.25 {
 		shown = int((p - 0.25) / 0.75 * float64(len(markRunes)+1))
@@ -1870,7 +2131,7 @@ func (m Model) bootView(iw int, pad string, p float64) string {
 	if shown > len(markRunes) {
 		shown = len(markRunes)
 	}
-	markLeft := (iw - runewidth.StringWidth(letterspace(wordmark))) / 2
+	markLeft := (iw - runewidth.StringWidth(mark)) / 2
 	var mb strings.Builder
 	mb.WriteString(strings.Repeat(" ", maxI(0, markLeft)))
 	frame := int(p * 40)
@@ -1888,14 +2149,21 @@ func (m Model) bootView(iw int, pad string, p float64) string {
 		}
 	}
 
+	// Assemble as rows, clip to the terminal, cap to its height: the old
+	// trailing newline could paint a line past the bottom edge.
 	top := maxI(0, (m.h-3)/3)
-	var b strings.Builder
+	rows := make([]string, 0, top+2)
 	for i := 0; i < top; i++ {
-		b.WriteString("\n")
+		rows = append(rows, "")
 	}
-	b.WriteString(pad + mb.String() + "\n")
-	b.WriteString(pad + rule + "\n")
-	return b.String()
+	rows = append(rows, pad+mb.String(), pad+rule)
+	for i, r := range rows {
+		rows[i] = clip(r, m.w)
+	}
+	if len(rows) > m.h {
+		rows = rows[:m.h]
+	}
+	return strings.Join(rows, "\n")
 }
 
 // --- helpers ---

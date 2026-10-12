@@ -15,4 +15,6 @@ func configureCmd(cmd *exec.Cmd) {
 
 func afterStart(cmd *exec.Cmd) {}
 
-func resolveMpv(path string) string { return path }
+// ResolveMpv has nothing to fix here — the .com wrapper is a Windows
+// PATHEXT artifact, so the looked-up path is the binary.
+func ResolveMpv(path string) string { return path }

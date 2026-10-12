@@ -10,23 +10,30 @@ import (
 // --- decrypt: the tuning set piece ---
 // The old station name dissolves into noise glyphs that resolve left-to-right
 // into the new name. Classic demoscene text-decrypt.
+//
+// The struct holds only the clock: Render takes the target text so the
+// ceremony always resolves into exactly what the settled frame draws. The
+// hero used to decrypt toward a fixed-width render while the receiver
+// letterspaced the final name, so every tune ended with a visible snap.
 
 type Decrypt struct {
-	target []rune
-	start  time.Time
-	dur    time.Duration
+	start time.Time
+	dur   time.Duration
 }
 
-func NewDecrypt(target string, now time.Time) Decrypt {
-	return Decrypt{target: []rune(target), start: now, dur: 800 * time.Millisecond}
+func NewDecrypt(now time.Time) Decrypt {
+	return Decrypt{start: now, dur: 800 * time.Millisecond}
 }
 
+// Active reports whether the scramble is still running. A zero Decrypt is
+// never active, so reduced motion can leave the field unset and the settled
+// text renders directly.
 func (d Decrypt) Active(now time.Time) bool {
-	return len(d.target) > 0 && now.Sub(d.start) < d.dur
+	return !d.start.IsZero() && now.Sub(d.start) < d.dur
 }
 
-func (d Decrypt) Render(now time.Time, t Theme, maxCols int) string {
-	if len(d.target) == 0 || maxCols < 1 {
+func (d Decrypt) Render(now time.Time, t Theme, target string, maxCols int) string {
+	if maxCols < 1 {
 		return ""
 	}
 	elapsed := now.Sub(d.start)
@@ -34,12 +41,13 @@ func (d Decrypt) Render(now time.Time, t Theme, maxCols int) string {
 	if frac > 1 {
 		frac = 1
 	}
-	resolved := int(frac * float64(len(d.target)+1))
+	runes := []rune(target)
+	resolved := int(frac * float64(len(runes)+1))
 	frame := int(elapsed / (50 * time.Millisecond))
 	set := t.G.Decrypt
 	var b strings.Builder
 	cols := 0
-	for i, r := range d.target {
+	for i, r := range runes {
 		rw := runewidth.RuneWidth(r)
 		if cols+rw > maxCols {
 			break
@@ -51,8 +59,16 @@ func (d Decrypt) Render(now time.Time, t Theme, maxCols int) string {
 		case r == ' ':
 			b.WriteRune(' ')
 		default:
+			// A two-column rune gets two one-column scramble glyphs: the
+			// row must measure the same mid-effect as settled, or the
+			// plate jitters as each CJK rune resolves.
 			g := set[(i*31+frame*17)%len(set)]
-			b.WriteString(t.Dim.Render(string(g)))
+			for c := 0; c < rw; c++ {
+				if c > 0 {
+					g = set[(i*31+frame*17+c)%len(set)]
+				}
+				b.WriteString(t.Dim.Render(string(g)))
+			}
 		}
 	}
 	return b.String()
@@ -102,7 +118,9 @@ func (tw Typewriter) RenderOver(now time.Time, text string) string {
 }
 
 // --- marquee: long-title etiquette ---
-// Pause 2s, scroll once across, pause 2s, snap back. No endless loops.
+// Pause 2s, scroll once across, pause 2s, then rest on the truncated head.
+// No endless loops: a title that keeps crawling reads as broken, and the
+// ellipsis is the honest answer once the single pass has run.
 
 func marquee(text string, width int, now, anchor time.Time, ellipsis string) string {
 	tw := runewidth.StringWidth(text)
@@ -112,19 +130,24 @@ func marquee(text string, width int, now, anchor time.Time, ellipsis string) str
 	overflow := tw - width
 	const pause = 2 * time.Second
 	perCol := 140 * time.Millisecond
-	cycle := pause + time.Duration(overflow)*perCol + pause
-	pos := now.Sub(anchor) % cycle
-	if pos < 0 {
-		pos = 0
+	elapsed := now.Sub(anchor)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	// Past one full cycle the scroll is done: the title rests on its
+	// ellipsis-truncated head rather than snapping back or looping.
+	if elapsed >= pause+time.Duration(overflow)*perCol+pause {
+		return runewidth.Truncate(text, width, ellipsis)
 	}
 	var offset int
 	switch {
-	case pos < pause:
+	case elapsed < pause:
 		offset = 0
-	case pos < pause+time.Duration(overflow)*perCol:
-		offset = int((pos - pause) / perCol)
 	default:
-		offset = overflow
+		// The end pause holds the tail: without the clamp, elapsed time
+		// keeps marching the offset past overflow and the title shrinks
+		// off the left edge for the closing two seconds.
+		offset = minI(int((elapsed-pause)/perCol), overflow)
 	}
 	return sliceCols(text, offset, width)
 }

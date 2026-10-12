@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"screech/internal/core"
 )
 
 func TestCleanStationName(t *testing.T) {
@@ -102,8 +104,8 @@ func TestDigitRecallIgnoresEmptySlot(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("empty preset slot should not tune")
 	}
-	if !strings.Contains(m.note, "preset 5 is empty") {
-		t.Fatalf("note: %q", m.note)
+	if !strings.Contains(m.feedback, "PRESET") || !strings.Contains(m.feedback, "5 is empty") {
+		t.Fatalf("feedback: %q", m.feedback)
 	}
 }
 
@@ -140,6 +142,50 @@ func TestVolumeSliderControlsPlayerAndPersists(t *testing.T) {
 	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if mm.(Model).volumeOpen {
 		t.Fatal("esc should close the volume slider")
+	}
+}
+
+// The volume strip is a readout, not a mode: left alone past its linger it
+// folds itself away.
+func TestVolumeOverlayClosesItself(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 80, 24
+	m.start = m.now.Add(-time.Minute)
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = mm.(Model)
+	if !m.volumeOpen {
+		t.Fatal("v should open the volume strip")
+	}
+	mm, _ = m.Update(tickMsg(m.now.Add(volumeLinger - time.Second)))
+	m = mm.(Model)
+	if !m.volumeOpen {
+		t.Fatal("the strip must linger, not close on the next tick")
+	}
+	mm, _ = m.Update(tickMsg(m.now.Add(2 * time.Second)))
+	m = mm.(Model)
+	if m.volumeOpen {
+		t.Fatal("the strip should close after volumeLinger without a touch")
+	}
+}
+
+// While the strip is up, keys it doesn't own still do their job — space
+// skips, l loves.
+func TestVolumeOverlayPassesKeysThrough(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 80, 24
+	m.start = m.now.Add(-time.Minute)
+	m.st = core.SeedStations()[0]
+	m.haveSt = true
+	m.ph = phPlay
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = mm.(Model)
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = mm.(Model)
+	if m.volumeOpen {
+		t.Fatal("an unclaimed key folds the strip away")
+	}
+	if m.ph != phTune || cmd == nil {
+		t.Fatalf("space should still skip while the strip was open: ph=%v", m.ph)
 	}
 }
 

@@ -69,7 +69,10 @@ Shipped in v0.2, still within the austerity budget:
   background; every later launch keeps zero-press resume.
 - **volume** (`v`, then arrows or `-`/`+`): application-only mpv volume,
   persisted in SQLite. It appears as a temporary instrument slider rather
-  than occupying permanent space in the idle display.
+  than occupying permanent space in the idle display, and it behaves like
+  one: it tucks itself away after four seconds without a volume key, and
+  any other key closes it and still does its own job — the slider never
+  turns space into a dead key.
 
 `q` quits. Launch resumes the last station and plays immediately — zero-press startup,
 like a physical radio. Everything else is automatic or read-only.
@@ -285,10 +288,21 @@ allowed for fine detail.
 
 **Faceplate layout (v0.5).** The brand/status rail pins to the top and the
 stateful key strip pins to the bottom. At 78 columns and sufficient height, a
-single framed receiver body centers between them. Its left bay contains track,
-artist, broadcast identity, and the station's genre tags; its right bay
-contains the live signal and the station-memory dial. A raised full-width
-readout explains the current pick.
+single framed receiver body centers between them — which includes the
+standard 80×24 window, the most common terminal there is. Its left bay
+contains track, artist, broadcast identity, and the station's genre tags; its
+right bay contains the live signal and the station-memory dial. A raised
+full-width readout explains the current pick, and when it carries feedback
+it keeps that feedback's own label (`LOVED  Track and station`, `ONLINE
+Signal restored`) rather than a generic one.
+
+"Sufficient height" is counted, not estimated. The height check adds up
+every row the panel will actually draw — both rails, the readout, the
+genre block when the station has tags, the density strip when there is
+history — and only then decides between faceplate and stacked layout. It
+used to assume the meter's first rows were free, and at common heights
+(a 100×20 window, say) the readout and the bottom rail were silently cut
+off by the screen edge. A frame is never drawn without its bottom edge.
 
 **The station-memory dial is an instrument, not a hairline.** Three rows: a
 listening-density strip, the band carrying the needle and the preset ticks,
@@ -424,21 +438,27 @@ affect listening state. The chosen finish tempers with the daypart — brighter
 and cooler midday, dimmer and warmer at night; austere takes the lightness
 shift only, and picker previews render under the current daypart.
 
-**Library views.** `h` opens recent tracks. `H` opens a unified library on the
-loved view; Tab cycles recent, loved, and saved stations. Loved tracks are
+**Library views.** `h` opens recent tracks; `j`/`k` (and page keys) scroll the
+hundred most recent — they used to load and then show only what fit. `H`
+opens a unified library on the loved view; Tab cycles recent, loved, and
+saved stations. Loved tracks are
 deduplicated, searchable across artist/title/origin station, and
 keyboard-selectable. The selected track can seed more music from its artist,
 return to its origin station, or be removed with a guarded action.
 
 The **saved-stations view** is the full two-tier station list: presets
-(carrying their slot number) plus every station with loved tracks, unified
-and sorted most-listened first. It's unbounded — presets stay at nine for
+plus every station with loved tracks, unified and sorted most-listened
+first. A preset's slot sits left of its name like a channel number; the
+right side is aligned columns of listen time and love count. The slot used
+to trail the love count on the right, where `♥1 1` read as one number and
+the ASCII form `<31` read as "less than 31". It's unbounded — presets stay at nine for
 instant digit recall, but the library holds every station you've ever
 marked. `/` filters by name, `j`/`k` select, `enter` tunes, digits jump to a
 preset, and a guarded `x` removes the station from recall (preset slot and
 loved rows) while leaving listen history and the taste model untouched.
 Radio metadata is recall and discovery context, never presented as an
-on-demand replay URL. Esc closes.
+on-demand replay URL. Esc clears an active filter first, then closes —
+in both filterable views.
 
 **The wave (honest amplitude, synthetic texture).** Touching braille cells,
 the top block of rows the left channel and the bottom block the right, with
@@ -487,14 +507,30 @@ same frame as the keypress, always; never block render on network.
 **Idle (the main state).** After ~3 min without keys: everything dims except track
 title and wave; the accent marker breathes (slow luminance sine, ~6s period). Any
 key snaps bright. Natural track changes step the new title dim → mid → bright.
-Marquee etiquette for long titles: pause 2s, scroll once, pause, reset — no
-endless loops. Past 5 min without any activity the chrome — wordmark, frame
+Marquee etiquette for long titles: pause 2s, scroll once, pause, then rest on
+the head of the title with an ellipsis — no endless loops. (For a while it
+did loop, every few seconds for as long as the track played, in an
+interface meant to be left alone for hours.) Past 5 min without any activity the chrome — wordmark, frame
 metal, key strip, microlabels — eases to an ember floor over ~30s; the wave,
 dial marker, and LIVE readout keep living, and any key, tune, or player state
 event restores the room instantly.
 
 **Boot.** ~600ms: rules draw outward from center, wordmark letterspaces in, then
 content. Skippable on any key — the key still lands.
+
+**Reduced motion.** `--reduced-motion` (or `SCREECH_REDUCED_MOTION`) is a
+real mode, not a single switch: no boot sequence, no decrypt scramble, no
+static collapse, no scrolling titles, no blinking (buffering, cursors), no
+idle breathing, no love flash, and the dial needle lands on the new station
+instead of springing to it. Everything still changes state on the same
+frame; it just stops moving to get there. The decrypt, when it does run,
+resolves into exactly the text that stays on screen — it used to resolve
+into the plain name and then snap to the letterspaced plate a frame later.
+
+**Startup notices survive startup.** A message the user must see once (a
+damaged database moved aside) holds the readout until the first key. It
+used to share the transient note slot, and the zero-press resume cleared it
+within milliseconds of launch, so nobody ever saw it.
 
 **Texture.** Mid-contrast readout cluster top-right: `AAC  128K  2:14:06`.
 Fixed-width clock formatting and uppercase codec labels provide
@@ -504,12 +540,37 @@ status line, keeping the whole display a single 12–14-line object.
 **Reality.** One `tea.Tick` heartbeat (15–20fps); every animation is a pure
 function of elapsed time; no per-effect goroutines. Fixed zone heights so frames
 never reflow. All truncation through go-runewidth, ellipsis, never wrap.
-Degradation ladder: <50 cols drop wave + band line; <40 drop readout; never break.
+Degradation ladder, in the order things are shed:
+
+- **Header.** The subtitle goes first (`PERSONAL RADIO`, or `SYNCING
+  DIRECTORY…` while a refresh runs — background work lives there, so it
+  never hides playback state), then the codec/bitrate/clock readout, then
+  the `BREAK` tag, then the wordmark. The state word — `LIVE`, `OFFLINE`,
+  `BUFFERING`, `RECONNECTING`, `TUNING`, `STOPPED` — is the last thing
+  standing. It used to be the first: a narrow window dropped the whole right
+  side at once.
+- **Key strip.** Separators tighten, then navigation labels drop (`quit`,
+  `theme`, `library`, `discover`, `skip`) before state labels (`loved`,
+  `preset 7`, `75%`), and bare keys come last. The full strip is 95 columns,
+  so an 80-column window used to get nothing but `SPACE L F / H V T Q`. The
+  strip also follows state: offline, `SPACE` reads `retry`; once the player
+  has stopped for good, only the keys that still do something remain.
+- **Body.** Below 78 columns, or when the height can't hold every row of
+  the faceplate, it collapses to the stacked composition; below 28 inner
+  columns the stacked wave and band go; at the narrowest, rows are clipped
+  rather than wrapped.
+
 "Never break" is enforced, not hoped for: `TestViewFitsEveryTerminalSize`
-renders every overlay at every width 1–30 and height 1–16 (sampled beyond)
-and fails on any panic or overflowing row. There is no minimum terminal size
-at startup.
-`ascii = true` in TOML swaps every fancy glyph for ASCII (bad SSH insurance).
+renders every overlay — boot and reduced motion included — at every width
+1–30 and height 1–16 (sampled beyond) and fails on any panic, overflowing
+row, or a frame whose bottom edge went missing. There is no minimum terminal
+size at startup.
+`ascii = true` in TOML swaps every fancy glyph for ASCII (bad SSH insurance),
+and `TestASCIIModeIsSevenBit` holds it to that: in ASCII mode every rendered
+cell is 7-bit. Before that test, a multiplication sign, a few hard-coded
+ellipses and a track display that split on the Unicode dot had all leaked
+through — the last one made the faceplate print the whole track as the title
+and `NOW PLAYING` as the artist.
 
 ## Config
 

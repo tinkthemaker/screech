@@ -99,6 +99,10 @@ func runDoctor() int {
 	resolved, lookErr := exec.LookPath(mpvPath)
 	if resolved == "" {
 		resolved = mpvPath
+	} else {
+		// Show the binary playback actually launches: on Windows LookPath
+		// prefers the mpv.com wrapper over the real mpv.exe.
+		resolved = player.ResolveMpv(resolved)
 	}
 	fmt.Printf("[%s] mpv      %s\n", ok(lookErr == nil), resolved)
 	switch {

@@ -182,7 +182,7 @@ func TestLoveWashAndMaterial(t *testing.T) {
 	m.loveAt = m.now.Add(-3 * time.Second) // resting wash, past the flash
 	m.w = 110
 	m.haveTrack = true
-	m.track = "Broadcast · Come On Let's Go"
+	m.setTrack("Broadcast", "Come On Let's Go")
 	m.trackAt = m.now.Add(-time.Minute)
 	// termenv rounds hex -> RGB (53 -> 52), so assert the rendered value.
 	if row := m.trackRow(80, false); !strings.Contains(row, "48;2;52;23;15") {
@@ -251,21 +251,29 @@ func TestBootSkippableAndShort(t *testing.T) {
 	}
 }
 
-// The wave bay and the faceplate agree on the compact threshold: at h>=14 the
-// wave renders at the receiver's right-bay width, below it at full width.
+// The wave bay and the faceplate agree: wherever receiverShape claims the
+// terminal the wave renders at the right-bay width, everywhere else it
+// takes the full stacked width. Heights like 14 don't fit the panel — the
+// accounting now says so rather than drawing it truncated.
 func TestWaveGateConsistency(t *testing.T) {
 	m := testModel(t)
 	m.w = 110
 	iw := m.innerWidth()
 	_, _, right := receiverColumns(iw)
 
+	for h := 8; h <= 30; h++ {
+		m.h = h
+		want := iw
+		if m.receiverShape() {
+			want = right
+		}
+		if got := m.waveRenderWidth(); got != want {
+			t.Fatalf("h=%d: wave width %d but the layout decision says %d", h, got, want)
+		}
+	}
 	m.h = 15
 	if got := m.waveRenderWidth(); got != right {
-		t.Errorf("h=15 should render the wave in the right bay (%d), got %d", right, got)
-	}
-	m.h = 14
-	if got := m.waveRenderWidth(); got != right {
-		t.Errorf("h=14 should render the wave in the right bay (%d), got %d", right, got)
+		t.Errorf("h=15 fits the faceplate: wave should take the right bay (%d), got %d", right, got)
 	}
 	m.h = 13
 	if got := m.waveRenderWidth(); got != iw {

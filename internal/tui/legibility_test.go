@@ -324,7 +324,7 @@ func playingAt(t *testing.T, w, h int) Model {
 	m.st = core.Station{UUID: "u1", Name: "BADROCK HARD & HEAVY", Codec: "MP3",
 		Bitrate: 320, Tags: "heavy metal, hard rock, thrash"}
 	m.playStart = m.now.Add(-56 * time.Second)
-	m.track = "Cradle Of Filth · Right Wing of the Garden Triptych"
+	m.setTrack("Cradle Of Filth", "Right Wing of the Garden Triptych")
 	m.reason = "preset 4"
 	m.tw = NewTypewriter(m.reason, m.now.Add(-5*time.Second))
 	return m

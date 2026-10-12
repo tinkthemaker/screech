@@ -17,11 +17,11 @@ func configureCmd(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 }
 
-// resolveMpv prefers the real binary over the mpv.com console wrapper: the
+// ResolveMpv prefers the real binary over the mpv.com console wrapper: the
 // wrapper re-spawns mpv.exe, and killing the wrapper leaves the real player
 // running headless. PATHEXT resolution finds .com first, so swap when the
 // sibling exe exists.
-func resolveMpv(path string) string {
+func ResolveMpv(path string) string {
 	resolved, err := exec.LookPath(path)
 	if err != nil || !strings.EqualFold(filepath.Ext(resolved), ".com") {
 		return path

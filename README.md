@@ -23,11 +23,12 @@ playlists, no telemetry. One binary, one config file, one database, all yours.
   [SPACE] skip  [L] love  [F] preset 7  [/] discover  [H] library  [V] 75%  [T] theme
 ```
 
-On wide terminals Screech becomes a receiver faceplate: the music owns the
-left bay, while the live signal and station-memory dial occupy the right. The
-amber marker is the station playing, the small ticks are saved presets, and
-the raised readout always explains why the station was picked. Narrow windows
-collapse back to a compact stacked layout.
+From 78 columns up (a standard 80×24 window included) Screech becomes a
+receiver faceplate: the music owns the left bay, while the live signal and
+station-memory dial occupy the right. The amber marker is the station
+playing, the small ticks are saved presets, and the raised readout always
+explains why the station was picked. Narrower or shorter windows collapse to
+a compact stacked layout.
 
 ## Needs
 
@@ -53,8 +54,12 @@ screech                   start the radio (default)
 screech doctor            read-only checkup of config, database, mpv, IPC, network
 screech --version         print the version
 screech --help            usage
-screech --reduced-motion  no love-heart flash (or set SCREECH_REDUCED_MOTION=1)
+screech --reduced-motion  calm the animations (or set SCREECH_REDUCED_MOTION=1)
 ```
+
+Reduced motion turns off the boot sequence, the station-name scramble, the
+tuning static, scrolling titles, blinking, the idle breathing, and the love
+flash; the dial needle lands instead of springing. Nothing else changes.
 
 Only one screech runs per data directory; a second launch says so and exits
 without touching the first one's log.
@@ -102,7 +107,9 @@ muscle memory, not a list. Everything past that lives in the library.
 **v** — open Screech's volume slider. Left/right arrows or `-`/`+` adjust
 the player in five-percent steps without changing system volume; `-`/`+`
 (or `[`/`]`) also work straight from the main screen. The level is
-remembered across launches; `v`, enter, or esc closes the slider.
+remembered across launches. The slider tucks itself away after a few
+seconds; `v`, enter, or esc closes it sooner, and any other key closes it
+and does its usual job.
 
 **t** — open the theme picker. Move with arrows or `j`/`k` (or press a
 digit) to preview a finish live, Enter applies and remembers it, and Escape
@@ -111,8 +118,8 @@ Austere is strict monochrome; Verdant, Azure, Violet, and Slayer are the
 same faceplate in other hues, and Charm and Lagoon carry a two-hue
 gradient. Every finish tempers with the time of day.
 
-**h** — recently heard tracks, newest first. Loved tracks carry an ember
-heart.
+**h** — recently heard tracks, newest first; `j`/`k` scroll. Loved tracks
+carry an ember heart.
 
 **H** — open the library, starting with loved tracks. `tab` moves through
 recent tracks, loved tracks, and saved stations. In the loved view, `/`
@@ -121,11 +128,13 @@ searches across artist, title, and origin station; arrows or `j`/`k` select;
 that played it; and pressing `x` twice removes it.
 
 The saved-stations view is the full two-tier station list: your presets
-(marked with their slot number) plus every station you've loved a track on,
-most-listened first, unbounded. `/` searches by name, `j`/`k` select,
-`enter` tunes, digits jump straight to a preset, and pressing `x` twice
-removes the station from recall — clearing its preset slot and its loves
-while leaving listen history and the taste model alone.
+(their slot number sits in front of the name, like a channel) plus every
+station you've loved a track on, most-listened first, unbounded. `/`
+searches by name, `j`/`k` select, `enter` tunes, digits jump straight to a
+preset, and pressing `x` twice removes the station from recall — clearing
+its preset slot and its loves while leaving listen history and the taste
+model alone. In both searchable views, esc clears the search before it
+closes the library.
 
 **/** — seed the radio. Type a genre and screech tunes a matching station
 instantly: a tag in the local cache plays immediately, and a tag the cache
@@ -221,7 +230,7 @@ else, and no telemetry.
 
 To start over, quit and delete the data directory. If the database is ever
 damaged, screech moves it aside as `screech.db.corrupt.<timestamp>`, starts
-fresh, and says so on the status line.
+fresh, and says so on the status line until you press a key.
 
 Station names and track titles come from strangers' servers, so screech
 strips terminal control sequences and layout-breaking characters before it
@@ -244,9 +253,11 @@ directory), reports files a fresh install hasn't created yet as `--` rather
 than failures, and exits with a bitmask of what failed: 1 config, 2
 database, 4 mpv, 8 IPC, 16 network.
 
-Set `ascii = true` if terminal glyphs render poorly. Small windows are fine:
-the layout sheds detail step by step, down to a few columns, rather than
-refusing to start.
+Set `ascii = true` if terminal glyphs render poorly; everything on screen is
+then plain 7-bit text. Small windows are fine: the layout sheds detail step
+by step, down to a few columns, rather than refusing to start. The header
+keeps the playback state (`LIVE`, `OFFLINE`, `BUFFERING`) to the last, and
+the key strip drops its quieter labels before the keys themselves.
 The last-run log lives next to the config file.
 
 ## Design

@@ -200,7 +200,7 @@ func TestLoveToggleInTUI(t *testing.T) {
 	m.haveSt = true
 	m.ph = phPlay
 	m.playStart = m.now.Add(-time.Minute)
-	m.track = "Broadcast · Come On Let's Go"
+	m.setTrack("Broadcast", "Come On Let's Go")
 	m.haveTrack = true
 	m.trackAt = m.now
 
