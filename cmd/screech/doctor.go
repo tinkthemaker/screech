@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"screech/internal/config"
-	"screech/internal/core"
-	"screech/internal/player"
-	versionpkg "screech/internal/version"
+	"github.com/tinkthemaker/screech/internal/config"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
+	versionpkg "github.com/tinkthemaker/screech/internal/version"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
 )
 
 func modelWithListens(t *testing.T) Model {

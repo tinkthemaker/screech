@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"screech/internal/core"
-	"screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
 )
 
 // tuneModel returns a model mid-ceremony: a station picked, phase phTune,

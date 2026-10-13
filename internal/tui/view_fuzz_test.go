@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
 )
 
 // The resize contract at every size: no panic, no overflow, no extra lines.

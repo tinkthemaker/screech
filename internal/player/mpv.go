@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"screech/internal/version"
+	"github.com/tinkthemaker/screech/internal/version"
 )
 
 // testExtraArgs appends to every spawn so tests can make mpv safe on

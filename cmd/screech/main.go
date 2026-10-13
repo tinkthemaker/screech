@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"runtime/debug"
 
-	"screech/internal/config"
-	"screech/internal/core"
-	"screech/internal/player"
-	"screech/internal/tui"
-	versionpkg "screech/internal/version"
+	"github.com/tinkthemaker/screech/internal/config"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/tui"
+	versionpkg "github.com/tinkthemaker/screech/internal/version"
 )
 
 // version is the one string every surface reports. It lives in

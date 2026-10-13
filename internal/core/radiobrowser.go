@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"screech/internal/version"
+	"github.com/tinkthemaker/screech/internal/version"
 )
 
 // rbUserAgent follows radio-browser etiquette: a real, identifying agent

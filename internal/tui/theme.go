@@ -8,7 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
 )
 
 // Theme: one saturated accent, three warm grays. NFO austerity, not a

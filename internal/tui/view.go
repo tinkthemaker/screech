@@ -13,7 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
 )
 
 const wordmark = "SCREECH"

@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
 )
 
 // Screech is an ambient object: on screen for hours, read from across the

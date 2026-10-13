@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"screech/internal/core"
-	"screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
 )
 
 // runCmd executes a command tree and collects the messages it produces.
