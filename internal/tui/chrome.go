@@ -51,8 +51,13 @@ func (m Model) headerBar() string {
 		}
 	case m.ph == phTune && m.reconnecting:
 		status = "RECONNECTING" + m.th.G.Ellipsis
+	case m.ph == phTune && m.resuming:
+		status = "RESUMING" + m.th.G.Ellipsis
 	case m.seeking:
 		status = "SEEKING" + m.th.G.Ellipsis
+	case m.ph == phPaused:
+		status = "PAUSED"
+		statusStyle = m.th.AccentDim // held, not lit: neither LIVE nor warning
 	case m.ph == phTune:
 		status = "TUNING" + m.th.G.Ellipsis
 	case m.ph == phPlay && m.haveSt:
@@ -72,6 +77,11 @@ func (m Model) headerBar() string {
 		if r := m.readout(); r != "" {
 			right += statusStyle.Render("  " + r)
 		}
+	}
+	if m.ph == phPaused {
+		// Time since the hold, on the same degradation ladder as LIVE's
+		// readout — first thing dropped when the chrome runs out of room.
+		right += statusStyle.Render("  " + fmtClock(m.now.Sub(m.pausedAt)))
 	}
 	right += breakChip
 
@@ -238,11 +248,30 @@ func (m Model) footerItems() []footerItem {
 	if m.ph == phOffline {
 		skip = "retry"
 	}
-	return []footerItem{
+	pauseLabel, pausePrio := "pause", 2
+	if m.ph == phPaused {
+		pauseLabel, pausePrio = "resume", 3
+	}
+	items := []footerItem{
 		{"SPACE", skip, 2}, {"L", love, 3}, {"F", save, 3},
+		{"P", pauseLabel, pausePrio},
 		{"/", "discover", 1}, {"H", "library", 1}, {"V", fmt.Sprintf("%d%%", m.volume), 3},
 		{"T", "theme", 1}, {"Q", "quit", 0},
 	}
+	if !m.sleepAt.IsZero() {
+		// Whole minutes while there's one to round up to, seconds for the
+		// last stretch — matching the fade the listener hears.
+		if left := m.sleepAt.Sub(m.now); left >= time.Minute {
+			items = append(items[:7], append([]footerItem{
+				{"Z", fmt.Sprintf("sleep %dm", int(left.Minutes()+0.999)), 3},
+			}, items[7:]...)...)
+		} else {
+			items = append(items[:7], append([]footerItem{
+				{"Z", fmt.Sprintf("sleep %ds", int(left.Seconds())), 3},
+			}, items[7:]...)...)
+		}
+	}
+	return items
 }
 
 // footerBar is the key strip: a full-width surface plane pinned to the last

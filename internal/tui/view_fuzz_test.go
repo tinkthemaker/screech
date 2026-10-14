@@ -118,6 +118,29 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 			m.retryAt = m.now.Add(8 * time.Second)
 			m.reason = "because you love stations like this"
 		}},
+		{"paused", func(m *Model) {
+			m.st = core.SeedStations()[1]
+			m.haveSt = true
+			m.ph = phPaused
+			m.pausedAt = m.now.Add(-4 * time.Minute)
+			m.setTrack("An Artist", "A Title")
+			m.trackAt = m.now.Add(-time.Minute)
+		}},
+		{"resuming", func(m *Model) {
+			m.st = core.SeedStations()[1]
+			m.haveSt = true
+			m.ph = phTune
+			m.resuming = true
+			m.tuneAt = m.now
+		}},
+		{"sleep-timer", func(m *Model) {
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.ph = phPlay
+			m.playStart = m.now.Add(-time.Hour)
+			m.sleepStep = 1
+			m.sleepAt = m.now.Add(29 * time.Minute)
+		}},
 	}
 
 	for _, st := range states {
@@ -533,6 +556,26 @@ func TestASCIIModeIsSevenBit(t *testing.T) {
 		func(m *Model) { // volume strip
 			m.volumeOpen = true
 			m.volume = 42
+		},
+		func(m *Model) { // paused
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.ph = phPaused
+			m.pausedAt = m.now.Add(-2 * time.Minute)
+		},
+		func(m *Model) { // resuming
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.ph = phTune
+			m.resuming = true
+		},
+		func(m *Model) { // sleep timer armed
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.ph = phPlay
+			m.playStart = m.now.Add(-time.Hour)
+			m.sleepStep = 0
+			m.sleepAt = m.now.Add(14 * time.Minute)
 		},
 	}
 	sizes := []struct{ w, h int }{{100, 30}, {80, 24}, {60, 20}, {30, 10}}

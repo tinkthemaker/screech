@@ -42,6 +42,11 @@ type MPV struct {
 	// replaced, not to the new one.
 	loadPending bool
 
+	// paused and coreIdle hold the last values mpv reported for those
+	// properties: playing is only playing when mpv is neither paused nor
+	// idle, and both gates suppress their own echoes.
+	paused, coreIdle bool
+
 	// curFile is the unescaped URL basename of the current stream and
 	// curFileEsc its still-escaped form: until an ICY title arrives, mpv
 	// reports media-title as that filename, which must not be mistaken for
@@ -64,7 +69,7 @@ type MPV struct {
 // observedProperties are subscribed right after IPC connects, before the
 // first event can arrive.
 var observedProperties = []string{
-	"metadata", "media-title", "core-idle", "paused-for-cache",
+	"metadata", "media-title", "core-idle", "paused-for-cache", "pause",
 	"af-metadata/lavfi.astats.Overall.RMS_level",
 	"af-metadata/lavfi.astats.1.RMS_level",
 	"af-metadata/lavfi.astats.2.RMS_level",
@@ -119,6 +124,22 @@ func (m *MPV) spawn() error {
 		// runs it (when installed) on every URL that fails to load,
 		// delaying the failure the tune watchdog and offline logic rely on.
 		"--ytdl=no",
+		// mpv still reads the user's mpv.conf — audio device, exclusive
+		// mode, that stays — but these pin options a personal config can
+		// set that break live radio: keep-open and looping swallow the eof
+		// that drop detection keys on, pause=yes makes every tune look
+		// dead, watch-later "resumes" a live stream at a stale offset, and
+		// mpv's default demuxer caches (150MiB ahead, 50MiB back) only grow
+		// for radio — about 55 minutes of never-seeked back buffer per hour
+		// at 128k.
+		"--pause=no",
+		"--keep-open=no",
+		"--loop-file=no",
+		"--loop-playlist=no",
+		"--resume-playback=no",
+		"--save-position-on-quit=no",
+		"--demuxer-max-bytes=32MiB",
+		"--demuxer-max-back-bytes=4MiB",
 		"--input-ipc-server=" + path,
 	}
 	args = append(args, testExtraArgs...)
@@ -183,6 +204,7 @@ func (m *MPV) spawn() error {
 	m.loadPending = false
 	m.sawIcy, m.sawL, m.sawR = false, false, false
 	m.curFile, m.curFileEsc = "", ""
+	m.paused, m.coreIdle = false, true
 	m.mu.Unlock()
 	// The loop owns conn and the channel: it closes the channel itself, so
 	// a restarted generation's death can never land in the new stream.
@@ -213,7 +235,12 @@ func (m *MPV) Play(streamURL string) error {
 		m.curFileEsc = path.Base(u.EscapedPath())
 	}
 	m.mu.Unlock()
-	return m.send("loadfile", streamURL)
+	if err := m.send("loadfile", streamURL); err != nil {
+		return err
+	}
+	// mpv's pause survives loadfile; choosing a station must never start
+	// silent, whoever paused it.
+	return m.send("set_property", "pause", false)
 }
 
 func (m *MPV) SetVolume(percent int) error {
@@ -227,6 +254,10 @@ func (m *MPV) SetVolume(percent int) error {
 	m.volume = percent
 	m.mu.Unlock()
 	return m.send("set_property", "volume", percent)
+}
+
+func (m *MPV) SetPaused(paused bool) error {
+	return m.send("set_property", "pause", paused)
 }
 
 // Restart replaces a dead backend with a fresh process: the old one is
@@ -339,6 +370,10 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf) {
 				continue
 			}
 			switch msg.Reason {
+			case "stop":
+				// mpv's `stop` command — the OS media flyout's Stop
+				// button sends it. Screech never does.
+				emit(events, Event{Type: EventStopped})
 			case "error":
 				err := fmt.Errorf("stream failed")
 				if msg.FileError != "" {
@@ -394,17 +429,50 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 		if !saw && title != "" && !isURLish(title) {
 			emit(events, Event{Type: EventTitle, Title: title})
 		}
+	case "pause":
+		var paused bool
+		if json.Unmarshal(msg.Data, &paused) != nil {
+			return
+		}
+		m.mu.Lock()
+		if paused == m.paused {
+			m.mu.Unlock()
+			return
+		}
+		m.paused = paused
+		idle := m.coreIdle
+		m.mu.Unlock()
+		if paused {
+			emit(events, Event{Type: EventPaused})
+		} else {
+			emit(events, Event{Type: EventResumed})
+			if !idle {
+				// core-idle=false may have arrived first and been held
+				// back by the pause gate below.
+				emit(events, Event{Type: EventPlaying})
+			}
+		}
 	case "core-idle":
 		var idle bool
 		if json.Unmarshal(msg.Data, &idle) != nil {
 			return
 		}
-		if !idle {
+		m.mu.Lock()
+		m.coreIdle = idle
+		paused := m.paused
+		m.mu.Unlock()
+		if !idle && !paused {
 			emit(events, Event{Type: EventPlaying})
 		}
 	case "paused-for-cache":
 		var paused bool
 		if json.Unmarshal(msg.Data, &paused) != nil {
+			return
+		}
+		m.mu.Lock()
+		stopped := m.paused
+		m.mu.Unlock()
+		if stopped {
 			return
 		}
 		if paused {

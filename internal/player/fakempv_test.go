@@ -89,6 +89,17 @@ func runFakeMPV(args []string) int {
 	}
 
 	var cur string
+	var paused bool
+	// setPause mirrors how mpv treats the property: pause idles the output
+	// even with a file loaded, so a change is followed by a core-idle flip.
+	setPause := func(p bool) {
+		if p == paused {
+			return
+		}
+		paused = p
+		send(`{"event":"property-change","name":"pause","data":%t}`, p)
+		send(`{"event":"property-change","name":"core-idle","data":%t}`, p || cur == "")
+	}
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -146,6 +157,33 @@ func runFakeMPV(args []string) int {
 					volume = int(v)
 					// Real mpv echoes the change back as an event.
 					send(`{"event":"property-change","name":"volume","data":%d}`, volume)
+				}
+			}
+			if len(msg.Command) > 2 && msg.Command[1] == "pause" {
+				if p, ok := msg.Command[2].(bool); ok {
+					setPause(p)
+				}
+			}
+		case "script-message":
+			// `script-message fake-external <verb>` stands in for the OS
+			// media controls, which drive the same properties directly.
+			if len(msg.Command) > 2 && msg.Command[1] == "fake-external" {
+				switch msg.Command[2] {
+				case "pause":
+					setPause(true)
+				case "resume":
+					setPause(false)
+				case "stop":
+					// The flyout's Stop runs `stop`: end-file with its
+					// own reason, nothing loaded any more.
+					send(`{"event":"end-file","reason":"stop"}`)
+					cur = ""
+					send(`{"event":"property-change","name":"core-idle","data":true}`)
+				case "idle-flip":
+					send(`{"event":"property-change","name":"core-idle","data":false}`)
+				case "cache-flip":
+					send(`{"event":"property-change","name":"paused-for-cache","data":true}`)
+					send(`{"event":"property-change","name":"paused-for-cache","data":false}`)
 				}
 			}
 		case "quit":
@@ -411,9 +449,9 @@ func TestFakeReplaceSwallowsEndFile(t *testing.T) {
 
 func TestFakeCrashReportsDied(t *testing.T) {
 	m, _ := startFakeMPV(t, "default")
-	if err := m.Play("http://stream.test/crash"); err != nil {
-		t.Fatal(err)
-	}
+	// The fake dies on the loadfile; the trailing unpause write can land
+	// after the pipe closed, so an error here is fine.
+	_ = m.Play("http://stream.test/crash")
 	ev := waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventDied })
 	if ev.Err == nil || !strings.Contains(ev.Err.Error(), "boom") {
 		t.Fatalf("died error = %v, want it to contain %q", ev.Err, "boom")
@@ -429,9 +467,7 @@ func TestFakeRestartRespawnsWithVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := m.Events()
-	if err := m.Play("http://stream.test/crash"); err != nil {
-		t.Fatal(err)
-	}
+	_ = m.Play("http://stream.test/crash")
 	waitForEvent(t, old, 3*time.Second, func(ev Event) bool { return ev.Type == EventDied })
 	if err := m.Restart(); err != nil {
 		t.Fatal(err)
@@ -478,6 +514,115 @@ func TestFakeDieOnStartFailsFast(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("took %v to report a dead-on-arrival backend", elapsed)
 	}
+}
+
+func TestFakeSetPausedEvents(t *testing.T) {
+	m, _ := startFakeMPV(t, "default")
+	if err := m.Play("http://stream.test/ok"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+
+	if err := m.SetPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPaused })
+
+	if err := m.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	// Resumed must surface before Playing: a core-idle flip that arrived
+	// while paused was held back, and the resume replays it in order.
+	ev := waitEvent(t, m.Events(), 3*time.Second)
+	if ev.Type != EventResumed {
+		t.Fatalf("first event after unpause = %v, want EventResumed", ev.Type)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+}
+
+func TestFakePausedSuppressesPlaySignals(t *testing.T) {
+	m, _ := startFakeMPV(t, "default")
+	if err := m.Play("http://stream.test/ok"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+	if err := m.SetPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPaused })
+
+	// While paused, a core-idle or paused-for-cache flip must not surface
+	// as playing/buffering.
+	if err := m.send("script-message", "fake-external", "idle-flip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.send("script-message", "fake-external", "cache-flip"); err != nil {
+		t.Fatal(err)
+	}
+	evs, _ := collectFor(m.Events(), 400*time.Millisecond)
+	for _, ev := range evs {
+		t.Fatalf("event leaked while paused: %v", ev.Type)
+	}
+}
+
+func TestFakePlayUnpausesStream(t *testing.T) {
+	m, logPath := startFakeMPV(t, "default")
+	if err := m.Play("http://stream.test/ok"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+	if err := m.SetPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPaused })
+
+	if err := m.Play("http://stream.test/ok2"); err != nil {
+		t.Fatal(err)
+	}
+	// The new load is ordered before the unpause so no stale buffer blips.
+	text := waitForLog(t, logPath, `"loadfile","http://stream.test/ok2"`)
+	load := strings.Index(text, `"loadfile","http://stream.test/ok2"`)
+	unpause := strings.Index(text[load:], `"set_property","pause",false`)
+	if load < 0 || unpause < 0 {
+		t.Fatalf("expected loadfile before pause=false:\n%s", text)
+	}
+	ev := waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool {
+		return ev.Type == EventResumed || ev.Type == EventPlaying
+	})
+	if ev.Type != EventResumed {
+		t.Fatalf("first event = %v, want EventResumed", ev.Type)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+}
+
+func TestFakeExternalPause(t *testing.T) {
+	m, _ := startFakeMPV(t, "default")
+	if err := m.Play("http://stream.test/ok"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+	// Media keys / the OS flyout drive mpv's pause property directly —
+	// the client sees the same property-change either way.
+	if err := m.send("script-message", "fake-external", "pause"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPaused })
+	if err := m.send("script-message", "fake-external", "resume"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventResumed })
+}
+
+func TestFakeExternalStop(t *testing.T) {
+	m, _ := startFakeMPV(t, "default")
+	if err := m.Play("http://stream.test/ok"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+	if err := m.send("script-message", "fake-external", "stop"); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventStopped })
 }
 
 func TestFakeCloseQuitsCleanly(t *testing.T) {

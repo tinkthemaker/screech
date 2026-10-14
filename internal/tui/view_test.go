@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +22,8 @@ type stubPlayer struct {
 	volume   int
 	playURLs []string
 	playErr  error // injected Play failure
+	paused   bool
+	calls    []string // ordered log across Play/SetVolume/SetPaused/Restart
 	restarts int
 	closed   bool
 }
@@ -30,12 +33,21 @@ func (s *stubPlayer) Play(url string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.playURLs = append(s.playURLs, url)
+	s.calls = append(s.calls, "play "+url)
 	return s.playErr
 }
 func (s *stubPlayer) SetVolume(percent int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.volume = percent
+	s.calls = append(s.calls, fmt.Sprintf("vol %d", percent))
+	return nil
+}
+func (s *stubPlayer) SetPaused(paused bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = paused
+	s.calls = append(s.calls, fmt.Sprintf("pause %t", paused))
 	return nil
 }
 func (s *stubPlayer) Events() <-chan player.Event {
@@ -50,6 +62,7 @@ func (s *stubPlayer) Restart() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.restarts++
+	s.calls = append(s.calls, "restart")
 	s.ch = make(chan player.Event, 8)
 	return nil
 }
@@ -96,6 +109,14 @@ func (s *stubPlayer) failPlay(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.playErr = err
+}
+
+// callsList returns the ordered command log — tests assert pause-then-
+// restore and resume-vs-reload order without parsing playURLs alone.
+func (s *stubPlayer) callsList() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
 }
 
 func testModel(t *testing.T) Model {

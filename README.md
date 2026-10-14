@@ -111,6 +111,19 @@ remembered across launches. The slider tucks itself away after a few
 seconds; `v`, enter, or esc closes it sooner, and any other key closes it
 and does its usual job.
 
+**p** — pause and resume. It's mpv's own pause underneath, so keyboard
+media keys, headset buttons, and the OS media flyout all drive the same
+hold. A pause under 30 seconds resumes from the buffer a few beats behind
+live, like pausing live TV; a longer one reloads and rejoins the live edge.
+Pausing ends the listen, so paused time neither teaches nor counts as
+listening. The flyout's Stop does the same pause, and its Next/Previous
+buttons do nothing — there's no playlist to walk.
+
+**z** — sleep timer. Each press steps 15, 30, 45, 60, 90 minutes, then
+off; the footer counts it down. Over the last 30 seconds the volume eases
+toward silence — your saved level is untouched — and when the timer lands
+the radio pauses itself.
+
 **t** — open the theme picker. Move with arrows or `j`/`k` (or press a
 digit) to preview a finish live, Enter applies and remembers it, and Escape
 restores the previous theme. Receiver is the warm phosphor default and

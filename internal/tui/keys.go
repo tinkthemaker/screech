@@ -97,6 +97,32 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.buf = nil
 		return m, nil
 
+	case "p", "P":
+		// One pause state — mpv's own — whether it was p, a media key,
+		// a headset button or the OS flyout that held it.
+		if m.ph == phPaused {
+			return m.resume(false)
+		}
+		return m.pause(false)
+
+	case "z", "Z":
+		step := m.sleepStep + 1
+		if step >= len(sleepSteps) {
+			m.sleepStep, m.sleepAt = -1, time.Time{}
+			m.setFeedback("SLEEP  Off")
+		} else {
+			m.sleepStep, m.sleepAt = step, m.now.Add(sleepSteps[step])
+			m.setFeedback(fmt.Sprintf("SLEEP  %d min", int(sleepSteps[step].Minutes())))
+		}
+		if m.sleepVol >= 0 {
+			// A fade was underway: the listener's volume comes back now,
+			// not at the next tick.
+			pl, v := m.pl, m.volume
+			m.sleepVol = -1
+			return m, func() tea.Msg { return volumeMsg{err: pl.SetVolume(v)} }
+		}
+		return m, nil
+
 	case "v":
 		m.volumeOpen = true
 		m.volumeAt = m.now

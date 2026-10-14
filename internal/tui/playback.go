@@ -43,6 +43,11 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 		}
 
 	case player.EventPlaying:
+		if m.ph == phPaused {
+			// mpv reporting playing while we're paused contradicts the
+			// pause state — hold the phase and let resume() own the way back.
+			return m, m.listen()
+		}
 		if m.ph == phTune || m.ph == phOffline {
 			if m.ph == phOffline {
 				// Going offline closed the listen; a lock that lands late
@@ -58,6 +63,7 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			m.lockAt = m.now
 			m.failStreak = nil
 			m.reconnecting = false
+			m.resuming = false
 			m.lastGood = m.st
 			m.haveLastGood = true
 			if m.retryN > 0 {
@@ -73,6 +79,9 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 		m.wave.SetEnergy(1)
 
 	case player.EventBuffering:
+		if m.ph == phPaused {
+			return m, m.listen()
+		}
 		if m.ph == phPlay {
 			m.ph = phBuffer
 			m.bufferAt = m.now
@@ -94,12 +103,47 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			reason = "stream failed"
 		}
 		switch m.ph {
+		case phPaused:
+			// The stream died underneath the pause: a resume can no
+			// longer unpause in place, it has to reload.
+			m.pauseReload = true
 		case phPlay, phBuffer:
 			nm, cmd := m.dropStream(reason)
 			return nm, tea.Batch(m.listen(), cmd)
 		case phTune:
 			nm, cmd := m.failTune(reason)
 			return nm, tea.Batch(m.listen(), cmd)
+		}
+		return m, m.listen()
+
+	case player.EventPaused:
+		if m.ph == phPlay || m.ph == phBuffer || m.ph == phTune {
+			// Someone else held the output — media keys, the OS flyout,
+			// MPRIS. Same pause, same accounting.
+			nm, cmd := m.pause(true)
+			return nm, tea.Batch(m.listen(), cmd)
+		}
+		// Already paused: the echo of our own SetPaused.
+		return m, m.listen()
+
+	case player.EventResumed:
+		if m.ph == phPaused {
+			nm, cmd := m.resume(true)
+			return nm, tea.Batch(m.listen(), cmd)
+		}
+		// The echo of our own SetPaused(false), or nothing to do.
+		return m, m.listen()
+
+	case player.EventStopped:
+		if m.ph == phPlay || m.ph == phBuffer || m.ph == phTune {
+			nm, cmd := m.pause(true)
+			nm.setFeedback("PAUSED  Stopped from media controls")
+			// Nothing is loaded any more: resume must reload.
+			nm.pauseReload = true
+			return nm, tea.Batch(m.listen(), cmd)
+		}
+		if m.ph == phPaused {
+			m.pauseReload = true
 		}
 		return m, m.listen()
 
@@ -125,6 +169,7 @@ func (m Model) dropStream(reason string) (Model, tea.Cmd) {
 	m.ph = phTune
 	m.tuneAt = m.now
 	m.reconnecting = true
+	m.resuming = false
 	m.note = reason + " " + m.th.G.Dot + " reconnecting"
 	m.wave.SetEnergy(0.05)
 	return m, m.reconnectCmd()
@@ -143,6 +188,7 @@ func (m Model) failTune(reason string) (Model, tea.Cmd) {
 		m.retryN++
 		m.ph = phOffline
 		m.reconnecting = false
+		m.resuming = false
 		return m, nil
 	}
 	m.core.MarkStationFailed(m.st.UUID)
@@ -157,6 +203,7 @@ func (m Model) failTune(reason string) (Model, tea.Cmd) {
 		m.retryAt = m.now.Add(retryBackoff(0))
 		m.ph = phOffline
 		m.reconnecting = false
+		m.resuming = false
 		return m, nil
 	}
 	m.note = reason + " " + m.th.G.Dot + " moving on"
@@ -208,7 +255,7 @@ func (m Model) backendDied(err error) (Model, tea.Cmd) {
 	}
 	m.restarts = append(m.restarts, m.now)
 	m.note = "player crashed " + m.th.G.Dot + " restarting"
-	return m, m.restartCmd()
+	return m, m.restartCmd(m.ph != phPaused)
 }
 
 // staticActive reports whether the tuning ceremony's static collapse is
@@ -220,4 +267,72 @@ func (m Model) staticActive() bool {
 		return false
 	}
 	return m.now.Sub(m.tuneAt) < staticDur
+}
+
+// pause holds the output without unloading the stream and banks the listen
+// segment that just ended — paused wall time never counts as listening.
+// external means someone else drove mpv's pause property (media keys, the
+// OS flyout, MPRIS): mpv is already paused, so nothing is sent back.
+func (m Model) pause(external bool) (Model, tea.Cmd) {
+	if !m.haveSt || (m.ph != phPlay && m.ph != phBuffer && m.ph != phTune) {
+		return m, nil
+	}
+	m.core.EndListen(time.Now())
+	m.ph = phPaused
+	m.pausedAt = m.now
+	m.reconnecting = false
+	m.resuming = false
+	m.bufferAt = time.Time{}
+	m.playStart = time.Time{} // the readout clock restarts with the next segment
+	m.wave.SetEnergy(0.05)
+	if external {
+		m.setFeedback("PAUSED  From media controls")
+		return m, nil
+	}
+	m.setFeedback("PAUSED  P resumes")
+	pl := m.pl
+	return m, func() tea.Msg { return pauseMsg{err: pl.SetPaused(true)} }
+}
+
+// resume comes back from a pause. A short pause that kept the stream
+// loaded unpauses in place and picks up from mpv's buffer; anything longer
+// — or a pause that lost the stream underneath — reloads to rejoin live.
+// Either way the listen reopens as a continuation: ResumeListen keeps the
+// session's dwell and the track on screen.
+func (m Model) resume(external bool) (Model, tea.Cmd) {
+	if m.ph != phPaused {
+		return m, nil
+	}
+	inPlace := m.now.Sub(m.pausedAt) < resumeInPlace && !m.pauseReload
+	m.ph = phTune
+	m.tuneAt = m.now
+	m.resuming = true
+	m.note = ""
+	m.pauseReload = false
+	m.wave.SetEnergy(0.05)
+	switch {
+	case !inPlace:
+		pl, c, st := m.pl, m.core, m.st
+		return m, func() tea.Msg {
+			if err := pl.Play(st.StreamURL()); err != nil {
+				return playFailedMsg{uuid: st.UUID, err: err}
+			}
+			c.ResumeListen(st.UUID, time.Now())
+			return nil
+		}
+	case external:
+		// Released the same way it was held: mpv is already playing
+		// again, only the listen needs reopening.
+		m.core.ResumeListen(m.st.UUID, time.Now())
+		return m, nil
+	default:
+		pl, c, uuid := m.pl, m.core, m.st.UUID
+		return m, func() tea.Msg {
+			if err := pl.SetPaused(false); err != nil {
+				return pauseMsg{err: err}
+			}
+			c.ResumeListen(uuid, time.Now())
+			return nil
+		}
+	}
 }

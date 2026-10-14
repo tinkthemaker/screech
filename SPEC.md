@@ -73,6 +73,23 @@ Shipped in v0.2, still within the austerity budget:
   one: it tucks itself away after four seconds without a volume key, and
   any other key closes it and still does its own job — the slider never
   turns space into a dead key.
+- **pause** (`p`): one pause state — mpv's own `pause` property — so `p`,
+  keyboard media keys, headset buttons, the OS media flyout, and MPRIS all
+  hold the same output. Pausing splits the listen: the banked segment keeps
+  its dwell credit, paused wall time counts toward nothing, and a fast
+  skip after resuming is judged on the session's total active dwell, not
+  the fresh-looking segment. Resuming inside 30s unpauses in place and
+  picks up from mpv's buffer a few beats behind live, like pausing live
+  TV; past that the buffer is stale or the server has hung up, so resume
+  reloads and rejoins the live edge. The flyout's Stop button lands the
+  same way but unloads the stream, so it always reloads on resume;
+  Next/Previous do nothing — there is no playlist. Choosing a station
+  (space, digits, library, seed) turns the radio back on regardless of
+  who paused it.
+- **sleep timer** (`z`): steps 15/30/45/60/90 minutes then off, counted
+  down in the footer. The last 30 seconds ease the player's volume toward
+  silence — the persisted listener volume is untouched and restored —
+  and expiry pauses the radio.
 
 `q` quits. Launch resumes the last station and plays immediately — zero-press startup,
 like a physical radio. Everything else is automatic or read-only.
@@ -120,6 +137,19 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   `--ytdl=no`: radio never needs yt-dlp, and mpv's hook would otherwise run
   it on every URL that fails to load, delaying the failure everything below
   keys on.
+- Personal `mpv.conf` still applies (audio device, exclusive mode — the
+  parts worth keeping), but options that break live radio are pinned at
+  spawn: `keep-open` and `loop-*` would swallow the eof that drop
+  detection keys on, `pause=yes` would make every tune look dead,
+  `resume-playback`/`save-position-on-quit` would "resume" a live stream
+  at a stale offset, and the default demuxer cache (150MiB ahead, 50MiB
+  back) only grows for radio — about 55 minutes of never-seeked back
+  buffer per hour at 128k — so it is bounded to 32MiB/4MiB.
+- Pause is mpv's `pause` property, observed like the other properties:
+  property-changes map to paused/resumed events (an external `stop`
+  end-file maps to stopped), and `Play` always sends `pause=false` after
+  `loadfile` because mpv's pause survives the load — a chosen station must
+  never start silent.
 - Until an ICY title arrives, `media-title` is just the URL's basename
   (`aac-128`, `kexp128.mp3`; KEXP sends an empty `icy-title`, so its stays
   that forever). That fallback is suppressed; it used to show as the track

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -55,7 +56,21 @@ const (
 	// dead; a crash loop is reported, not chased forever.
 	maxRestarts   = 3
 	restartWindow = 5 * time.Minute
+
+	// resumeInPlace is how long a pause can still pick up where it left
+	// off: a short pause resumes from mpv's buffer a few seconds behind
+	// live, like pausing live TV; past that the buffer is stale or the
+	// server has hung up, so resume rejoins the live edge instead.
+	resumeInPlace = 30 * time.Second
+
+	// sleepFade is the volume's glide path to silence in the last stretch
+	// before the sleep timer pauses the radio.
+	sleepFade = 30 * time.Second
 )
+
+// sleepSteps is the sleep timer's ladder; z cycles through it and off the
+// far end.
+var sleepSteps = []time.Duration{15 * time.Minute, 30 * time.Minute, 45 * time.Minute, 60 * time.Minute, 90 * time.Minute}
 
 // retryBackoff spaces offline retries: 5s, 10s, 20s, … capped at a minute.
 // n counts failures since the outage began.
@@ -84,6 +99,7 @@ const (
 	phBuffer
 	phOffline // every tune is failing — the network, not the stations
 	phDead
+	phPaused // output paused by us or by the OS media controls
 )
 
 type Options struct {
@@ -178,14 +194,20 @@ type Model struct {
 	volume       int
 	volumeAt     time.Time // last volume touch; the overlay lingers briefly
 
-	tuneAt     time.Time
-	playStart  time.Time
-	notice     string // startup notice from Options; survives picks, dies on first key
-	note       string
-	feedback   string
-	feedbackAt time.Time
-	fatal      string
-	quitting   bool // a quit is in flight; backend death is expected noise
+	tuneAt      time.Time
+	playStart   time.Time
+	pausedAt    time.Time
+	resuming    bool // this tune is a resume — header says RESUMING…
+	pauseReload bool // resume must reload: backend restarted, or the stream stopped/ended while paused
+	sleepStep   int  // index into sleepSteps, -1 = off
+	sleepAt     time.Time
+	sleepVol    int    // last faded volume sent to the player; -1 = none
+	notice      string // startup notice from Options; survives picks, dies on first key
+	note        string
+	feedback    string
+	feedbackAt  time.Time
+	fatal       string
+	quitting    bool // a quit is in flight; backend death is expected noise
 
 	// Connectivity bookkeeping. retryN doubles as the offline flag:
 	// nonzero means the current tune attempt came out of an offline retry
@@ -220,6 +242,7 @@ type (
 		ok  bool
 	}
 	volumeMsg struct{ err error }
+	pauseMsg  struct{ err error }
 	// playFailedMsg reports a Play() that returned an error — the station's
 	// own URL was rejected, which is a strike against the station, not a
 	// network event. It deliberately isn't an evMsg: the listener goroutine
@@ -277,6 +300,8 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 		prompt:       false,
 		presets:      c.Presets(),
 		volume:       c.Volume(),
+		sleepStep:    -1,
+		sleepVol:     -1,
 		notice:       opts.Notice,
 	}
 }
@@ -440,13 +465,14 @@ func (m Model) reconnectCmd() tea.Cmd {
 	}
 }
 
-// restartCmd brings up a fresh backend after a crash, then re-points it at
-// the current station so playback resumes without waiting for a retune.
-func (m Model) restartCmd() tea.Cmd {
+// restartCmd brings up a fresh backend after a crash, then — unless play
+// is false (the radio was paused) — re-points it at the current station so
+// playback resumes without waiting for a retune.
+func (m Model) restartCmd(play bool) tea.Cmd {
 	pl, st, haveSt := m.pl, m.st, m.haveSt
 	return func() tea.Msg {
 		err := pl.Restart()
-		if err == nil && haveSt {
+		if err == nil && haveSt && play {
 			err = pl.Play(st.StreamURL())
 		}
 		return playerRestartedMsg{err: err}
@@ -479,6 +505,7 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	m.playStart = time.Time{}
 	m.drops = 0
 	m.reconnecting = false
+	m.resuming = false
 	m.lockAt = time.Time{}
 	m.bufferAt = time.Time{}
 	// retryN deliberately survives: during an offline retry this pick IS
@@ -575,6 +602,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ph == phPlay && m.drops > 0 && !m.lockAt.IsZero() && m.now.Sub(m.lockAt) >= stableAfter {
 			m.drops = 0
 		}
+		// The sleep timer counts down on the frame clock: the last stretch
+		// fades the player's volume out — never the stored volume, which
+		// stays the listener's — then pauses the radio itself.
+		if !m.sleepAt.IsZero() {
+			switch remaining := m.sleepAt.Sub(m.now); {
+			case remaining <= 0:
+				m.sleepStep, m.sleepAt = -1, time.Time{}
+				if m.ph == phPlay || m.ph == phBuffer || m.ph == phTune {
+					nm, pcmd := m.pause(false)
+					nm.setFeedback("SLEEP  Paused " + m.th.G.Dot + " P resumes")
+					nm.sleepVol = -1
+					pl, v := m.pl, m.volume
+					// Restore strictly after the pause lands: a radio
+					// coming back at faded level would still be asleep.
+					return nm, tea.Batch(m.tick(), tea.Sequence(pcmd,
+						func() tea.Msg { return volumeMsg{err: pl.SetVolume(v)} }))
+				}
+				if m.sleepVol >= 0 {
+					m.sleepVol = -1
+					pl, v := m.pl, m.volume
+					return m, tea.Batch(m.tick(), func() tea.Msg {
+						return volumeMsg{err: pl.SetVolume(v)}
+					})
+				}
+			case remaining <= sleepFade && (m.ph == phPlay || m.ph == phBuffer):
+				v := int(math.Round(float64(m.volume) * remaining.Seconds() / sleepFade.Seconds()))
+				if v != m.sleepVol {
+					m.sleepVol = v
+					pl := m.pl
+					return m, tea.Batch(m.tick(), func() tea.Msg {
+						return volumeMsg{err: pl.SetVolume(v)}
+					})
+				}
+			}
+		}
 		return m, m.tick()
 
 	case syncedMsg:
@@ -627,6 +689,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pauseMsg:
+		if msg.err != nil {
+			m.note = "pause failed " + m.th.G.Dot + " " + msg.err.Error()
+		}
+		return m, nil
+
 	case stationStatsMsg:
 		if m.haveSt && msg.uuid == m.st.UUID {
 			m.stTotal = msg.total
@@ -665,6 +733,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.fatal = "mpv exited " + m.th.G.Dot + " restart screech " + m.th.G.Dot + " " + msg.err.Error()
 			m.wave.SetEnergy(0.05)
 			return m, nil
+		}
+		if m.ph == phPaused {
+			// The respawned backend holds nothing: the pause survives,
+			// but resuming has to reload the stream rather than unpause.
+			m.pauseReload = true
+			return m, m.listen()
 		}
 		if m.haveSt {
 			m.ph = phTune

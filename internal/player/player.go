@@ -23,6 +23,14 @@ const (
 	// EventLevel: real audio loudness, 0 (silence) to 1 (loud). Sourced from
 	// mpv's astats filter; absent on backends that can't measure.
 	EventLevel
+	// EventPaused: output paused, by screech or by anything else driving
+	// mpv — media keys, the OS media flyout, MPRIS.
+	EventPaused
+	// EventResumed: output unpaused again, same sources as EventPaused.
+	EventResumed
+	// EventStopped: playback was stopped from outside (the mpv `stop`
+	// command — nothing is loaded any more). Screech never sends stop.
+	EventStopped
 )
 
 type Event struct {
@@ -51,6 +59,8 @@ type Player interface {
 	Play(url string) error
 	// SetVolume changes this player's output only, from silent (0) to full (100).
 	SetVolume(percent int) error
+	// SetPaused pauses or resumes output without unloading the stream.
+	SetPaused(paused bool) error
 	// Events is the stream of title/state changes. Closed when the backend dies.
 	Events() <-chan Event
 	// Restart replaces a dead backend with a fresh process; Events()

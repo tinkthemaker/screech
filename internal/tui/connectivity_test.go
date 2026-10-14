@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,18 @@ func runCmd(t *testing.T, cmd tea.Cmd) []tea.Msg {
 	go func() { done <- cmd() }()
 	select {
 	case msg := <-done:
+		// tea.Sequence yields an unexported []tea.Cmd the runtime drains in
+		// order; reflection unwraps it so tests see the same ordering.
+		if v := reflect.ValueOf(msg); v.IsValid() && v.Kind() == reflect.Slice &&
+			v.Type().Elem() == reflect.TypeOf((tea.Cmd)(nil)) {
+			if _, isBatch := msg.(tea.BatchMsg); !isBatch {
+				var out []tea.Msg
+				for i := 0; i < v.Len(); i++ {
+					out = append(out, runCmd(t, v.Index(i).Interface().(tea.Cmd))...)
+				}
+				return out
+			}
+		}
 		if batch, ok := msg.(tea.BatchMsg); ok {
 			var out []tea.Msg
 			for _, sub := range batch {

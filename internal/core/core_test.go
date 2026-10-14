@@ -393,3 +393,144 @@ func TestStartListenIsIdempotent(t *testing.T) {
 		t.Fatalf("only the current listen may be open, %d open rows", n)
 	}
 }
+
+func listenRow(t *testing.T, c *Core, n int) (skipFast int, open bool) {
+	t.Helper()
+	var ended any
+	row := c.store.db.QueryRow(`SELECT skip_fast, ended_at FROM listens ORDER BY id LIMIT 1 OFFSET ?`, n-1)
+	if err := row.Scan(&skipFast, &ended); err != nil {
+		t.Fatal(err)
+	}
+	return skipFast, ended == nil
+}
+
+// Pause/resume splits a listen into segments; the fast-skip call on resume
+// is judged on the session's whole dwell.
+func TestResumeListenJudgesSessionDwell(t *testing.T) {
+	t.Run("long dwell is no fast skip", func(t *testing.T) {
+		c := openTestCore(t)
+		now := time.Now()
+		p, err := c.Tune(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.StartListen(p.Station.UUID, now)
+		c.EndListen(now.Add(2 * time.Minute))
+		c.ResumeListen(p.Station.UUID, now.Add(3*time.Minute))
+
+		if _, err := c.Tune(now.Add(3*time.Minute + 10*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Fatalf("pause+resume should leave 2 listen rows, got %d", n)
+		}
+		skip, open := listenRow(t, c, 2)
+		if skip != 0 || open {
+			t.Fatalf("second segment: skip_fast=%d open=%v, want 0 false", skip, open)
+		}
+		if r := c.bandit[p.Station.UUID]; r != nil && r[DaypartAll].Beta > 1.0 {
+			t.Fatalf("beta rose to %v on a long-session close", r[DaypartAll].Beta)
+		}
+	})
+
+	t.Run("short dwell is a fast skip", func(t *testing.T) {
+		c := openTestCore(t)
+		now := time.Now()
+		p, err := c.Tune(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.StartListen(p.Station.UUID, now)
+		c.EndListen(now.Add(30 * time.Second))
+		c.ResumeListen(p.Station.UUID, now.Add(time.Minute))
+
+		if _, err := c.Tune(now.Add(time.Minute + 10*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		skip, open := listenRow(t, c, 2)
+		if skip != 1 || open {
+			t.Fatalf("second segment: skip_fast=%d open=%v, want 1 false", skip, open)
+		}
+		if r := c.bandit[p.Station.UUID]; r == nil || r[DaypartAll].Beta <= 1.0 {
+			t.Fatalf("session-dwell fast skip should charge beta, got %v", r)
+		}
+	})
+}
+
+func TestResumeListenKeepsTrack(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.StartListen(p.Station.UUID, now)
+	if _, ok, _, _ := c.NoteTitle("Stellardrone - Billions and Billions", now.Add(time.Minute)); !ok {
+		t.Fatal("NoteTitle did not take")
+	}
+	c.EndListen(now.Add(2 * time.Minute))
+	c.ResumeListen(p.Station.UUID, now.Add(3*time.Minute))
+
+	// Love still targets the track on screen from before the pause.
+	tr, hadTrack, lovedNow, err := c.Love(now.Add(4 * time.Minute))
+	if err != nil || !hadTrack || !lovedNow || tr.ArtistKey != "stellardrone" {
+		t.Fatalf("Love after resume: %v hadTrack=%v loved=%v key=%q", err, hadTrack, lovedNow, tr.ArtistKey)
+	}
+
+	// The stream re-sending the same ICY title must not log the track twice.
+	if _, ok, _, _ := c.NoteTitle("Stellardrone - Billions and Billions", now.Add(5*time.Minute)); !ok {
+		t.Fatal("re-sent title should still report the current track")
+	}
+	var n int
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM tracks_heard`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("same title across a resume logged %d rows, want 1", n)
+	}
+}
+
+func TestResumeListenDifferentStationStartsFresh(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.StartListen(p.Station.UUID, now)
+	if _, ok, _, _ := c.NoteTitle("Stellardrone - Billions and Billions", now.Add(time.Minute)); !ok {
+		t.Fatal("NoteTitle did not take")
+	}
+	c.EndListen(now.Add(2 * time.Minute))
+	c.ResumeListen("other-station", now.Add(3*time.Minute))
+
+	if c.currentUUID != "other-station" || c.previousUUID != p.Station.UUID {
+		t.Fatalf("resume to a different station should move like StartListen: cur=%q prev=%q",
+			c.currentUUID, c.previousUUID)
+	}
+	if c.hasTrack {
+		t.Fatal("a different station must reset the track on screen")
+	}
+}
+
+func TestResumeListenWhileOpenIsNoop(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.StartListen(p.Station.UUID, now)
+	c.ResumeListen(p.Station.UUID, now.Add(10*time.Second))
+	var n int
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("ResumeListen over an open listen added a row, got %d", n)
+	}
+}

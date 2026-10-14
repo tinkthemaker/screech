@@ -32,6 +32,13 @@ type Core struct {
 	listenID     int64
 	listenStart  time.Time
 
+	// A pause splits a listen into rows; priorDwell carries the banked
+	// dwell of the session's earlier segments so a fast skip after resume
+	// is judged on the whole session, and lastSegDur holds the most
+	// recently closed segment so resume can bank it.
+	priorDwell time.Duration
+	lastSegDur time.Duration
+
 	lastRawTitle string
 	curTrack     Track
 	hasTrack     bool
@@ -396,6 +403,10 @@ func (c *Core) TuneDead(now time.Time) (Pick, error) {
 func (c *Core) StartListen(uuid string, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.startListenLocked(uuid, now)
+}
+
+func (c *Core) startListenLocked(uuid string, now time.Time) {
 	if c.listenID != 0 {
 		if c.currentUUID == uuid {
 			// A superseding Play at the same stream (late lock, reconnect)
@@ -411,6 +422,7 @@ func (c *Core) StartListen(uuid string, now time.Time) {
 	}
 	c.currentUUID = uuid
 	c.listenStart = now
+	c.priorDwell = 0
 	c.lastRawTitle = ""
 	c.curTrack = Track{}
 	c.hasTrack = false
@@ -422,6 +434,53 @@ func (c *Core) StartListen(uuid string, now time.Time) {
 	}
 	_ = c.store.SetMeta("last_station", uuid)
 	c.rb.Click(uuid)
+}
+
+// ResumeListen reopens the listen a pause closed. The pause already banked
+// one segment; resuming the same station adds its dwell to priorDwell so a
+// fast skip right after resuming is judged on the whole session's dwell,
+// not on a fresh-looking segment. Track state deliberately survives: it is
+// the same session with the same track on screen — the title dedupe keeps
+// a re-sent ICY title from logging the track twice, and love keeps
+// targeting what is displayed. No SetMeta write and no directory click:
+// nothing here is a new choice.
+func (c *Core) ResumeListen(uuid string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.listenID != 0 {
+		return
+	}
+	if c.currentUUID != uuid {
+		c.startListenLocked(uuid, now)
+		return
+	}
+	c.priorDwell += c.lastSegDur
+	c.listenStart = now
+	id, err := c.store.InsertListen(uuid, now, DaypartFor(now))
+	if err == nil {
+		c.listenID = id
+	}
+}
+
+// ListenOpen reports whether a listen is currently being recorded — a
+// read-only probe for callers (tests, diagnostics) asserting that pause and
+// resume never leave a segment dangling.
+func (c *Core) ListenOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.listenID != 0
+}
+
+// BanditBeta sums the learned beta across the station's daypart rows: a
+// read-only probe for callers asserting a skip penalty did or didn't land.
+func (c *Core) BanditBeta(uuid string) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var b float64
+	for _, r := range c.bandit[uuid] {
+		b += r.Beta
+	}
+	return b
 }
 
 // EndListen closes the current listen without a skip judgment (quit, stream
@@ -437,7 +496,7 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 		return
 	}
 	dur := now.Sub(c.listenStart)
-	skipFast := userSkip && dur < FastSkipWindow
+	skipFast := userSkip && dur+c.priorDwell < FastSkipWindow
 	duringAd := skipFast && c.suspectAd
 	_ = c.store.FinishListen(c.listenID, now, skipFast, duringAd)
 
@@ -456,6 +515,7 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 			}
 		}
 	}
+	c.lastSegDur = dur
 	c.listenID = 0
 }
 

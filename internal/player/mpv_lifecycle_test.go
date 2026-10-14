@@ -86,6 +86,16 @@ func TestMPVLifecycle(t *testing.T) {
 	// the restarted IPC link is live.
 	wantEvent(t, m, EventPlaying)
 
+	// Pause/resume round-trip against the real property.
+	if err := m.SetPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	wantEvent(t, m, EventPaused)
+	if err := m.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	wantEvent(t, m, EventResumed)
+
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}

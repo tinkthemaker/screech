@@ -446,6 +446,8 @@ func (m Model) receiverStatusRow(iw int) string {
 		}
 	case m.ph == phOffline:
 		label, detail, hot = "OFFLINE", m.offlineDetail(), true
+	case m.ph == phPaused:
+		label, detail = "PAUSED", "P resumes "+m.th.G.Dot+" SPACE tunes another station"
 	case m.notice != "":
 		label, detail = "NOTICE", m.notice
 	case m.suspect && m.ph == phPlay:
@@ -668,6 +670,9 @@ func (m Model) reasonRow(iw int) string {
 	}
 	if m.ph == phOffline {
 		return m.statusRow("OFFLINE  "+m.offlineDetail(), iw, true)
+	}
+	if m.ph == phPaused {
+		return m.statusRow("PAUSED  P resumes "+m.th.G.Dot+" SPACE tunes another station", iw, true)
 	}
 	if m.notice != "" {
 		// The startup notice is the DB-recovered warning — active, not
