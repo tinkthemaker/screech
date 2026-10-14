@@ -12,7 +12,7 @@ const (
 	poolOverlapSlice = 20
 	poolHeardSlice   = 12
 	poolRandomSlice  = 12
-	maxFailCount     = 3
+	maxFailCount     = MaxFailCount
 )
 
 // Pick is a tune decision plus the reason it was made (explainability is a

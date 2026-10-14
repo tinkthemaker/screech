@@ -470,9 +470,9 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 			return
 		}
 		m.mu.Lock()
-		stopped := m.paused
+		held := m.paused
 		m.mu.Unlock()
-		if stopped {
+		if held {
 			return
 		}
 		if paused {

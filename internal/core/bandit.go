@@ -18,6 +18,11 @@ const (
 	// constant will drift.
 	FastSkipWindow = 90 * time.Second
 
+	// MaxFailCount benches a station after this many strikes. Exported
+	// because the info sheet's "N of M" row has to name the same bench
+	// line the pool enforces.
+	MaxFailCount = 3
+
 	listenAlphaPer10Min = 1.0 // α += minutes/10 ...
 	listenAlphaMin      = 0.2 // ... clamped to [0.2, 3.0]
 	listenAlphaMax      = 3.0

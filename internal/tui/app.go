@@ -193,6 +193,11 @@ type Model struct {
 	volumeOpen   bool
 	volume       int
 	volumeAt     time.Time // last volume touch; the overlay lingers briefly
+	helpOpen     bool
+	infoOpen     bool
+	info         core.StationInfo
+	infoFor      string // uuid the info sheet belongs to; it follows the radio
+	infoErr      error  // last StationInfo failure — personal rows read unavailable
 
 	tuneAt      time.Time
 	playStart   time.Time
@@ -264,6 +269,11 @@ type (
 	trackStatsMsg struct {
 		key, title string
 		plays      int
+	}
+	stationInfoMsg struct {
+		uuid string
+		info core.StationInfo
+		err  error
 	}
 	dialDensityMsg struct{ totals map[string]time.Duration }
 )
@@ -413,6 +423,16 @@ func (m Model) stationStatsCmd(uuid string) tea.Cmd {
 	}
 }
 
+// stationInfoCmd reads the station sheet's numbers off the UI goroutine;
+// the msg is dropped if the radio has since moved on.
+func (m Model) stationInfoCmd(uuid string) tea.Cmd {
+	c := m.core
+	return func() tea.Msg {
+		info, err := c.StationInfo(uuid, time.Now())
+		return stationInfoMsg{uuid: uuid, info: info, err: err}
+	}
+}
+
 func (m Model) dialDensityCmd() tea.Cmd {
 	c := m.core
 	return func() tea.Msg {
@@ -521,7 +541,16 @@ func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
 	// and its row accounting; relayout before the density cmd lands.
 	m.relayout()
 	// The outgoing listen has just been banked, so the distribution moved.
-	return m, tea.Batch(m.playCmd(), m.stationStatsCmd(m.st.UUID), m.dialDensityCmd())
+	cmds := []tea.Cmd{m.playCmd(), m.stationStatsCmd(m.st.UUID), m.dialDensityCmd()}
+	if m.infoOpen {
+		// The info sheet follows the radio: re-request for the new station
+		// and show it loading in the meantime.
+		m.infoFor = m.st.UUID
+		m.infoErr = nil
+		m.info = core.StationInfo{}
+		cmds = append(cmds, m.stationInfoCmd(m.st.UUID))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -542,6 +571,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// lands — the interface never swallows input.
 		if m.now.Sub(m.start) < bootDur {
 			m.start = m.now.Add(-bootDur)
+		}
+		// The help and info sheets take keys first: their own keys close
+		// them, anything else closes and falls through to whatever is
+		// underneath — the same pass-through contract as the volume strip.
+		if m.helpOpen {
+			m.helpOpen = false
+			switch key := msg.String(); key {
+			case "?", "esc", "enter":
+				return m, nil
+			case "q", "ctrl+c":
+				m.quitting = true
+				m.core.EndListen(time.Now())
+				_ = m.pl.Close()
+				return m, tea.Quit
+			}
+			if m.history {
+				return m.handleHistoryKey(msg)
+			}
+			return m.handleKey(msg)
+		}
+		if m.infoOpen {
+			m.infoOpen = false
+			switch key := msg.String(); key {
+			case "i", "I", "esc", "enter":
+				return m, nil
+			case "q", "ctrl+c":
+				m.quitting = true
+				m.core.EndListen(time.Now())
+				_ = m.pl.Close()
+				return m, tea.Quit
+			}
+			if m.history {
+				return m.handleHistoryKey(msg)
+			}
+			return m.handleKey(msg)
 		}
 		if m.themeOpen {
 			return m.handleThemeKey(msg)
@@ -609,7 +673,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch remaining := m.sleepAt.Sub(m.now); {
 			case remaining <= 0:
 				m.sleepStep, m.sleepAt = -1, time.Time{}
-				if m.ph == phPlay || m.ph == phBuffer || m.ph == phTune {
+				if m.ph == phPlay || m.ph == phBuffer || m.ph == phTune || m.ph == phOffline {
 					nm, pcmd := m.pause(false)
 					nm.setFeedback("SLEEP  Paused " + m.th.G.Dot + " P resumes")
 					nm.sleepVol = -1
@@ -699,6 +763,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.haveSt && msg.uuid == m.st.UUID {
 			m.stTotal = msg.total
 		}
+		return m, nil
+
+	case stationInfoMsg:
+		if !m.infoOpen || msg.uuid != m.infoFor {
+			return m, nil
+		}
+		m.info, m.infoErr = msg.info, msg.err
 		return m, nil
 
 	case trackStatsMsg:

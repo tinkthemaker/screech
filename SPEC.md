@@ -79,7 +79,7 @@ Shipped in v0.2, still within the austerity budget:
   its dwell credit, paused wall time counts toward nothing, and a fast
   skip after resuming is judged on the session's total active dwell, not
   the fresh-looking segment. Resuming inside 30s unpauses in place and
-  picks up from mpv's buffer a few beats behind live, like pausing live
+  picks up from mpv's buffer a few seconds behind live, like pausing live
   TV; past that the buffer is stale or the server has hung up, so resume
   reloads and rejoins the live edge. The flyout's Stop button lands the
   same way but unloads the stream, so it always reloads on resume;
@@ -90,6 +90,17 @@ Shipped in v0.2, still within the austerity budget:
   down in the footer. The last 30 seconds ease the player's volume toward
   silence — the persisted listener volume is untouched and restored —
   and expiry pauses the radio.
+- **help** (`?`): a read-only key sheet over whatever is underneath. Any
+  other key closes it and still does its own job, like the volume strip.
+- **station info** (`i`): a read-only sheet for the tuned station —
+  directory facts plus the personal ledger: audible time, visits, first
+  and last heard, named loves, preset slot, strikes. Its MATCH figure is
+  the mean of the Beta the picker samples this station from in the
+  current daypart, not a parallel score, and the sheet re-requests as the
+  radio moves, so it always answers for what is playing.
+
+Pause, sleep, help and info arrived in v0.8; none of them teaches the
+model anything (pause only stops the clock).
 
 `q` quits. Launch resumes the last station and plays immediately — zero-press startup,
 like a physical radio. Everything else is automatic or read-only.

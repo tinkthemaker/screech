@@ -274,10 +274,18 @@ func (m Model) staticActive() bool {
 // external means someone else drove mpv's pause property (media keys, the
 // OS flyout, MPRIS): mpv is already paused, so nothing is sent back.
 func (m Model) pause(external bool) (Model, tea.Cmd) {
-	if !m.haveSt || (m.ph != phPlay && m.ph != phBuffer && m.ph != phTune) {
+	if !m.haveSt || (m.ph != phPlay && m.ph != phBuffer && m.ph != phTune && m.ph != phOffline) {
 		return m, nil
 	}
 	m.core.EndListen(time.Now())
+	if m.ph == phOffline {
+		// Pausing an outage means "stop retrying": nothing is loaded, so
+		// the resume has to reload — and a tune that still fails strikes
+		// and re-enters offline like any other failure.
+		m.pauseReload = true
+		m.retryN = 0
+		m.retryAt = time.Time{}
+	}
 	m.ph = phPaused
 	m.pausedAt = m.now
 	m.reconnecting = false
@@ -308,6 +316,7 @@ func (m Model) resume(external bool) (Model, tea.Cmd) {
 	m.tuneAt = m.now
 	m.resuming = true
 	m.note = ""
+	m.feedback = "" // the PAUSED hint dies with the paused face
 	m.pauseReload = false
 	m.wave.SetEnergy(0.05)
 	switch {

@@ -20,7 +20,7 @@ playlists, no telemetry. One binary, one config file, one database, all yours.
   │ WHY THIS STATION  Plays 3 artists you love                               │
   ╰────────────────────────────────────────────────────────────────────────────╯
 
-  [SPACE] skip  [L] love  [F] preset 7  [/] discover  [H] library  [V] 75%  [T] theme
+  [SPACE] skip  [L] love  [F] preset 7  [P] pause  [/] discover  [H] library  [V] 75%  [?] help  [Q] quit
 ```
 
 From 78 columns up (a standard 80×24 window included) Screech becomes a
@@ -34,20 +34,26 @@ a compact stacked layout.
 
 - **mpv** on your PATH. It does all the audio heavy lifting: codecs, ICY
   metadata, reconnects.
-  - Windows: `scoop install mpv` or `choco install mpv` or [mpv.io](https://mpv.io/installation/)
+  - Windows: `scoop bucket add extras` then `scoop install mpv`, or
+    `choco install mpv`, or [mpv.io](https://mpv.io/installation/)
   - macOS: `brew install mpv`
   - Linux: `apt install mpv` (or dnf/pacman)
 - A terminal with truecolor if you want the amber to glow. Windows Terminal,
   wezterm, kitty, and alacritty all qualify.
 
+## Install
+
+- Windows, with [Scoop](https://scoop.sh):
+  `scoop install https://github.com/tinkthemaker/screech/releases/latest/download/screech.json`
+- Anywhere with Go 1.26 or newer:
+  `go install github.com/tinkthemaker/screech/cmd/screech@latest`
+- Or download the archive for Windows, macOS, or Linux from the
+  [releases page](https://github.com/tinkthemaker/screech/releases) and put
+  `screech` somewhere on your PATH.
+
+From a checkout, `go run ./cmd/screech` runs it without installing.
+
 ## Run
-
-```
-go run ./cmd/screech   # from source (Go 1.26+)
-```
-
-Prebuilt binaries for Windows, macOS, and Linux are attached to each tagged
-release. Building writes to `dist/`, which is not tracked.
 
 ```
 screech                   start the radio (default)
@@ -112,17 +118,20 @@ seconds; `v`, enter, or esc closes it sooner, and any other key closes it
 and does its usual job.
 
 **p** — pause and resume. It's mpv's own pause underneath, so keyboard
-media keys, headset buttons, and the OS media flyout all drive the same
-hold. A pause under 30 seconds resumes from the buffer a few beats behind
-live, like pausing live TV; a longer one reloads and rejoins the live edge.
-Pausing ends the listen, so paused time neither teaches nor counts as
-listening. The flyout's Stop does the same pause, and its Next/Previous
-buttons do nothing — there's no playlist to walk.
+media keys, headset buttons, and the Windows media flyout pause the same
+radio, and screech notices (macOS media keys work through mpv too, and on
+Linux the mpv-mpris plugin does the same job). A pause under 30 seconds
+picks up from the buffer a few seconds behind live, like pausing live TV; a
+longer one rejoins the broadcast where it is now. Pausing ends the listen,
+so paused time neither teaches the model nor counts as listening. A media
+Stop key pauses too; Next and Previous do nothing, since there's no
+playlist to step through. Choosing any station (space, a preset, the
+library) turns the radio back on.
 
-**z** — sleep timer. Each press steps 15, 30, 45, 60, 90 minutes, then
-off; the footer counts it down. Over the last 30 seconds the volume eases
-toward silence — your saved level is untouched — and when the timer lands
-the radio pauses itself.
+**z** — sleep timer. Each press steps through 15, 30, 45, 60 and 90
+minutes, then off, and the key strip counts it down. Over the last 30
+seconds the sound fades out (your saved volume is untouched), then the
+radio pauses itself.
 
 **t** — open the theme picker. Move with arrows or `j`/`k` (or press a
 digit) to preview a finish live, Enter applies and remembers it, and Escape
@@ -161,6 +170,14 @@ which fired: `seeded: corridos` vs `seeded genre: corridos`. Typing
 "artist - song" uses the artist half. Genre seeds deliberately echo through
 the next four picks, then fall back to the ordinary decaying taste signal.
 
+**i** — about this station: where it streams from, its tags and homepage,
+how much of it you've heard and how many tracks you've loved there, and
+whether it has strikes against it. `MATCH` is the picker's own current
+estimate that you'll stay on it at this time of day.
+
+**?** — every key on one page, grouped by what it does. Esc puts it away;
+any other key closes it and still does its own job. The same goes for `i`.
+
 **q** — quit.
 
 ## What it's doing underneath
@@ -171,7 +188,11 @@ can't swamp anything. Fast skips bump β. Streams that fail never touch the
 taste model — a dead stream isn't a bad station, it just gets a strike, and
 three strikes benches it. When you press next, a Thompson sample from each
 candidate picks the winner: uncertainty does the explore/exploit balancing
-and there are no knobs to tune.
+and there are no knobs to tune. Candidates come from four places: your tag
+affinities, stations that play artists you love, stations your own
+listening rates well, and a random slice for serendipity. A
+simulated-listener test (`go test -tags eval ./internal/core`) checks that
+the picks actually get better as it learns.
 
 Every track title that comes down the stream is parsed and logged (about a
 third of stations never send usable titles — fingerprints are one signal,

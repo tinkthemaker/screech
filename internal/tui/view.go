@@ -40,7 +40,11 @@ func (m Model) View() string {
 	contentH := m.h - len(top) - 1
 
 	var body []string
-	if m.themeOpen {
+	if m.helpOpen {
+		body = m.helpRows(iw, contentH)
+	} else if m.infoOpen {
+		body = m.infoRows(iw, contentH)
+	} else if m.themeOpen {
 		body = m.themeRows(iw, contentH)
 	} else if m.history {
 		body = m.historyRows(iw, compact, contentH)

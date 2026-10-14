@@ -1092,6 +1092,34 @@ func (s *Store) StationTotal(uuid string) (time.Duration, error) {
 	return time.Duration(secs) * time.Second, err
 }
 
+// StationStats collects one station's listen history for the info sheet:
+// cumulative audible time (the same sum as StationTotal), visits that
+// lasted at least a minute, the first and most recent listen starts, and
+// how many loved rows name a track rather than the station itself.
+func (s *Store) StationStats(uuid string) (listened time.Duration, visits int, first, last time.Time, lovedTracks int, err error) {
+	var secs, firstAt, lastAt int64
+	err = s.q.QueryRow(`SELECT
+		COALESCE(SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)), 0),
+		COALESCE(SUM(CASE WHEN ended_at IS NOT NULL AND ended_at - started_at >= 60 THEN 1 ELSE 0 END), 0),
+		COALESCE(MIN(started_at), 0),
+		COALESCE(MAX(started_at), 0)
+		FROM listens WHERE station_uuid = ?`, uuid).Scan(&secs, &visits, &firstAt, &lastAt)
+	if err != nil {
+		return
+	}
+	listened = time.Duration(secs) * time.Second
+	if firstAt > 0 {
+		first = time.Unix(firstAt, 0)
+	}
+	if lastAt > 0 {
+		last = time.Unix(lastAt, 0)
+	}
+	err = s.q.QueryRow(`SELECT COUNT(*) FROM loved
+		WHERE station_uuid = ? AND (artist_key <> '' OR title <> '')`,
+		uuid).Scan(&lovedTracks)
+	return
+}
+
 // ListenTotals is cumulative listen time per station, for the dial's
 // density strip. Unlike TopListened this isn't ranked or capped: the strip
 // wants the whole distribution, including the long tail of stations you

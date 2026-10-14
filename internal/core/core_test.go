@@ -534,3 +534,110 @@ func TestResumeListenWhileOpenIsNoop(t *testing.T) {
 		t.Fatalf("ResumeListen over an open listen added a row, got %d", n)
 	}
 }
+
+// The station sheet reads the same rows the picker and readouts use:
+// finished segments of a minute or more count as visits, an open listen
+// contributes nothing, and loves split into named tracks and the bare
+// station heart.
+func TestStationInfo(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now().Truncate(time.Second)
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuid := p.Station.UUID
+
+	seed := func(start, end time.Time) {
+		id, err := c.store.InsertListen(uuid, start, DaypartFor(start))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !end.IsZero() {
+			if err := c.store.FinishListen(id, end, false, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	seed(now.Add(-48*time.Hour), now.Add(-46*time.Hour))
+	seed(now.Add(-24*time.Hour), now.Add(-24*time.Hour+90*time.Second))
+	seed(now.Add(-2*time.Hour), now.Add(-2*time.Hour+30*time.Second)) // a visit too short to count
+	seed(now.Add(-time.Minute), time.Time{})                          // still open: contributes nothing
+
+	// Trackless love first — a heart for the station itself — then two
+	// named tracks.
+	c.StartListen(uuid, now)
+	if _, _, loved, err := c.Love(now); err != nil || !loved {
+		t.Fatalf("trackless love: loved=%v err=%v", loved, err)
+	}
+	if _, ok, _, _ := c.NoteTitle("Artist One - Song One", now.Add(time.Second)); !ok {
+		t.Fatal("first NoteTitle did not take")
+	}
+	if _, _, loved, err := c.Love(now.Add(time.Second)); err != nil || !loved {
+		t.Fatalf("track love one: loved=%v err=%v", loved, err)
+	}
+	if _, ok, _, _ := c.NoteTitle("Artist Two - Song Two", now.Add(2*time.Second)); !ok {
+		t.Fatal("second NoteTitle did not take")
+	}
+	if _, _, loved, err := c.Love(now.Add(2 * time.Second)); err != nil || !loved {
+		t.Fatalf("track love two: loved=%v err=%v", loved, err)
+	}
+	c.EndListen(now.Add(3 * time.Second))
+
+	info, err := c.StationInfo(uuid, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantListened := 2*time.Hour + 90*time.Second + 30*time.Second + 3*time.Second
+	if info.Listened != wantListened {
+		t.Fatalf("Listened = %v, want %v", info.Listened, wantListened)
+	}
+	if info.Visits != 2 {
+		// The sub-minute and open rows count toward time, not visits.
+		t.Fatalf("Visits = %d, want 2", info.Visits)
+	}
+	if !info.FirstHeard.Equal(now.Add(-48 * time.Hour)) {
+		t.Fatalf("FirstHeard = %v", info.FirstHeard)
+	}
+	if !info.LastHeard.Equal(now) {
+		t.Fatalf("LastHeard = %v, want the live listen start %v", info.LastHeard, now)
+	}
+	if info.LovedTracks != 2 {
+		t.Fatalf("LovedTracks = %d, want 2 named tracks", info.LovedTracks)
+	}
+	if !info.Heard {
+		t.Fatal("a loved, listened-to station should count as heard")
+	}
+	daypart := DaypartFor(now.Add(4 * time.Second))
+	if info.Daypart != daypart {
+		t.Fatalf("Daypart = %q, want %q", info.Daypart, daypart)
+	}
+	wantMatch := c.posteriorMean(
+		candidate{st: &p.Station, tagScore: c.tagScore(&p.Station, now.Add(4*time.Second))},
+		daypart, now.Add(4*time.Second))
+	if info.Match != wantMatch {
+		t.Fatalf("Match = %v, want posteriorMean %v", info.Match, wantMatch)
+	}
+}
+
+func TestStationInfoUnheard(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.StationInfo(p.Station.UUID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Heard || info.Match != 0 {
+		t.Fatalf("never-heard station: Heard=%v Match=%v", info.Heard, info.Match)
+	}
+	if !info.FirstHeard.IsZero() || info.Visits != 0 || info.Listened != 0 {
+		t.Fatalf("never-heard station has history: %+v", info)
+	}
+	if _, err := c.StationInfo("no-such-station", now); err == nil {
+		t.Fatal("unknown uuid should error")
+	}
+}

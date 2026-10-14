@@ -97,6 +97,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.buf = nil
 		return m, nil
 
+	case "?":
+		m.helpOpen = true
+		return m, nil
+
+	case "i", "I":
+		if !m.haveSt {
+			m.setFeedback("INFO  Nothing tuned yet")
+			return m, nil
+		}
+		m.infoOpen = true
+		m.infoFor = m.st.UUID
+		m.infoErr = nil
+		m.info = core.StationInfo{}
+		return m, m.stationInfoCmd(m.st.UUID)
+
 	case "p", "P":
 		// One pause state — mpv's own — whether it was p, a media key,
 		// a headset button or the OS flyout that held it.

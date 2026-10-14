@@ -247,6 +247,50 @@ func (c *Core) StationTotal(uuid string) (time.Duration, error) {
 	return c.store.StationTotal(uuid)
 }
 
+// StationInfo is the station sheet's picture of one station: how much of
+// it has actually been heard, what was loved on it, and how the picker
+// currently rates it for this part of the day.
+type StationInfo struct {
+	Listened    time.Duration // all-time audible time, same sum as StationTotal
+	Visits      int           // finished listen rows that lasted at least a minute
+	FirstHeard  time.Time     // zero if never
+	LastHeard   time.Time     // started_at of the most recent listen; zero if never
+	LovedTracks int           // loved rows for this station that name a track
+	Heard       bool          // the station has bandit rows, so Match means something
+	Match       float64       // the picker's own posterior mean for Daypart; 0 when !Heard
+	Daypart     string        // DaypartFor(now)
+}
+
+// StationInfo gathers the info sheet for one station. The candidate is
+// built the way buildPool builds it for one station — overlap only matters
+// for unheard stations, which report Heard=false anyway.
+func (c *Core) StationInfo(uuid string, now time.Time) (StationInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.stationByUUIDLocked(uuid)
+	if st == nil {
+		return StationInfo{}, fmt.Errorf("unknown station %s", uuid)
+	}
+	listened, visits, first, last, lovedTracks, err := c.store.StationStats(uuid)
+	if err != nil {
+		return StationInfo{}, err
+	}
+	info := StationInfo{
+		Listened:    listened,
+		Visits:      visits,
+		FirstHeard:  first,
+		LastHeard:   last,
+		LovedTracks: lovedTracks,
+		Daypart:     DaypartFor(now),
+	}
+	if len(c.bandit[uuid]) > 0 {
+		info.Heard = true
+		info.Match = c.posteriorMean(
+			candidate{st: st, tagScore: c.tagScore(st, now)}, info.Daypart, now)
+	}
+	return info, nil
+}
+
 // ListenTotals is cumulative listen time per station, for the dial's
 // density strip.
 func (c *Core) ListenTotals() (map[string]time.Duration, error) {

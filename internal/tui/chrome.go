@@ -206,6 +206,9 @@ type footerItem struct {
 
 func (m Model) footerItems() []footerItem {
 	item := func(k, l string) footerItem { return footerItem{k, l, 1} }
+	if m.helpOpen || m.infoOpen {
+		return []footerItem{item("ESC", "close")}
+	}
 	if m.themeOpen {
 		return []footerItem{item("J/K", "preview"), item("ENTER", "apply"), item("ESC", "cancel")}
 	}
@@ -234,7 +237,7 @@ func (m Model) footerItems() []footerItem {
 	if m.ph == phDead {
 		// Space/l/f// do nothing while the backend is dead; the strip shows
 		// only the keys that still work.
-		return []footerItem{item("H", "library"), item("T", "theme"), footerItem{"Q", "quit", 0}}
+		return []footerItem{item("H", "library"), item("T", "theme"), item("?", "help"), footerItem{"Q", "quit", 0}}
 	}
 	save := "save"
 	if slot := m.currentSlot(); slot > 0 {
@@ -248,29 +251,31 @@ func (m Model) footerItems() []footerItem {
 	if m.ph == phOffline {
 		skip = "retry"
 	}
-	pauseLabel, pausePrio := "pause", 2
-	if m.ph == phPaused {
-		pauseLabel, pausePrio = "resume", 3
-	}
 	items := []footerItem{
 		{"SPACE", skip, 2}, {"L", love, 3}, {"F", save, 3},
-		{"P", pauseLabel, pausePrio},
-		{"/", "discover", 1}, {"H", "library", 1}, {"V", fmt.Sprintf("%d%%", m.volume), 3},
-		{"T", "theme", 1}, {"Q", "quit", 0},
 	}
+	if m.haveSt {
+		pauseLabel, pausePrio := "pause", 2
+		if m.ph == phPaused {
+			pauseLabel, pausePrio = "resume", 3
+		}
+		items = append(items, footerItem{"P", pauseLabel, pausePrio})
+	}
+	items = append(items,
+		footerItem{"/", "discover", 1}, footerItem{"H", "library", 1},
+		footerItem{"V", fmt.Sprintf("%d%%", m.volume), 3})
 	if !m.sleepAt.IsZero() {
 		// Whole minutes while there's one to round up to, seconds for the
 		// last stretch — matching the fade the listener hears.
+		var text string
 		if left := m.sleepAt.Sub(m.now); left >= time.Minute {
-			items = append(items[:7], append([]footerItem{
-				{"Z", fmt.Sprintf("sleep %dm", int(left.Minutes()+0.999)), 3},
-			}, items[7:]...)...)
+			text = fmt.Sprintf("sleep %dm", int(left.Minutes()+0.999))
 		} else {
-			items = append(items[:7], append([]footerItem{
-				{"Z", fmt.Sprintf("sleep %ds", int(left.Seconds())), 3},
-			}, items[7:]...)...)
+			text = fmt.Sprintf("sleep %ds", int(left.Seconds()))
 		}
+		items = append(items, footerItem{"Z", text, 3})
 	}
+	items = append(items, footerItem{"?", "help", 2}, footerItem{"Q", "quit", 0})
 	return items
 }
 

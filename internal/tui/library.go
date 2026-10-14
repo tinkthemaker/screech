@@ -101,6 +101,9 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.loadHistory((m.historyView + 2) % 3)
 		return m, nil
+	case "?":
+		m.helpOpen = true
+		return m, nil
 	}
 
 	if m.historyView == historyLoved {

@@ -141,6 +141,54 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 			m.sleepStep = 1
 			m.sleepAt = m.now.Add(29 * time.Minute)
 		}},
+		{"help", func(m *Model) {
+			m.helpOpen = true
+		}},
+		{"info-loading", func(m *Model) {
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.infoOpen = true
+			m.infoFor = m.st.UUID
+		}},
+		{"info-loaded", func(m *Model) {
+			m.st = core.SeedStations()[1]
+			m.st.Name = "The Interminable Frequencies Of The Outer Aetheric Reaches International"
+			m.st.Country = "Japan"
+			m.st.Codec = "aac"
+			m.st.Bitrate = 320
+			m.st.Tags = "free jazz, turntablism, sound collage, radio art"
+			m.st.Homepage = "https://example.org/avery/long/path/on/the/radio/"
+			m.haveSt = true
+			m.infoOpen = true
+			m.infoFor = m.st.UUID
+			m.info = core.StationInfo{
+				Listened: 4*time.Hour + 12*time.Minute, Visits: 23,
+				FirstHeard: m.now.Add(-40 * 24 * time.Hour), LastHeard: m.now.Add(-2 * time.Hour),
+				LovedTracks: 7, Heard: true, Match: 0.71, Daypart: "evening",
+			}
+		}},
+		{"info-error", func(m *Model) {
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.infoOpen = true
+			m.infoFor = m.st.UUID
+			m.infoErr = fmt.Errorf("database read failed")
+		}},
+		{"info-never-heard", func(m *Model) {
+			m.st = core.SeedStations()[0]
+			m.haveSt = true
+			m.infoOpen = true
+			m.infoFor = m.st.UUID
+			m.info = core.StationInfo{Daypart: "day"}
+		}},
+		{"info-strikes", func(m *Model) {
+			m.st = core.SeedStations()[0]
+			m.st.FailCount = 1
+			m.haveSt = true
+			m.infoOpen = true
+			m.infoFor = m.st.UUID
+			m.info = core.StationInfo{Daypart: "day", Heard: true, Match: 0.4}
+		}},
 	}
 
 	for _, st := range states {
@@ -401,10 +449,19 @@ func TestFooterKeepsLabelsAtEighty(t *testing.T) {
 	m.haveSt = true
 	m.ph = phPlay
 	m.volume = 100
+	m.sleepStep = 1
+	m.sleepAt = m.now.Add(29 * time.Minute)
 	got := stripANSI(m.footerBar())
-	for _, want := range []string{"SPACE", "L", "F", "/", "H", "V", "T", "Q", "love", "100%"} {
+	for _, want := range []string{"SPACE", "L", "F", "P", "/", "H", "V", "Z", "?", "Q"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("80-col footer missing %q: %q", want, got)
+			t.Errorf("80-col footer missing chip %q: %q", want, got)
+		}
+	}
+	// State labels are the ones worth keeping when the ladder trims:
+	// love, save, pause-state, volume, sleep all outrank key legends.
+	for _, want := range []string{"love", "save", "pause", "100%", "sleep 29m"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("80-col footer dropped state label %q: %q", want, got)
 		}
 	}
 }
@@ -576,6 +633,25 @@ func TestASCIIModeIsSevenBit(t *testing.T) {
 			m.playStart = m.now.Add(-time.Hour)
 			m.sleepStep = 0
 			m.sleepAt = m.now.Add(14 * time.Minute)
+		},
+		func(m *Model) { // help sheet
+			m.helpOpen = true
+		},
+		func(m *Model) { // info sheet, loaded
+			m.st = core.SeedStations()[0]
+			m.st.Country = "Japan"
+			m.st.Bitrate = 128
+			m.st.Tags = "jazz, soul"
+			m.st.Homepage = "https://example.org/radio/"
+			m.haveSt = true
+			m.infoOpen = true
+			m.infoFor = m.st.UUID
+			m.info = core.StationInfo{
+				Listened: 2 * time.Hour, Visits: 5,
+				FirstHeard:  m.now.Add(-72 * time.Hour),
+				LastHeard:   m.now.Add(-time.Hour),
+				LovedTracks: 3, Heard: true, Match: 0.65, Daypart: "evening",
+			}
 		},
 	}
 	sizes := []struct{ w, h int }{{100, 30}, {80, 24}, {60, 20}, {30, 10}}
