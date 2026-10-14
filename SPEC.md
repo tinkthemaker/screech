@@ -249,8 +249,20 @@ Thin data backs off to all-time automatically.
 
 - top stations by decayed tag affinity
 - stations whose observed artists overlap the loved set (IDF-weighted)
+- heard favourites: up to 12 stations whose own posterior mean (the Beta the
+  sampler draws from) is above 0.5. Without them a station could only come
+  back through its tags, a loved artist, or the random slice, which lost
+  tagless favourites for listeners who rarely press love
 - a small pure-random slice (serendipity)
 - never the current or previous station; never stations with fail_count ≥ 3
+
+The pool is handed to the sampler in a fixed order, so a seeded rng is
+reproducible. `go test -tags eval -run TestEval -v ./internal/core` runs the
+simulated-listener harness: synthetic catalogs, a listener with hidden taste
+who stays or skips, and E[like] of the picks over time against a random
+pick. Its scenarios cover genre taste, station-specific taste, and genre
+plus per-station quality, each with and without loves. Change the picker
+or the rewards, then check this table.
 
 Never-heard stations get priors seeded from tag affinity × loved-artist overlap ×
 ad-risk penalty.

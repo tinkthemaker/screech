@@ -37,6 +37,11 @@ done
   holds the row accounting to the rendered panel, and `TestASCIIModeIsSevenBit`
   fails on any non-ASCII cell in `ascii = true` mode — use `m.th.G` glyphs,
   never literal `…`, `×`, `·` in view code.
+- `go test -tags eval -run TestEval -v ./internal/core` (~30s) runs the
+  simulated-listener harness (`eval_test.go`). Run it before and after any
+  change to the pool, rewards, decay or priors and compare the late-window
+  E[like]; `EVAL_SEED_BASE=101` reruns on fresh worlds so a tweak isn't
+  tuned to one seed set.
 - `go test -tags live ./internal/core -run Live` hits the real radio-browser
   directory; plain unit tests must never touch the network (`openTestCore`
   points the client at a dead transport).

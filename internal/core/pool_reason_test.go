@@ -1,12 +1,72 @@
 package core
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"strings"
 	"testing"
 	"time"
 )
+
+// A favourite with no tags to carry it, on a listener who never loved a
+// track there, still makes the pool on its own listening history — the
+// tag slice is full of other stations and only the heard slice can bring
+// it back. Twenty seeds: the random slice alone would miss it nearly
+// every time.
+func TestHeardFavoriteReachesPoolWithoutTagsOrLoves(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	var sts []Station
+	for i := 0; i < 300; i++ {
+		id := fmt.Sprintf("filler-%03d", i)
+		sts = append(sts, Station{UUID: id, Name: id, URL: "http://x/" + id, URLResolved: "http://x/" + id, Tags: "jazz"})
+	}
+	sts = append(sts, Station{UUID: "fav", Name: "Fav", URL: "http://x/fav", URLResolved: "http://x/fav"})
+	if err := c.store.UpsertStations(sts, now); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	err := c.reload()
+	c.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.tags["jazz"] = banditRow{Alpha: 4, UpdatedAt: now}
+	c.bandit["fav"] = map[string]banditRow{
+		DaypartAll:      {Alpha: 5, Beta: 1, UpdatedAt: now},
+		DaypartFor(now): {Alpha: 5, Beta: 1, UpdatedAt: now},
+	}
+	for seed := int64(0); seed < 20; seed++ {
+		found := false
+		for _, cd := range c.buildPool(now, rand.New(rand.NewSource(seed))) {
+			found = found || cd.st.UUID == "fav"
+		}
+		if !found {
+			t.Fatalf("seed %d: a station with a 5:1 listening record is missing from the pool", seed)
+		}
+	}
+}
+
+// The pool's order is fixed, so a seeded rng picks the same station every
+// time — the property the eval harness's comparisons stand on.
+func TestSeededPickIsReproducible(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	first := ""
+	for i := 0; i < 5; i++ {
+		c.rng = rand.New(rand.NewSource(7))
+		p, err := c.Tune(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = p.Station.UUID
+		} else if p.Station.UUID != first {
+			t.Fatalf("run %d picked %s, run 0 picked %s", i, p.Station.UUID, first)
+		}
+	}
+}
 
 // A station the user keeps skipping must never read as a "favorite": skips
 // are beta, not evidence of love.
