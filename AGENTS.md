@@ -55,3 +55,7 @@ done
   `core.CleanText` before it is stored or shown.
 - CI tool versions are pinned; bump only to releases at least a week old that
   support the go.mod language version.
+- User-visible changes get a line in `CHANGELOG.md` under the upcoming
+  version's `## X.Y.Z — date` heading. The release workflow publishes that
+  section as the GitHub release notes, so write it for listeners. Bump
+  `internal/version.Current` to match before tagging `vX.Y.Z`.

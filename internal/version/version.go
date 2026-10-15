@@ -9,7 +9,7 @@
 package version
 
 // Current is the running build's version. Overwritten at release time.
-var Current = "0.7.0"
+var Current = "0.8.0"
 
 // UserAgent is what screech calls itself to other people's servers.
 func UserAgent() string { return "screech/" + Current }
