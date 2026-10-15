@@ -294,7 +294,12 @@ Curation does the real work; runtime detection is a bonus, and expectations stay
    commercial streams *don't* change titles during breaks, and DJs legitimately set
    the title to the station name — so detection only flags a *suspected* break
    (dim indicator) and discounts skips made during it. **Auto-hop is config-gated
-   and off by default.**
+   and off by default.** With `auto_hop_ads` on, only a literal marker in the
+   title (`AdMarker`) hops — the empty and station-name cases stay suspicion,
+   because DJ talk and station IDs produce them too. A hop is a skip through
+   `Tune`, so it lands as a break skip (β += 0.25 when fast), the same lesson
+   as pressing SPACE; one hop per 30 s keeps a run of stations all mid-break
+   from chaining hops faster than a listener can follow.
 
 ## SQLite schema
 
@@ -493,8 +498,8 @@ shift only, and picker previews render under the current daypart.
 
 **Library views.** `h` opens recent tracks; `j`/`k` (and page keys) scroll the
 hundred most recent — they used to load and then show only what fit. `H`
-opens a unified library on the loved view; Tab cycles recent, loved, and
-saved stations. Loved tracks are
+opens a unified library on the loved view; Tab cycles recent, loved,
+saved stations, and a taste view. Loved tracks are
 deduplicated, searchable across artist/title/origin station, and
 keyboard-selectable. The selected track can seed more music from its artist,
 return to its origin station, or be removed with a guarded action.
@@ -512,6 +517,14 @@ loved rows) while leaving listen history and the taste model untouched.
 Radio metadata is recall and discovery context, never presented as an
 on-demand replay URL. Esc clears an active filter first, then closes —
 in both filterable views.
+
+The **taste view** reads the record back at the listener: all-time and
+seven-day audible time, an audible-time histogram across the four
+dayparts, the artists heard most in the last 90 days (only titles caught
+inside a listen that ran at least the fast-skip window, or the one still
+open — a ten-second skip is not taste), the tag affinities still above
+prior after decay, the most-listened stations of the last 30 days, and
+the loved-track count.
 
 **The wave (honest amplitude, synthetic texture).** Touching braille cells,
 the top block of rows the left channel and the bottom block the right, with

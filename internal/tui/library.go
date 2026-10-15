@@ -41,6 +41,12 @@ func (m *Model) loadHistory(view historyView) bool {
 		if hist, err := m.core.TopListened(9); err == nil {
 			m.hist = hist
 		}
+	case historyTaste:
+		taste, err := m.core.Taste(time.Now())
+		if err != nil {
+			return false
+		}
+		m.taste = taste
 	}
 	if view != historyLoved {
 		entries, err := m.core.LovedTracks(libraryLimit)
@@ -96,10 +102,10 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadHistory(historyLoved)
 		return m, nil
 	case "tab":
-		m.loadHistory((m.historyView + 1) % 3)
+		m.loadHistory((m.historyView + 1) % 4)
 		return m, nil
 	case "shift+tab":
-		m.loadHistory((m.historyView + 2) % 3)
+		m.loadHistory((m.historyView + 3) % 4)
 		return m, nil
 	case "?":
 		m.helpOpen = true
@@ -540,13 +546,15 @@ func (m Model) historyRows(iw int, compact bool, budget int) []string {
 		return m.lovedRows(rows, iw, budget)
 	case historyStations:
 		return m.stationHistoryRows(rows, iw, budget)
+	case historyTaste:
+		return m.tasteRows(rows, iw, budget)
 	default:
 		return m.recentRows(rows, iw, budget)
 	}
 }
 
 func (m Model) historyTabs(iw int) string {
-	labels := []string{"RECENT", fmt.Sprintf("LOVED %d", len(m.library)), "STATIONS"}
+	labels := []string{"RECENT", fmt.Sprintf("LOVED %d", len(m.library)), "STATIONS", "TASTE"}
 	plain := strings.Join(labels, "   ")
 	if runewidth.StringWidth(plain) > iw {
 		return m.th.Accent.Bold(true).Render(

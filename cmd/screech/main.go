@@ -24,6 +24,10 @@ var usage = "screech " + version + " - terminal internet radio\n\n" +
 	"  screech doctor          run a read-only diagnostic check\n" +
 	"                          exit status is a bitmask of failed checks\n" +
 	"                          (1 config, 2 database, 4 mpv, 8 ipc, 16 network)\n" +
+	"  screech export loved    write the loved-track list as CSV to stdout\n" +
+	"  screech export heard    write the heard-track history as CSV to stdout\n" +
+	"  screech export backup <path>\n" +
+	"                          write a consistent SQLite backup to <path>\n" +
 	"  screech --help          show this message\n" +
 	"  screech --version       show the version\n\n" +
 	"Flags:\n" +
@@ -44,6 +48,7 @@ type command int
 const (
 	cmdRun command = iota
 	cmdDoctor
+	cmdExport
 	cmdHelp
 	cmdVersion
 )
@@ -52,24 +57,35 @@ const (
 // the one flag that matters to it.
 type invocation struct {
 	cmd           command
+	exportKind    string // loved, heard or backup — only set for cmdExport
+	exportPath    string // the backup destination; empty for the CSV forms
 	reducedMotion bool
 }
 
 // parseArgs maps argv onto an invocation. One command at most, and
 // --reduced-motion is accepted anywhere so `screech doctor --reduced-motion`
 // and `screech --reduced-motion` both parse rather than silently falling
-// into the TUI.
+// into the TUI. export is the only command with operands: a kind, and for
+// backup exactly one path.
 func parseArgs(args []string) (invocation, error) {
 	var inv invocation
 	var seen string
+	var operands []string
 	for _, a := range args {
-		var cmd command
-		switch a {
-		case "--reduced-motion":
+		if a == "--reduced-motion" {
 			inv.reducedMotion = true
 			continue
+		}
+		if seen == "export" {
+			operands = append(operands, a)
+			continue
+		}
+		var cmd command
+		switch a {
 		case "doctor":
 			cmd = cmdDoctor
+		case "export":
+			cmd = cmdExport
 		case "help", "-h", "--help":
 			cmd = cmdHelp
 		case "version", "-v", "--version":
@@ -82,6 +98,25 @@ func parseArgs(args []string) (invocation, error) {
 		}
 		seen = a
 		inv.cmd = cmd
+	}
+	if inv.cmd == cmdExport {
+		if len(operands) == 0 {
+			return inv, fmt.Errorf("export needs a kind: loved, heard or backup")
+		}
+		switch operands[0] {
+		case "loved", "heard":
+			if len(operands) != 1 {
+				return inv, fmt.Errorf("export %s takes no further arguments", operands[0])
+			}
+			inv.exportKind = operands[0]
+		case "backup":
+			if len(operands) != 2 {
+				return inv, fmt.Errorf("export backup takes exactly one destination path")
+			}
+			inv.exportKind, inv.exportPath = operands[0], operands[1]
+		default:
+			return inv, fmt.Errorf("unknown export kind %q", operands[0])
+		}
 	}
 	return inv, nil
 }
@@ -100,6 +135,8 @@ func main() {
 		fmt.Println("screech " + version)
 	case cmdDoctor:
 		os.Exit(runDoctor())
+	case cmdExport:
+		os.Exit(runExport(inv.exportKind, inv.exportPath))
 	default:
 		os.Exit(run())
 	}

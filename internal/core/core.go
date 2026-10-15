@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -295,6 +296,86 @@ func (c *Core) StationInfo(uuid string, now time.Time) (StationInfo, error) {
 // density strip.
 func (c *Core) ListenTotals() (map[string]time.Duration, error) {
 	return c.store.ListenTotals()
+}
+
+// Taste is the library's picture of the listener: how much has actually
+// been heard, at what time of day, and which artists, tags and stations
+// the hours keep landing on.
+type Taste struct {
+	Total       time.Duration            // all-time audible time, same per-row sum as StationTotal
+	Week        time.Duration            // audible time of listens started in the last 7 days
+	ByDaypart   map[string]time.Duration // all-time audible time keyed by the listen row's daypart
+	TopArtists  []ArtistPlays            // most-played artists of the last 90 days, at most 8
+	TopTags     []TagWeight              // strongest tag affinities above prior, at most 8
+	TopStations []HistEntry              // most-listened stations of the last 30 days, at most 5
+	LovedTracks int                      // distinct loved tracks, same dedupe as LovedTracks
+}
+
+// ArtistPlays is one line of the TASTE artist leaderboard.
+type ArtistPlays struct {
+	Artist string
+	Plays  int
+}
+
+// TagWeight is a decayed tag affinity with the prior already subtracted.
+type TagWeight struct {
+	Tag    string
+	Weight float64
+}
+
+// Taste gathers the TASTE tab. Artists only count when they played during
+// a listen that ran at least FastSkipWindow — a ten-second skip is not
+// taste — or during the one still open.
+func (c *Core) Taste(now time.Time) (Taste, error) {
+	byDaypart, weekByDaypart, err := c.store.TasteTotals(now.AddDate(0, 0, -7))
+	if err != nil {
+		return Taste{}, err
+	}
+	artists, err := c.store.TasteArtists(now, now.AddDate(0, 0, -90), FastSkipWindow, 8)
+	if err != nil {
+		return Taste{}, err
+	}
+	stations, err := c.store.TopStationsSince(now.AddDate(0, 0, -30), 5)
+	if err != nil {
+		return Taste{}, err
+	}
+	loved, err := c.store.LovedTrackCount()
+	if err != nil {
+		return Taste{}, err
+	}
+
+	c.mu.Lock()
+	var tags []TagWeight
+	for tag, r := range c.tags {
+		// Decay approaches the prior without reaching it; a boost worn
+		// down to a sliver is history, not taste.
+		w := decayToward(r.Alpha, r.UpdatedAt, now) - 1
+		if w > 0.05 {
+			tags = append(tags, TagWeight{Tag: tag, Weight: w})
+		}
+	}
+	c.mu.Unlock()
+	sort.Slice(tags, func(i, j int) bool {
+		if tags[i].Weight != tags[j].Weight {
+			return tags[i].Weight > tags[j].Weight
+		}
+		return tags[i].Tag < tags[j].Tag
+	})
+	if len(tags) > 8 {
+		tags = tags[:8]
+	}
+
+	var t Taste
+	t.ByDaypart = byDaypart
+	for _, d := range byDaypart {
+		t.Total += d
+	}
+	for _, w := range weekByDaypart {
+		t.Week += w
+	}
+	t.TopArtists, t.TopTags, t.TopStations = artists, tags, stations
+	t.LovedTracks = loved
+	return t, nil
 }
 
 // TrackPlayCount is how many times a track has been logged from any station.

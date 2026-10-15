@@ -144,10 +144,17 @@ gradient. Every finish tempers with the time of day.
 carry an ember heart.
 
 **H** — open the library, starting with loved tracks. `tab` moves through
-recent tracks, loved tracks, and saved stations. In the loved view, `/`
-searches across artist, title, and origin station; arrows or `j`/`k` select;
+recent tracks, loved tracks, saved stations, and a taste summary. In the
+loved view, `/` searches across artist, title, and origin station; arrows
+or `j`/`k` select;
 `enter` asks screech for more from that artist; `r` returns to the station
 that played it; and pressing `x` twice removes it.
+
+The taste view is the library's mirror back at you: total and weekly
+listening, which dayparts your hours land in, the artists you actually
+hear (titles caught inside a skip under 90 seconds don't count), the tags
+the taste model leans on, your most-listened stations of the month, and
+your loved-track count.
 
 The saved-stations view is the full two-tier station list: your presets
 (their slot number sits in front of the name, like a channel) plus every
@@ -206,9 +213,13 @@ always explains the pick: `plays 3 artists you love`, `tag: ambient`,
 Ad avoidance is mostly curation. Commercial simulcast networks get downranked
 before you ever hear them; college, community, and listener-supported streams
 get upranked. Title-based break detection exists but stays humble: it flags
-suspicion and discounts your skips, and it never hops on its own. The
-`auto_hop_ads` config key is a placeholder for that behavior and currently
-does nothing.
+suspicion and discounts your skips. Set `auto_hop_ads = true` and screech
+also moves on by itself, but only when a stream's title literally announces
+the break ("advertisement", "commercial break"). Empty titles and titles
+that just repeat the station name mark a suspected break, never a hop:
+DJ talk and station IDs look the same. It hops at most once every 30
+seconds, and a hop teaches the model exactly what skipping that break
+yourself would.
 
 The wave under the station name moves with the stream's real loudness,
 measured by mpv and reported over the same pipe that carries titles. Texture
@@ -261,6 +272,17 @@ only). The network traffic is the streams you listen to and the
 radio-browser.info directory: the weekly catalog refresh, `/` searches, and
 the click report their etiquette asks for when a station starts. Nothing
 else, and no telemetry.
+
+Your data is yours to take with you, without stopping the radio:
+
+```
+screech export loved          loved tracks as CSV, newest first
+screech export heard          every heard title as CSV, newest first
+screech export backup out.db  a consistent copy of the whole database
+```
+
+Both CSVs write to stdout; cells that would run as spreadsheet formulas
+are quote-guarded. The backup refuses to overwrite an existing file.
 
 To start over, quit and delete the data directory. If the database is ever
 damaged, screech moves it aside as `screech.db.corrupt.<timestamp>`, starts

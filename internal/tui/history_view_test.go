@@ -339,3 +339,79 @@ func TestFirstRunStartsWithoutBlockingPrompt(t *testing.T) {
 		t.Fatal("first run should schedule playback and directory sync")
 	}
 }
+
+func TestTasteTabCyclesRendersAndWraps(t *testing.T) {
+	m := modelWithListens(t)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+	m.start = m.now.Add(-time.Minute)
+
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	m = mm.(Model)
+	if m.historyView != historyLoved {
+		t.Fatalf("H should open loved, got %v", m.historyView)
+	}
+	tab := func() {
+		mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = mm.(Model)
+	}
+	shiftTab := func() {
+		mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		m = mm.(Model)
+	}
+	tab()
+	if m.historyView != historyStations {
+		t.Fatalf("tab from loved should reach stations, got %v", m.historyView)
+	}
+	tab()
+	if m.historyView != historyTaste {
+		t.Fatalf("tab from stations should reach taste, got %v", m.historyView)
+	}
+	view := m.View()
+	if !strings.Contains(view, "TASTE") || !strings.Contains(view, "LISTENING") {
+		t.Fatalf("taste view missing sections:\n%s", view)
+	}
+	if !strings.Contains(view, "next view") {
+		t.Fatalf("taste footer should offer the next view:\n%s", view)
+	}
+	// j/k do nothing here — the view has no cursor.
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = mm.(Model)
+	if m.historyView != historyTaste {
+		t.Fatal("j should not move the taste view")
+	}
+	// ? still reaches the help sheet from the fourth view.
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = mm.(Model)
+	if !m.helpOpen {
+		t.Fatal("? should open help over the taste view")
+	}
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mm.(Model)
+
+	tab()
+	if m.historyView != historyRecent {
+		t.Fatalf("tab past taste should wrap to recent, got %v", m.historyView)
+	}
+	shiftTab()
+	if m.historyView != historyTaste {
+		t.Fatalf("shift+tab from recent should reach taste, got %v", m.historyView)
+	}
+	shiftTab()
+	if m.historyView != historyStations {
+		t.Fatalf("shift+tab from taste should reach stations, got %v", m.historyView)
+	}
+}
+
+func TestTasteEmptyState(t *testing.T) {
+	m := testModel(t)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+	m.start = m.now.Add(-time.Minute)
+	if !m.loadHistory(historyTaste) {
+		t.Fatal("taste should load on an empty database")
+	}
+	if !strings.Contains(m.View(), "Nothing yet") {
+		t.Fatalf("empty taste should invite listening:\n%s", m.View())
+	}
+}

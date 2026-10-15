@@ -96,6 +96,36 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 				{UUID: "x", Name: "A Station", PresetSlot: 1},
 			}
 		}},
+		{"history-taste", func(m *Model) {
+			m.history = true
+			m.historyView = historyTaste
+			m.taste = core.Taste{
+				Total: 212 * time.Hour,
+				Week:  9*time.Hour + 40*time.Minute,
+				ByDaypart: map[string]time.Duration{
+					core.DaypartMorning: 38 * time.Hour,
+					core.DaypartDay:     47 * time.Hour,
+					core.DaypartEvening: 87 * time.Hour,
+					core.DaypartNight:   40 * time.Hour,
+				},
+				TopArtists: []core.ArtistPlays{
+					{Artist: "Khruangbin", Plays: 42},
+					{Artist: "Bonobo And His Remarkably Long Collaborative Name", Plays: 31},
+				},
+				TopTags: []core.TagWeight{
+					{Tag: "ambient", Weight: 0.42}, {Tag: "jazz", Weight: 0.21},
+				},
+				TopStations: []core.HistEntry{
+					{UUID: "x", Name: "NTS Radio 1", Total: 14 * time.Hour},
+					{UUID: "y", Name: "KEXP", Total: 9 * time.Hour},
+				},
+				LovedTracks: 128,
+			}
+		}},
+		{"history-taste-empty", func(m *Model) {
+			m.history = true
+			m.historyView = historyTaste
+		}},
 		{"theme-picker", func(m *Model) {
 			m.themeOpen = true
 		}},
@@ -604,6 +634,26 @@ func TestASCIIModeIsSevenBit(t *testing.T) {
 			m.saved = []core.SavedStation{
 				{UUID: "x", Name: "A Station", PresetSlot: 1, LoveCount: 2, Total: time.Hour},
 			}
+		},
+		func(m *Model) { // taste history
+			m.history = true
+			m.historyView = historyTaste
+			m.taste = core.Taste{
+				Total: 12 * time.Hour,
+				Week:  2 * time.Hour,
+				ByDaypart: map[string]time.Duration{
+					core.DaypartMorning: 4 * time.Hour,
+					core.DaypartEvening: 8 * time.Hour,
+				},
+				TopArtists:  []core.ArtistPlays{{Artist: "An Artist", Plays: 7}},
+				TopTags:     []core.TagWeight{{Tag: "ambient", Weight: 0.4}},
+				TopStations: []core.HistEntry{{UUID: "x", Name: "A Station", Total: time.Hour}},
+				LovedTracks: 3,
+			}
+		},
+		func(m *Model) { // taste history, nothing heard yet
+			m.history = true
+			m.historyView = historyTaste
 		},
 		func(m *Model) { m.themeOpen = true }, // theme picker
 		func(m *Model) { // seed prompt

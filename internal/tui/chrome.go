@@ -224,6 +224,8 @@ func (m Model) footerItems() []footerItem {
 				return []footerItem{item("TYPE", "filter"), item("ENTER", "done"), item("ESC", "done")}
 			}
 			return []footerItem{item("J/K", "move"), item("/", "find"), item("ENTER", "tune"), item("X", "remove"), item("1-9", "preset"), item("TAB", ""), item("ESC", "")}
+		case historyTaste:
+			return []footerItem{item("TAB", "next view"), item("ESC", "close")}
 		default:
 			return []footerItem{item("J/K", "scroll"), item("TAB", "next view"), item("ESC", "close")}
 		}

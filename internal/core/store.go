@@ -1092,6 +1092,111 @@ func (s *Store) StationTotal(uuid string) (time.Duration, error) {
 	return time.Duration(secs) * time.Second, err
 }
 
+// VacuumInto writes a consistent copy of the database to path — SQLite's
+// online-backup API. A read-only connection still runs it: the copy is a
+// new file, not a write to this database.
+func (s *Store) VacuumInto(path string) error {
+	_, err := s.q.Exec(`VACUUM INTO ?`, path)
+	return err
+}
+
+// TasteTotals is the TASTE tab's listening ledger in one pass: per-daypart
+// audible sums plus the share whose listens started inside the week
+// window. The caller folds the daypart rows into the overall totals.
+func (s *Store) TasteTotals(weekStart time.Time) (byDaypart, weekByDaypart map[string]time.Duration, err error) {
+	rows, err := s.q.Query(`SELECT daypart,
+		COALESCE(SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)), 0),
+		COALESCE(SUM(CASE WHEN started_at >= ? THEN MAX(0, COALESCE(ended_at, started_at) - started_at) ELSE 0 END), 0)
+		FROM listens GROUP BY daypart`, weekStart.Unix())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	byDaypart, weekByDaypart = map[string]time.Duration{}, map[string]time.Duration{}
+	for rows.Next() {
+		var dp string
+		var total, week int64
+		if err := rows.Scan(&dp, &total, &week); err != nil {
+			return nil, nil, err
+		}
+		byDaypart[dp] = time.Duration(total) * time.Second
+		weekByDaypart[dp] = time.Duration(week) * time.Second
+	}
+	return byDaypart, weekByDaypart, rows.Err()
+}
+
+// TasteArtists counts heard tracks per artist, but only titles caught
+// inside a listen that ran at least minListen — a ten-second skip is not
+// taste — or inside the currently open one, and only from the last
+// `since` days. The display name is the most recent form the stream sent.
+func (s *Store) TasteArtists(now, since time.Time, minListen time.Duration, n int) ([]ArtistPlays, error) {
+	rows, err := s.q.Query(`SELECT t.artist_key,
+		(SELECT t2.artist FROM tracks_heard t2 WHERE t2.artist_key = t.artist_key
+		 ORDER BY t2.heard_at DESC, t2.id DESC LIMIT 1) AS artist,
+		COUNT(*) AS plays
+		FROM tracks_heard t
+		WHERE t.artist_key <> '' AND t.heard_at >= ?
+		  AND EXISTS (SELECT 1 FROM listens l
+		              WHERE l.station_uuid = t.station_uuid
+		                AND t.heard_at BETWEEN l.started_at AND COALESCE(l.ended_at, ?)
+		                AND (l.ended_at IS NULL OR l.ended_at - l.started_at >= ?))
+		GROUP BY t.artist_key
+		ORDER BY plays DESC, artist
+		LIMIT ?`, since.Unix(), now.Unix(), int64(minListen.Seconds()), n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArtistPlays
+	for rows.Next() {
+		var a ArtistPlays
+		var key string
+		if err := rows.Scan(&key, &a.Artist, &a.Plays); err != nil {
+			return nil, err
+		}
+		a.Artist = CleanText(a.Artist)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// TopStationsSince is the listen-time leaderboard restricted to listens
+// that started inside the window — the TASTE tab's "lately" column.
+func (s *Store) TopStationsSince(since time.Time, n int) ([]HistEntry, error) {
+	rows, err := s.q.Query(`SELECT l.station_uuid,
+		COALESCE(st.name, l.station_uuid) AS name,
+		SUM(MAX(0, COALESCE(l.ended_at, l.started_at) - l.started_at)) AS total
+		FROM listens l LEFT JOIN stations st ON st.uuid = l.station_uuid
+		WHERE l.started_at >= ?
+		GROUP BY l.station_uuid ORDER BY total DESC LIMIT ?`, since.Unix(), n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HistEntry
+	for rows.Next() {
+		var e HistEntry
+		var secs int64
+		if err := rows.Scan(&e.UUID, &e.Name, &secs); err != nil {
+			return nil, err
+		}
+		e.Name = CleanText(e.Name)
+		e.Total = time.Duration(secs) * time.Second
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// LovedTrackCount is the deduplicated loved-track total — the same
+// (artist_key, lowered title) grouping the library applies.
+func (s *Store) LovedTrackCount() (int, error) {
+	var n int
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM (
+		SELECT 1 FROM loved WHERE trim(title) != ''
+		GROUP BY artist_key, lower(trim(title)))`).Scan(&n)
+	return n, err
+}
+
 // StationStats collects one station's listen history for the info sheet:
 // cumulative audible time (the same sum as StationTotal), visits that
 // lasted at least a minute, the first and most recent listen starts, and

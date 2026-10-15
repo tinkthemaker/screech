@@ -88,6 +88,7 @@ const (
 	historyRecent historyView = iota
 	historyLoved
 	historyStations
+	historyTaste
 )
 
 type phase int
@@ -188,6 +189,7 @@ type Model struct {
 	savedQuery   []rune
 	savedFind    bool
 	savedPos     int
+	taste        core.Taste
 	forgetKey    string
 	forgetAt     time.Time
 	volumeOpen   bool
