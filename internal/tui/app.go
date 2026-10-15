@@ -72,6 +72,11 @@ const (
 // far end.
 var sleepSteps = []time.Duration{15 * time.Minute, 30 * time.Minute, 45 * time.Minute, 60 * time.Minute, 90 * time.Minute}
 
+// autoHopCooldown bounds auto-hop: a run of stations all mid-break would
+// otherwise chain hops faster than a listener can follow; after one hop
+// the next break waits for the listener.
+const autoHopCooldown = 30 * time.Second
+
 // retryBackoff spaces offline retries: 5s, 10s, 20s, … capped at a minute.
 // n counts failures since the outage began.
 func retryBackoff(n int) time.Duration {
@@ -108,6 +113,7 @@ type Options struct {
 	ASCII         bool
 	SyncLimit     int
 	ReducedMotion bool
+	AutoHopAds    bool
 	// Notice seeds the status line with something the user should see once
 	// (e.g. a recovered database), without failing startup.
 	Notice string
@@ -207,6 +213,8 @@ type Model struct {
 	resuming    bool // this tune is a resume — header says RESUMING…
 	pauseReload bool // resume must reload: backend restarted, or the stream stopped/ended while paused
 	sleepStep   int  // index into sleepSteps, -1 = off
+	autoHop     bool
+	hopAt       time.Time // last auto-hop; a run of mid-break stations gets one per cooldown
 	sleepAt     time.Time
 	sleepVol    int    // last faded volume sent to the player; -1 = none
 	notice      string // startup notice from Options; survives picks, dies on first key
@@ -304,6 +312,7 @@ func New(c *core.Core, pl player.Player, opts Options) Model {
 		lastAct:      now,
 		daypart:      dp,
 		reduceMotion: opts.ReducedMotion,
+		autoHop:      opts.AutoHopAds,
 		wave:         NewWave(32),
 		dial:         NewSpring(0.5),
 		dialTgt:      0.5,

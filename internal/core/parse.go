@@ -29,6 +29,16 @@ func SuspectAd(raw, stationName string) bool {
 	if stationName != "" && t == strings.ToLower(strings.TrimSpace(stationName)) {
 		return true
 	}
+	return AdMarker(raw)
+}
+
+// AdMarker reports whether a raw title literally announces a break
+// ("advertisement", "commercial break" …). SuspectAd's empty and
+// station-name cases also come from DJ talk and station IDs; a marker is
+// the stream saying so itself — the only evidence strong enough to act on
+// unattended.
+func AdMarker(raw string) bool {
+	t := strings.ToLower(strings.TrimSpace(raw))
 	for _, m := range adMarkers {
 		if strings.Contains(t, m) {
 			return true
@@ -55,6 +65,13 @@ func ParseTitle(raw, stationName string) (Track, bool) {
 		return tr, false
 	}
 
+	// Some stations template "Album - Artist - Title" and send the empty
+	// field anyway: " - Om Unit - Patterning". The leading separator is the
+	// mirror of the trailing one trimmed off the title below, not part of
+	// the artist's name.
+	for strings.HasPrefix(s, "- ") {
+		s = strings.TrimSpace(s[2:])
+	}
 	artist, title := "", s
 	if i := strings.Index(s, " - "); i > 0 {
 		artist = strings.TrimSpace(s[:i])

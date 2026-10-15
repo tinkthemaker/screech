@@ -45,6 +45,7 @@ type Core struct {
 	hasTrack     bool
 	everTrack    bool
 	suspectAd    bool
+	adMarker     bool
 	seedTag      string
 	seedPicks    int
 }
@@ -553,6 +554,7 @@ func (c *Core) startListenLocked(uuid string, now time.Time) {
 	c.hasTrack = false
 	c.everTrack = false
 	c.suspectAd = false
+	c.adMarker = false
 	id, err := c.store.InsertListen(uuid, now, DaypartFor(now))
 	if err == nil {
 		c.listenID = id
@@ -659,6 +661,7 @@ func (c *Core) NoteTitle(raw string, now time.Time) (Track, bool, bool, bool) {
 		return c.curTrack, c.hasTrack, c.suspectAd, c.trackLovedLocked()
 	}
 	c.lastRawTitle = raw
+	c.adMarker = AdMarker(raw)
 
 	st := c.stationByUUIDLocked(c.currentUUID)
 	name := ""
@@ -850,6 +853,15 @@ func (c *Core) SuspectedAd() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.suspectAd
+}
+
+// AdBreak is the auto-hop trigger: stricter than SuspectedAd — it only
+// fires when the title literally announced a break, so DJ talk and
+// station IDs never cause a hop.
+func (c *Core) AdBreak() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.adMarker
 }
 
 // --- internals ---

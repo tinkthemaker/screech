@@ -41,6 +41,19 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			m.lovedTrack = false
 			m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
 		}
+		// Auto-hop only on the stream's own break marker — the opt-in
+		// promise is "the title said so", never suspicion alone. The hop
+		// goes through Tune on purpose: a skip during a break earns
+		// endListenLocked's discounted beta, same as a manual one.
+		if m.autoHop && m.ph == phPlay && m.haveSt && m.core.AdBreak() &&
+			(m.hopAt.IsZero() || m.now.Sub(m.hopAt) >= autoHopCooldown) {
+			m.hopAt = m.now
+			// beginSkip mutates m; call it before the return so the
+			// returned copy carries the tune state (operand order in a
+			// return list is unspecified).
+			cmd := m.beginSkip("HOPPED  Ad break skipped")
+			return m, tea.Batch(m.listen(), cmd)
+		}
 
 	case player.EventPlaying:
 		if m.ph == phPaused {

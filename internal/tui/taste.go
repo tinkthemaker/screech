@@ -44,6 +44,12 @@ func (m Model) tasteRows(rows []string, iw, budget int) []string {
 		return l + styled
 	}
 	textW := iw - 3 - labelW
+	// Counts close a bounded column rather than the far edge of a wide
+	// terminal, so a number still reads as belonging to its name.
+	listW := textW
+	if listW > 48 {
+		listW = 48
+	}
 	// emit appends a section only when its heading and at least one item
 	// still fit; a dangling heading cut at the fold reads as breakage.
 	emit := func(block []string) {
@@ -81,7 +87,7 @@ func (m Model) tasteRows(rows []string, iw, budget int) []string {
 	var artists []string
 	for i, a := range t.TopArtists {
 		plays := fmt.Sprintf("%d", a.Plays)
-		w := maxI(textW-2-len(plays), 8)
+		w := maxI(listW-2-len(plays), 8)
 		plain := runewidth.FillRight(runewidth.Truncate(a.Artist, w, m.th.G.Ellipsis), w) + "  " + plays
 		artists = append(artists, put(i == 0, "ARTISTS", a.Artist+" "+plays, mid(plain, textW)))
 	}
@@ -113,7 +119,7 @@ func (m Model) tasteRows(rows []string, iw, budget int) []string {
 		if dur == "" {
 			dur = "<1m" // tuned but its open listen hasn't banked a minute
 		}
-		w := maxI(textW-2-len(dur), 8)
+		w := maxI(listW-2-len(dur), 8)
 		plain := runewidth.FillRight(runewidth.Truncate(e.Name, w, m.th.G.Ellipsis), w) + "  " + dur
 		stations = append(stations, put(i == 0, "STATIONS", e.Name+" "+dur, mid(plain, textW)))
 	}

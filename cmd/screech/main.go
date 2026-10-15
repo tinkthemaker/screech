@@ -190,7 +190,7 @@ func run() (exit int) {
 	defer c.Close()
 	logLine("database open; %d stations cached", c.StationCount())
 
-	opts := tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII, SyncLimit: cfg.SyncLimit, ReducedMotion: reducedMotion}
+	opts := tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII, SyncLimit: cfg.SyncLimit, ReducedMotion: reducedMotion, AutoHopAds: cfg.AutoHopAds}
 	if recovered := c.RecoveredFrom(); recovered != "" {
 		notice := fmt.Sprintf("database was damaged; moved aside to %s and started fresh", filepath.Base(recovered))
 		logLine("%s", notice)

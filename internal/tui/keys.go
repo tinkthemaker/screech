@@ -28,21 +28,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// retry early rather than tuning away from the outage.
 			return m.offlineRetry()
 		}
-		m.ph = phTune
-		m.tuneAt = m.now
-		m.note = ""
+		fb := "NEXT  Finding another station"
 		switch {
 		case m.suspect:
-			m.setFeedback("LEARNED  Break skip protected")
+			fb = "LEARNED  Break skip protected"
 		case !m.playStart.IsZero() && m.now.Sub(m.playStart) >= core.FastSkipWindow:
-			m.setFeedback("LEARNED  Long listen saved")
+			fb = "LEARNED  Long listen saved"
 		case !m.playStart.IsZero():
-			m.setFeedback("LEARNED  Fast skip noted")
-		default:
-			m.setFeedback("NEXT  Finding another station")
+			fb = "LEARNED  Fast skip noted"
 		}
-		m.wave.SetEnergy(0.05)
-		return m, m.tuneCmd()
+		// beginSkip mutates m: call it before the return list, whose
+		// operand order is unspecified.
+		cmd := m.beginSkip(fb)
+		return m, cmd
 
 	case "l":
 		if !m.haveSt || m.ph == phDead {
@@ -284,4 +282,16 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// beginSkip is what SPACE does once its guards pass: tune state, feedback,
+// calm the wave, and the tune command. Auto-hop runs the same path — a
+// hopped break is a skip and gets a skip's discounted penalty.
+func (m *Model) beginSkip(feedback string) tea.Cmd {
+	m.ph = phTune
+	m.tuneAt = m.now
+	m.note = ""
+	m.setFeedback(feedback)
+	m.wave.SetEnergy(0.05)
+	return m.tuneCmd()
 }

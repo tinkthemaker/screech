@@ -59,9 +59,10 @@ mpv_path = "mpv"
 # paths resolve against home and this file's directory respectively.
 data_dir = ""
 
-# Auto-hop away from suspected ad breaks. Placeholder: this key is read but
-# nothing acts on it yet. Detection is conservative and DJs legitimately
-# trip it, so hopping stays off until it earns its keep.
+# Hop to the next station when a stream's title literally announces a
+# break ("advertisement", "commercial break"). Empty titles and station
+# IDs never trigger it - DJs produce those too. At most one hop every 30
+# seconds; a hopped break teaches the same as a skip during one.
 auto_hop_ads = false
 
 # How many stations to cache from the directory (top slice by votes).
