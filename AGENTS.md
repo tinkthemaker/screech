@@ -1,9 +1,12 @@
 # Working on screech
 
-Go terminal radio: `cmd/screech` (entry, doctor, per-OS single-instance and
-console hold), `internal/core` (SQLite store, bandit, fingerprints,
-radio-browser client), `internal/player` (mpv over JSON IPC), `internal/tui`
-(Bubble Tea faceplate), `internal/config`, `internal/version`.
+Go terminal radio: `cmd/screech` (entry, doctor, export, console hold),
+`internal/app` (shared startup: config, per-OS single-instance lock, log,
+database, mpv), `internal/core` (SQLite store, bandit, fingerprints,
+radio-browser client), `internal/player` (mpv over JSON IPC),
+`internal/session` (the listening state machine every face drives),
+`internal/tui` (Bubble Tea faceplate over a `session.State`),
+`internal/config`, `internal/version`.
 [SPEC.md](SPEC.md) is the design record; keep it in step with behavior.
 
 ## Verify a change
@@ -37,6 +40,13 @@ done
   holds the row accounting to the rendered panel, and `TestASCIIModeIsSevenBit`
   fails on any non-ASCII cell in `ascii = true` mode — use `m.th.G` glyphs,
   never literal `…`, `×`, `·` in view code.
+- Listening behaviour (tune, drop, offline, restart, pause, sleep, auto-hop,
+  love, presets, volume, feedback wording) lives in `internal/session` and
+  is tested there by feeding messages to `State.Update` (`drive`, `playing`
+  in `helpers_test.go`). A face never re-implements it: the TUI's `step`
+  forwards to the session and only reacts to what changed (`PickSeq`,
+  phase, track parts). Face-originated feedback goes through
+  `session.Notify`, so the session stays the one owner of `Feedback`/`Note`.
 - `go test -tags eval -run TestEval -v ./internal/core` (~30s) runs the
   simulated-listener harness (`eval_test.go`). Run it before and after any
   change to the pool, rewards, decay or priors and compare the late-window

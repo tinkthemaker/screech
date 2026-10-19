@@ -112,6 +112,17 @@ Four layers, buildable in vertical slices:
 1. **Core package** — SQLite, scoring, fingerprints, ad-risk, radio-browser client.
    No UI knowledge. The portable heart for Path 2.
 2. **Bubble Tea TUI** — talks to core directly at first, daemon API later.
+   The listening state machine is not the TUI's: `internal/session` holds
+   it as a UI-free value (`State`, Elm-style `Update(Msg) (State, []Cmd)`)
+   that any face drives. It owns phases, picks, the tune/drop/offline/
+   restart rules below, pause from any source, the sleep timer, auto-hop,
+   love, presets, volume and the transient feedback line. The TUI renders
+   a `session.State`, maps keys to intents, and does only face work on top
+   (ceremony on each pick, wave energy, readouts, overlays, library and
+   info sheets that read core directly). `internal/app` is the shared
+   startup — config, single-instance lock, last-run log, database, mpv —
+   and returns errors for the face to present. State-machine behaviour is
+   pinned by `internal/session`'s tests; rendering by the TUI's.
 3. **Daemon** — small JSON API (~8 endpoints) on the homelab. For browser clients it
    **relays the stream**: one upstream connection per tuned station, reads ICY titles
    from the bytes it's already forwarding, serves the audio same-origin over HTTPS.
