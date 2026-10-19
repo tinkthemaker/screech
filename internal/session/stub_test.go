@@ -17,14 +17,19 @@ type stubPlayer struct {
 	calls    []string // ordered log across Play/SetVolume/SetPaused/Restart
 	restarts int
 	closed   bool
+	playGate chan struct{} // non-nil: Play blocks on it after logging
 }
 
 func newStubPlayer() *stubPlayer { return &stubPlayer{ch: make(chan player.Event, 8)} }
 func (s *stubPlayer) Play(url string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.playURLs = append(s.playURLs, url)
 	s.calls = append(s.calls, "play "+url)
+	gate := s.playGate
+	s.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	return s.playErr
 }
 func (s *stubPlayer) SetVolume(percent int) error {
@@ -62,6 +67,7 @@ func (s *stubPlayer) Close() error {
 	defer s.mu.Unlock()
 	if !s.closed {
 		s.closed = true
+		s.calls = append(s.calls, "close")
 		close(s.ch)
 	}
 	return nil
