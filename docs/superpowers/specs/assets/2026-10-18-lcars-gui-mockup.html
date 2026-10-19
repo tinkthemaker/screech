@@ -1,0 +1,272 @@
+<link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  .lx { --o:#FF9900; --peach:#FF9966; --tan:#FFCC99; --lav:#CC99CC; --blue:#9999FF; --ice:#99CCFF; --red:#CC6666;
+        --a1:#CC3333; --a2:#FF6666; --a3:#FFAAAA; --dead:#3a2020;
+        position:relative; background:#000; font-family:Antonio, "Arial Narrow", sans-serif; letter-spacing:.03em; flex:none; }
+  .lx * { box-sizing:border-box; }
+  .lx .s { position:absolute; display:flex; align-items:flex-end; justify-content:flex-end; padding:0 8px 4px;
+           color:#000; font-size:13px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; line-height:1; }
+  .lx .b { position:absolute; }
+  .lx .ic { position:absolute; width:24px; height:24px; }
+  .lx .ic::after { content:""; position:absolute; inset:0; background:#000; }
+  .lx .ic.tl::after { border-top-left-radius:24px; }
+  .lx .ic.bl::after { border-bottom-left-radius:24px; }
+  .lx .t { position:absolute; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lx .stn { font-size:22px; line-height:24px; font-weight:600; color:var(--tan); }
+  .lx .trk { font-size:14px; line-height:18px; color:var(--ice); }
+  .lx .meta { font-size:11px; line-height:14px; color:var(--lav); text-transform:uppercase; letter-spacing:.08em; display:flex; justify-content:space-between; }
+  .lx .meter { position:absolute; display:flex; align-items:flex-end; gap:2px; }
+  .lx .meter i { display:block; width:4px; border-radius:1px; background:linear-gradient(to top, var(--o), var(--tan)); }
+  .lx .pill { display:inline-flex; align-items:center; border-radius:999px; color:#000; font-weight:600; font-size:12px; letter-spacing:.06em; text-transform:uppercase; height:24px; padding:0 12px; }
+  .lx .rows div { height:28px; display:flex; align-items:center; justify-content:space-between; padding:0 12px; border-radius:14px; }
+  .lx .rows .tk { font-size:13px; color:var(--ice); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+  .lx .rows .st { font-size:11px; color:var(--lav); text-transform:uppercase; letter-spacing:.06em; white-space:nowrap; }
+  .lx .rows .sel { background:var(--ice); }
+  .lx .rows .sel .tk, .lx .rows .sel .st { color:#000; }
+  .lx .hdr { font-size:16px; line-height:20px; color:var(--o); font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .lx .hdr small { font-size:11px; color:var(--lav); margin-left:8px; letter-spacing:.08em; }
+  .lx .lbl { font-size:11px; color:var(--o); text-transform:uppercase; letter-spacing:.08em; }
+  .lx .bar2 { height:8px; border-radius:4px; background:#222; overflow:hidden; }
+  .lx .bar2 i { display:block; height:100%; border-radius:4px; }
+  .wrap { display:flex; flex-wrap:wrap; gap:28px; align-items:flex-start; margin:12px 0 4px; }
+  .cap2 { font:12px system-ui, sans-serif; color:#888; margin:6px 0 0; }
+  .note { font:13px/1.5 system-ui, sans-serif; color:#bbb; max-width:300px; }
+  .note b { color:#eee; }
+  .note code { color:#FFCC99; }
+</style>
+
+<h2>The strip, at actual size </h2>
+<p class="subtitle">Shown 1:1 (what you'd see at 100% Windows scaling). Top: the strip in its four states. Below: the unfolded console, on two different tabs. Spacing rules are on the right.</p>
+
+<div class="wrap">
+<div>
+
+  <!-- ============ STRIP · PLAYING ============ -->
+  <div class="lx" style="width:480px;height:128px">
+    <div class="s" style="left:0;top:0;width:96px;height:128px;border-radius:48px 0 0 48px;background:var(--o)">SCREECH</div>
+    <div class="b" style="left:96px;top:0;width:232px;height:12px;background:var(--o)"></div>
+    <div class="b" style="left:332px;top:0;width:80px;height:12px;background:var(--tan)"></div>
+    <div class="b" style="left:416px;top:0;width:64px;height:12px;background:var(--lav);border-radius:0 6px 6px 0"></div>
+    <div class="ic tl" style="left:96px;top:12px;background:var(--o)"></div>
+    <div class="ic bl" style="left:96px;top:76px;background:var(--o)"></div>
+    <div class="b" style="left:96px;top:100px;width:24px;height:28px;background:var(--o)"></div>
+    <div class="s" style="left:124px;top:100px;width:128px;height:28px;background:var(--peach)">NEXT</div>
+    <div class="s" style="left:256px;top:100px;width:80px;height:28px;background:var(--red)">LOVE</div>
+    <div class="s" style="left:340px;top:100px;width:80px;height:28px;background:var(--lav)">PAUSE</div>
+    <div class="s" style="left:424px;top:100px;width:56px;height:28px;padding-right:14px;background:var(--blue);border-radius:0 14px 14px 0">MORE</div>
+    <div class="t stn" style="left:136px;top:24px;width:240px">SomaFM: Groove Salad</div>
+    <div class="meter" style="right:16px;top:24px;width:70px;height:24px"><i style="height:40%"></i><i style="height:70%"></i><i style="height:55%"></i><i style="height:90%"></i><i style="height:65%"></i><i style="height:80%"></i><i style="height:45%"></i><i style="height:60%"></i><i style="height:85%"></i><i style="height:50%"></i><i style="height:30%"></i><i style="height:20%"></i></div>
+    <div class="t trk" style="left:136px;top:52px;right:16px">Boards of Canada — Roygbiv</div>
+    <div class="t meta" style="left:136px;top:74px;right:16px"><span><span style="color:var(--o)">● Live 00:42</span> &nbsp;·&nbsp; tag: ambient</span><span>Vol 70</span></div>
+  </div>
+  <p class="cap2">Playing. 480 × 128. The VOL readout here became a slider after review (see the fonts screenshot); the mouse wheel never changes the volume.</p>
+
+  <!-- ============ STRIP · TUNING ============ -->
+  <div class="lx" style="width:480px;height:128px;margin-top:16px">
+    <div class="s" style="left:0;top:0;width:96px;height:128px;border-radius:48px 0 0 48px;background:var(--o)">SCREECH</div>
+    <div class="b" style="left:96px;top:0;width:232px;height:12px;background:var(--o)"></div>
+    <div class="b" style="left:332px;top:0;width:80px;height:12px;background:var(--tan)"></div>
+    <div class="b" style="left:416px;top:0;width:64px;height:12px;background:var(--lav);border-radius:0 6px 6px 0"></div>
+    <div class="ic tl" style="left:96px;top:12px;background:var(--o)"></div>
+    <div class="ic bl" style="left:96px;top:76px;background:var(--o)"></div>
+    <div class="b" style="left:96px;top:100px;width:24px;height:28px;background:var(--o)"></div>
+    <div class="s" style="left:124px;top:100px;width:128px;height:28px;background:var(--peach)">NEXT</div>
+    <div class="s" style="left:256px;top:100px;width:80px;height:28px;background:var(--red)">LOVE</div>
+    <div class="s" style="left:340px;top:100px;width:80px;height:28px;background:var(--lav)">PAUSE</div>
+    <div class="s" style="left:424px;top:100px;width:56px;height:28px;padding-right:14px;background:var(--blue);border-radius:0 14px 14px 0">MORE</div>
+    <div class="t stn" style="left:136px;top:24px;width:240px;opacity:.55">Deep Space One</div>
+    <div class="meter" style="right:16px;top:24px;width:70px;height:24px"><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i></div>
+    <div class="t trk" style="left:136px;top:52px;right:16px;color:#7a99b3">Picked because: plays 3 artists you love</div>
+    <div class="t meta" style="left:136px;top:74px;right:16px"><span><span style="color:var(--peach)">◌ Tuning</span> &nbsp;·&nbsp; learned: fast skip noted</span><span>Vol 70</span></div>
+  </div>
+  <p class="cap2">Tuning. The next station's name fades in while it connects; the reason for the pick shows where the track goes.</p>
+
+  <!-- ============ STRIP · PAUSED ============ -->
+  <div class="lx" style="width:480px;height:128px;margin-top:16px">
+    <div class="s" style="left:0;top:0;width:96px;height:128px;border-radius:48px 0 0 48px;background:var(--o)">SCREECH</div>
+    <div class="b" style="left:96px;top:0;width:232px;height:12px;background:var(--o)"></div>
+    <div class="b" style="left:332px;top:0;width:80px;height:12px;background:var(--tan)"></div>
+    <div class="b" style="left:416px;top:0;width:64px;height:12px;background:var(--lav);border-radius:0 6px 6px 0"></div>
+    <div class="ic tl" style="left:96px;top:12px;background:var(--o)"></div>
+    <div class="ic bl" style="left:96px;top:76px;background:var(--o)"></div>
+    <div class="b" style="left:96px;top:100px;width:24px;height:28px;background:var(--o)"></div>
+    <div class="s" style="left:124px;top:100px;width:128px;height:28px;background:var(--peach)">NEXT</div>
+    <div class="s" style="left:256px;top:100px;width:80px;height:28px;background:var(--red)">LOVE</div>
+    <div class="s" style="left:340px;top:100px;width:80px;height:28px;background:#F0D0F0">RESUME</div>
+    <div class="s" style="left:424px;top:100px;width:56px;height:28px;padding-right:14px;background:var(--blue);border-radius:0 14px 14px 0">MORE</div>
+    <div class="t stn" style="left:136px;top:24px;width:240px">SomaFM: Groove Salad</div>
+    <div class="meter" style="right:16px;top:24px;width:70px;height:24px"><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i><i style="height:8%"></i></div>
+    <div class="t trk" style="left:136px;top:52px;right:16px">Boards of Canada — Roygbiv</div>
+    <div class="t meta" style="left:136px;top:74px;right:16px"><span><span style="color:#F0D0F0">❚❚ Paused</span> &nbsp;·&nbsp; sleep timer 30 min</span><span>Vol 70</span></div>
+  </div>
+  <p class="cap2">Paused. The pause button lights and becomes RESUME.</p>
+
+  <!-- ============ STRIP · OFFLINE (RED ALERT) ============ -->
+  <div class="lx" style="width:480px;height:128px;margin-top:16px">
+    <div class="s" style="left:0;top:0;width:96px;height:128px;border-radius:48px 0 0 48px;background:var(--a1)">SCREECH</div>
+    <div class="b" style="left:96px;top:0;width:232px;height:12px;background:var(--a1)"></div>
+    <div class="b" style="left:332px;top:0;width:80px;height:12px;background:var(--a2)"></div>
+    <div class="b" style="left:416px;top:0;width:64px;height:12px;background:var(--a3);border-radius:0 6px 6px 0"></div>
+    <div class="ic tl" style="left:96px;top:12px;background:var(--a1)"></div>
+    <div class="ic bl" style="left:96px;top:76px;background:var(--a1)"></div>
+    <div class="b" style="left:96px;top:100px;width:24px;height:28px;background:var(--a1)"></div>
+    <div class="s" style="left:124px;top:100px;width:128px;height:28px;background:var(--a2)">RETRY NOW</div>
+    <div class="s" style="left:256px;top:100px;width:80px;height:28px;background:var(--dead);color:#7a5050">LOVE</div>
+    <div class="s" style="left:340px;top:100px;width:80px;height:28px;background:var(--a3)">PAUSE</div>
+    <div class="s" style="left:424px;top:100px;width:56px;height:28px;padding-right:14px;background:var(--a3);border-radius:0 14px 14px 0">MORE</div>
+    <div class="t stn" style="left:136px;top:24px;width:240px;color:var(--a3)">SomaFM: Groove Salad</div>
+    <div class="t trk" style="left:136px;top:52px;right:16px;color:var(--a2)">No connection. Stations aren't being blamed for it.</div>
+    <div class="t meta" style="left:136px;top:74px;right:16px;color:var(--a2)"><span><span style="color:var(--a3)">■ Offline</span> &nbsp;·&nbsp; retrying in 20 s</span><span>Vol 70</span></div>
+  </div>
+  <p class="cap2">Offline: the whole frame goes to red alert. Buttons that can't do anything go dark.</p>
+
+</div>
+
+<div class="note">
+  <p><b>Spacing rules</b> (every number here is a multiple of 4):</p>
+  <p>• Gaps between all bar segments and buttons: <code>4</code><br>
+     • Left block: <code>96</code> wide; outer curve <code>48</code>, inner curve <code>24</code><br>
+     • Top bar <code>12</code> tall; button bar <code>28</code> tall<br>
+     • Text starts <code>16</code> past the inner curve; <code>12</code> clear of the bars above and below<br>
+     • Text: station <code>22</code>, track <code>14</code>, status <code>11</code>; rows <code>4</code> apart<br>
+     • Library rows <code>28</code> tall; pills <code>24</code> tall; preset pills <code>20</code><br>
+     • Plain text lines up at one left edge; filled rows and pills start <code>12</code> further left so their text lands on that same edge<br>
+     • Inside the console: <code>12</code> clear of bars, <code>8</code> within a section, <code>16</code> between sections; the presets row is a fixed footer <code>12</code> above the bottom bar, and tab content ends <code>16</code> above it<br>
+     • Unfolding never moves anything in the top strip; only MORE becomes LESS</p>
+  <p><b>Type:</b> Antonio, the free condensed face closest to the show's. Labels and buttons in capitals; station and track names as the stream sends them, so they stay readable.</p>
+  <p><b>Colours:</b> the TNG-era palette: orange frame, peach/red/lilac buttons, blue library. Red alert only when offline.</p>
+</div>
+</div>
+
+<div class="wrap">
+<div>
+  <!-- ============ CONSOLE · LOVED ============ -->
+  <div class="lx" style="width:480px;height:428px">
+    <div class="s" style="left:0;top:0;width:96px;height:152px;border-top-left-radius:48px;background:var(--o)"></div>
+    <div class="s" style="left:0;top:100px;width:96px;height:28px">SCREECH</div>
+    <div class="b" style="left:96px;top:0;width:232px;height:12px;background:var(--o)"></div>
+    <div class="b" style="left:332px;top:0;width:80px;height:12px;background:var(--tan)"></div>
+    <div class="b" style="left:416px;top:0;width:64px;height:12px;background:var(--lav);border-radius:0 6px 6px 0"></div>
+    <div class="ic tl" style="left:96px;top:12px;background:var(--o)"></div>
+    <div class="ic bl" style="left:96px;top:76px;background:var(--o)"></div>
+    <div class="b" style="left:96px;top:100px;width:24px;height:28px;background:var(--o)"></div>
+    <div class="ic tl" style="left:96px;top:128px;background:var(--o)"></div>
+    <div class="s" style="left:124px;top:100px;width:128px;height:28px;background:var(--peach)">NEXT</div>
+    <div class="s" style="left:256px;top:100px;width:80px;height:28px;background:var(--red)">LOVE</div>
+    <div class="s" style="left:340px;top:100px;width:80px;height:28px;background:var(--lav)">PAUSE</div>
+    <div class="s" style="left:424px;top:100px;width:56px;height:28px;padding-right:14px;background:var(--blue);border-radius:0 14px 14px 0">LESS</div>
+    <div class="t stn" style="left:136px;top:24px;width:240px">SomaFM: Groove Salad</div>
+    <div class="meter" style="right:16px;top:24px;width:70px;height:24px"><i style="height:40%"></i><i style="height:70%"></i><i style="height:55%"></i><i style="height:90%"></i><i style="height:65%"></i><i style="height:80%"></i><i style="height:45%"></i><i style="height:60%"></i><i style="height:85%"></i><i style="height:50%"></i><i style="height:30%"></i><i style="height:20%"></i></div>
+    <div class="t trk" style="left:136px;top:52px;right:16px">Boards of Canada — Roygbiv</div>
+    <div class="t meta" style="left:136px;top:74px;right:16px"><span><span style="color:var(--o)">● Live 00:42</span> &nbsp;·&nbsp; tag: ambient</span><span>Vol 70</span></div>
+
+    <div class="s" style="left:0;top:156px;width:96px;height:28px;background:var(--blue)">RECENT</div>
+    <div class="s" style="left:0;top:188px;width:96px;height:28px;background:var(--ice)">LOVED</div>
+    <div class="s" style="left:0;top:220px;width:96px;height:28px;background:var(--blue)">STATIONS</div>
+    <div class="s" style="left:0;top:252px;width:96px;height:28px;background:var(--blue)">TASTE</div>
+    <div class="s" style="left:0;top:284px;width:96px;height:28px;background:var(--tan)">SEARCH</div>
+    <div class="s" style="left:0;top:316px;width:96px;height:28px;background:var(--tan)">INFO</div>
+    <div class="s" style="left:0;top:348px;width:96px;height:28px;background:var(--peach)">SLEEP</div>
+    <div class="s" style="left:0;top:380px;width:96px;height:48px;border-bottom-left-radius:48px;background:var(--lav)">08-47</div>
+    <div class="ic bl" style="left:96px;top:392px;background:var(--lav)"></div>
+    <div class="b" style="left:96px;top:416px;width:204px;height:12px;background:var(--lav)"></div>
+    <div class="b" style="left:304px;top:416px;width:176px;height:12px;background:var(--blue);border-radius:0 6px 6px 0"></div>
+
+    <div class="t hdr" style="left:136px;top:140px;width:200px">Loved<small>12 tracks</small></div>
+    <div class="t" style="right:16px;top:139px"><span class="pill" style="background:var(--ice);height:22px;font-size:11px">/ Filter</span></div>
+    <div class="rows" style="position:absolute;left:124px;right:16px;top:168px">
+      <div class="sel"><span class="tk">Boards of Canada — Roygbiv</span><span class="st">Groove Salad</span></div>
+      <div><span class="tk">Stellardrone — Billions and Billions</span><span class="st">Deep Space One</span></div>
+      <div><span class="tk">Om Unit — Patterning</span><span class="st">NEU Radio</span></div>
+      <div><span class="tk">Hermanez — Hold Me</span><span class="st">TVN Radio</span></div>
+      <div><span class="tk">The Orb — Little Fluffy Clouds</span><span class="st">Groove Salad</span></div>
+      <div><span class="tk">Tycho — Awake</span><span class="st">Drone Zone</span></div>
+    </div>
+    <div style="position:absolute;left:124px;top:344px;display:flex;gap:4px">
+      <span class="pill" style="background:var(--tan)">Return to station</span>
+      <span class="pill" style="background:var(--tan)">More from artist</span>
+      <span class="pill" style="background:var(--red)">Remove</span>
+    </div>
+    <div style="position:absolute;left:136px;right:16px;top:384px;height:20px;display:flex;align-items:center;gap:8px">
+      <span class="lbl" style="line-height:20px">Presets</span>
+      <span style="display:flex;gap:4px"><span class="pill" style="background:var(--tan);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">1</span><span class="pill" style="background:var(--tan);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">2</span><span class="pill" style="background:var(--o);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">3</span><span class="pill" style="background:var(--tan);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">4</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">5</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">6</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">7</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">8</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">9</span></span>
+      <span class="pill" style="background:var(--o);height:20px;font-size:11px;margin-left:auto">Saved</span>
+    </div>
+  </div>
+  <p class="cap2">Unfolded on LOVED: 480 × 428. Same width as the strip; it just grows downward. All nine preset slots: 3 (orange) is the station playing, 5–9 are empty. SAVED frees the slot again (F); on an unsaved station it reads SAVE. Volume lives on the strip (VOL, mouse wheel, - and +).</p>
+</div>
+
+<div>
+  <!-- ============ CONSOLE · TASTE ============ -->
+  <div class="lx" style="width:480px;height:428px">
+    <div class="s" style="left:0;top:0;width:96px;height:152px;border-top-left-radius:48px;background:var(--o)"></div>
+    <div class="s" style="left:0;top:100px;width:96px;height:28px">SCREECH</div>
+    <div class="b" style="left:96px;top:0;width:232px;height:12px;background:var(--o)"></div>
+    <div class="b" style="left:332px;top:0;width:80px;height:12px;background:var(--tan)"></div>
+    <div class="b" style="left:416px;top:0;width:64px;height:12px;background:var(--lav);border-radius:0 6px 6px 0"></div>
+    <div class="ic tl" style="left:96px;top:12px;background:var(--o)"></div>
+    <div class="ic bl" style="left:96px;top:76px;background:var(--o)"></div>
+    <div class="b" style="left:96px;top:100px;width:24px;height:28px;background:var(--o)"></div>
+    <div class="ic tl" style="left:96px;top:128px;background:var(--o)"></div>
+    <div class="s" style="left:124px;top:100px;width:128px;height:28px;background:var(--peach)">NEXT</div>
+    <div class="s" style="left:256px;top:100px;width:80px;height:28px;background:#FF8A8A">LOVED</div>
+    <div class="s" style="left:340px;top:100px;width:80px;height:28px;background:var(--lav)">PAUSE</div>
+    <div class="s" style="left:424px;top:100px;width:56px;height:28px;padding-right:14px;background:var(--blue);border-radius:0 14px 14px 0">LESS</div>
+    <div class="t stn" style="left:136px;top:24px;width:240px">NTS Radio 1</div>
+    <div class="meter" style="right:16px;top:24px;width:70px;height:24px"><i style="height:60%"></i><i style="height:80%"></i><i style="height:75%"></i><i style="height:95%"></i><i style="height:70%"></i><i style="height:60%"></i><i style="height:55%"></i><i style="height:65%"></i><i style="height:45%"></i><i style="height:35%"></i><i style="height:30%"></i><i style="height:25%"></i></div>
+    <div class="t trk" style="left:136px;top:52px;right:16px">Floating Points — Silhouettes (I, II &amp; III)</div>
+    <div class="t meta" style="left:136px;top:74px;right:16px"><span><span style="color:var(--o)">● Live 12:08</span> &nbsp;·&nbsp; a night favourite</span><span>Vol 70</span></div>
+
+    <div class="s" style="left:0;top:156px;width:96px;height:28px;background:var(--blue)">RECENT</div>
+    <div class="s" style="left:0;top:188px;width:96px;height:28px;background:var(--blue)">LOVED</div>
+    <div class="s" style="left:0;top:220px;width:96px;height:28px;background:var(--blue)">STATIONS</div>
+    <div class="s" style="left:0;top:252px;width:96px;height:28px;background:var(--ice)">TASTE</div>
+    <div class="s" style="left:0;top:284px;width:96px;height:28px;background:var(--tan)">SEARCH</div>
+    <div class="s" style="left:0;top:316px;width:96px;height:28px;background:var(--tan)">INFO</div>
+    <div class="s" style="left:0;top:348px;width:96px;height:28px;background:var(--peach)">SLEEP</div>
+    <div class="s" style="left:0;top:380px;width:96px;height:48px;border-bottom-left-radius:48px;background:var(--lav)">08-47</div>
+    <div class="ic bl" style="left:96px;top:392px;background:var(--lav)"></div>
+    <div class="b" style="left:96px;top:416px;width:204px;height:12px;background:var(--lav)"></div>
+    <div class="b" style="left:304px;top:416px;width:176px;height:12px;background:var(--blue);border-radius:0 6px 6px 0"></div>
+
+    <div class="t hdr" style="left:136px;top:140px;width:300px">Taste<small>41 h all time · 6 h this week · 12 loved</small></div>
+
+    <div style="position:absolute;left:136px;right:16px;top:168px">
+      <div class="lbl" style="margin-bottom:6px">When you listen</div>
+      <div style="display:grid;grid-template-columns:64px 1fr 36px;grid-auto-rows:14px;gap:4px 8px;align-items:center;font-size:11px;color:var(--lav);text-transform:uppercase;letter-spacing:.06em">
+        <span>Morning</span><span class="bar2"><i style="width:12%;background:var(--tan)"></i></span><span style="text-align:right">12%</span>
+        <span>Day</span><span class="bar2"><i style="width:31%;background:var(--tan)"></i></span><span style="text-align:right">31%</span>
+        <span>Evening</span><span class="bar2"><i style="width:22%;background:var(--tan)"></i></span><span style="text-align:right">22%</span>
+        <span style="color:var(--o)">Night</span><span class="bar2"><i style="width:35%;background:var(--o)"></i></span><span style="text-align:right;color:var(--o)">35%</span>
+      </div>
+    </div>
+
+    <div style="position:absolute;left:136px;width:156px;top:272px">
+      <div class="lbl" style="margin-bottom:6px">Artists · 90 days</div>
+      <div style="font-size:13px;line-height:18px;color:var(--ice)">
+        <div style="display:flex;justify-content:space-between"><span>Floating Points</span><span style="color:var(--lav)">14</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Boards of Canada</span><span style="color:var(--lav)">11</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Four Tet</span><span style="color:var(--lav)">9</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Om Unit</span><span style="color:var(--lav)">6</span></div>
+              </div>
+    </div>
+
+    <div style="position:absolute;left:312px;right:16px;top:272px">
+      <div class="lbl" style="margin-bottom:6px">Tags you lean on</div>
+      <div style="display:grid;grid-template-columns:76px 1fr;grid-auto-rows:18px;gap:0 8px;align-items:center;font-size:11px;color:var(--lav);text-transform:uppercase;letter-spacing:.06em">
+        <span>Ambient</span><span class="bar2"><i style="width:100%;background:var(--blue)"></i></span>
+        <span>Electronic</span><span class="bar2"><i style="width:78%;background:var(--blue)"></i></span>
+        <span>Jazz</span><span class="bar2"><i style="width:52%;background:var(--blue)"></i></span>
+        <span>Downtempo</span><span class="bar2"><i style="width:40%;background:var(--blue)"></i></span>
+      </div>
+    </div>
+
+    <div style="position:absolute;left:136px;right:16px;top:384px;height:20px;display:flex;align-items:center;gap:8px">
+      <span class="lbl" style="line-height:20px">Presets</span>
+      <span style="display:flex;gap:4px"><span class="pill" style="background:var(--tan);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">1</span><span class="pill" style="background:var(--tan);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">2</span><span class="pill" style="background:var(--tan);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">3</span><span class="pill" style="background:var(--tan);color:#000;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">4</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">5</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">6</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">7</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">8</span><span class="pill" style="background:#262626;color:#666;width:20px;height:20px;padding:0;justify-content:center;font-size:11px">9</span></span>
+      <span class="pill" style="background:var(--tan);height:20px;font-size:11px;margin-left:auto">Save</span>
+    </div>
+  </div>
+  <p class="cap2">Unfolded on TASTE. The presets row stays put on every tab; this station isn't saved, so the pill reads SAVE. LOVE becomes LOVED (brighter) when the current track is in your loved list.</p>
+</div>
+</div>
