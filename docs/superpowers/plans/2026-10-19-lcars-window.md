@@ -296,7 +296,20 @@
   - Button colours from the mockup: LOVED `#FF8A8A`, RESUME `#F0D0F0`, dead `#3A2020` with `#7A5050` text.
 - Any other mockup value found off-grid snaps to the nearest multiple of 4 that keeps the spec's gaps. List each snap in the report.
 - States follow the spec's state table. `stopped` keeps the orange frame and puts `STOPPED` in red-alert text. Its track row reads `mpv stopped · run screech doctor` (with `Fatal` appended when present). Only MORE is live. Offline switches the frame to the `--a1/--a2/--a3` palette: NEXT reads `RETRY NOW`, LOVE is dead, and the status reads `■ OFFLINE · retrying in n s` from `RetryAtMs`. The `BREAK` chip is a 14-tall coral pill at the status row's start, before the state word. Feedback replaces the status row's left side while present. The startup notice shows in the track row until the first intent.
-- The status text is `● LIVE m:ss` (`h:mm:ss` from an hour), computed in the page from `PlayStartMs`. `❚❚ PAUSED m:ss` counts from `PausedAtMs`. The note after `·` is, in priority order: feedback, `Note`, sleep (`sleep n min`), then `Reason`.
+- Rows per state (station row / track row / status word). The state word's colour is listed; everything else keeps the strip's normal colours unless noted.
+
+  | State | Station row | Track row | Status word |
+  |---|---|---|---|
+  | tuning | name at 55% opacity, fading in to 100% over 400 ms | the pick reason, in `#7A99B3` | `◌ TUNING` (peach) |
+  | reconnecting, resuming | full opacity | the last track if there is one, else the reason | `◌ RECONNECTING` / `◌ RESUMING` (peach) |
+  | seeking | unchanged | unchanged | `◌ SEEKING` (peach) |
+  | buffering | unchanged | unchanged | `◌ BUFFERING` (peach, 0.5 Hz pulse) |
+  | offline | `--a3` | `No connection. Stations aren't being blamed for it.` in `--a2` | — |
+  | no station yet (first launch, before the first pick lands) | `SCREECH` in tan | `Finding a station` + ellipsis | `◌ TUNING` |
+
+  - When `Virgin`, the search hint reads `type a genre or artist · NEXT for a wildcard`, the terminal's wording with the window's key.
+  - When `Syncing`, the status note reads `SYNCING DIRECTORY…`. It ranks below feedback and `Note` but above sleep and the reason.
+- The status text is `● LIVE m:ss` (`h:mm:ss` from an hour), computed in the page from `PlayStartMs`. `❚❚ PAUSED m:ss` counts from `PausedAtMs`. The note after `·` is, in priority order: feedback, `Note`, `SYNCING DIRECTORY…`, sleep (`sleep n min`), then `Reason`.
 - Meter: 12 bars, 4 wide, 2 apart, inside the 70 × 24 box. Height = `max(2px, level × texture(bar, t) × 24)`, where `texture` is a smooth deterministic noise in 0.35–1.0 per bar. It eases toward new readings on `requestAnimationFrame`. Left bars take `L` and right bars take `R`. Paused, tuning and offline show the 2 px floor. It runs under reduced motion too.
 - Slider: pointer events only (`pointerdown` captures the pointer, `pointermove`, `pointerup`), and it sends `SetVolume` at most every 50 ms plus once on release. There's no wheel listener, and `wheel` events on the window are `preventDefault`ed only when `ctrlKey` is held (blocking zoom).
 - Page hygiene: `user-select:none` everywhere except the search input; `cursor:default`; no scrollbars; `contextmenu` prevented; black `html` background; `--wails-draggable:drag` on the top bar and the left block's top 100 px, and `no-drag` on every control.
