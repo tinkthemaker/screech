@@ -59,7 +59,7 @@
 | `cmd/screech-gui/shell.go` | `Window` implementation: fold/unfold geometry, placement save/restore, off-screen check |
 | `cmd/screech-gui/handoff.go` | Second-launch handoff: find the window, bring it forward, or say "terminal" |
 | `cmd/screech-gui/winapi.go` | The few user32 calls (FindWindowW, ShowWindow, SetForegroundWindow, MonitorFromPoint, GetMonitorInfoW) |
-| `cmd/screech-gui/winres/winres.json`, `icon.png`, `rsrc_windows_amd64.syso`, `rsrc_windows_arm64.syso` | Icon (resource ID 3, which Wails loads) and the per-monitor-v2 DPI manifest |
+| `cmd/screech-gui/winres/winres.json`, `winres/icon.png`, `cmd/screech-gui/screech-gui-rsrc_windows_{amd64,arm64}.syso` | Icon (resource ID 3, which Wails loads) and the per-monitor-v2 DPI manifest. The `.syso` files must sit in the package directory to link: `go-winres make --in cmd/screech-gui/winres/winres.json --out cmd/screech-gui/screech-gui-rsrc --arch amd64,arm64` (`--out` is a filename prefix) |
 | `.github/workflows/ci.yml`, `release.yml` | Windows analysis lines, GUI build, zips, Scoop `bin` + `shortcuts` |
 
 ---
@@ -289,7 +289,12 @@
 
 **Interfaces:**
 - Consumes: `Bridge` JS names (Task 5), fixtures (Task 6).
-- Geometry: the strip markup reproduces the mockup's playing strip exactly. Left block `0,0,96,128`, radius 48. Top bar segments `96–328`, `332–412`, `416–480`, 12 tall. Inner curves at `96,12` and `96,76`. Button bar at y 100–128: spacer `96–120`, NEXT `124–252`, LOVE `256–336`, PAUSE `340–420`, MORE `424–480` (rounded end, 14 padding). Station text at `136,24`, width 240 (the meter takes `right:16`, 70 × 24). Track at `136,52`, right 16. Status at `136,74`, right 16. The volume control sits inside the status row's right end: `VOL` label, 8 gap, 88 × 6 track (radius 3, `#333`, orange fill), thumb 6 × 14 tan radius 3, 8 gap, value right-aligned in a 16 px box. The click target is the full 14 px row over the track.
+- Geometry: the strip markup reproduces the mockup's playing strip exactly. Left block `0,0,96,128`, radius 48. Top bar segments `96–328`, `332–412`, `416–480`, 12 tall. Inner curves at `96,12` and `96,76`. Button bar at y 100–128: spacer `96–120`, NEXT `124–252`, LOVE `256–336`, PAUSE `340–420`, MORE `424–480` (rounded end, 14 padding). Station text box `136–376` × `24–48`. Track box `136–464` × `52–70`. Status row `136–464` × `74–88`.
+- Grid snaps: a few mockup values are off the 4-px grid; these are the corrected values, and nothing else moves.
+  - Meter box `392–464` × `24–48` (72 wide, not 70). Its 12 bars (4 wide, 2 apart, 70 in total) sit centred inside, 1 px in from each side.
+  - Volume control: `VOL` label box `320–344` (text right-aligned), track `352–440` (88 × 6 centred in the 14 px row, radius 3, `#333`, orange fill), value box `448–464` (right-aligned). The status text box ends at `312`. The thumb is 6 × 14, tan, radius 3. The click/drag target is the full `352–440` × `74–88`.
+  - Button colours from the mockup: LOVED `#FF8A8A`, RESUME `#F0D0F0`, dead `#3A2020` with `#7A5050` text.
+- Any other mockup value found off-grid snaps to the nearest multiple of 4 that keeps the spec's gaps. List each snap in the report.
 - States follow the spec's state table. `stopped` keeps the orange frame and puts `STOPPED` in red-alert text. Its track row reads `mpv stopped · run screech doctor` (with `Fatal` appended when present). Only MORE is live. Offline switches the frame to the `--a1/--a2/--a3` palette: NEXT reads `RETRY NOW`, LOVE is dead, and the status reads `■ OFFLINE · retrying in n s` from `RetryAtMs`. The `BREAK` chip is a 14-tall coral pill at the status row's start, before the state word. Feedback replaces the status row's left side while present. The startup notice shows in the track row until the first intent.
 - The status text is `● LIVE m:ss` (`h:mm:ss` from an hour), computed in the page from `PlayStartMs`. `❚❚ PAUSED m:ss` counts from `PausedAtMs`. The note after `·` is, in priority order: feedback, `Note`, sleep (`sleep n min`), then `Reason`.
 - Meter: 12 bars, 4 wide, 2 apart, inside the 70 × 24 box. Height = `max(2px, level × texture(bar, t) × 24)`, where `texture` is a smooth deterministic noise in 0.35–1.0 per bar. It eases toward new readings on `requestAnimationFrame`. Left bars take `L` and right bars take `R`. Paused, tuning and offline show the 2 px floor. It runs under reduced motion too.
@@ -313,8 +318,14 @@
   - Sidebar tabs: 96 × 28 at y 156, 188, 220, 252 (RECENT, LOVED, STATIONS, TASTE: blue, ice when selected), 284 and 316 (SEARCH, INFO: tan), and 348 (SLEEP: peach).
   - Bottom elbow `0,380,96,48`, bottom-left radius 48, lilac. Its label is the local time `HH-MM`, updated each minute.
   - Inner curve `96,392`. Bottom bar segments `96–300` (lilac) and `304–480` (blue, right radius 6), 12 tall at y 416. An inner curve at `96,128` joins the strip's left block, which grows to 152 tall.
-- The content area runs from y 140 to 368, x 124/136 to 464. Header at `136,140` (16/20 type plus small count), with the filter pill right-aligned at top 139. Rows are 28 tall, 4 apart, starting at y 168, filled ice when selected, with text at 136 and origin right-aligned.
-  - The action pills sit at y 344, which holds four rows above them. Lists scroll inside `168–336` with no visible scrollbar, and the selected row is scrolled into view.
+- The content area runs from y 140 to 368, x 124/136 to 464.
+  - Header box `136–464` × `140–160` (16/20 type plus a small count). The filter pill is 20 tall at `140–160` and right-aligned to 464; the mockup's 139/22 snaps to the grid.
+  - Rows are 28 tall and contiguous, as in the mockup, starting at y 168 with x `124–464`. The selected row is filled ice with radius 14. Text sits at 136, with the origin right-aligned to 452.
+  - Lists scroll inside `168–336` (six rows) with no visible scrollbar, and the selected row is scrolled into view. Action pills sit at `344–368`, 24 tall, from x 124, 4 apart.
+- TASTE on the grid: section labels are 16-tall boxes. Rows use a 16-px pitch (a 12-tall box, 4 gap) with 8-tall bars centred in them.
+  - "When you listen": label `168–184`, then four rows from 188 (ending 248).
+  - Artists (`136–292`) and tags (`312–464`): labels `264–280`, then up to five rows from 284 (ending by 364).
+  - The mockup's 6-px label margins become 4.
   - Footer at y 384–404: `PRESETS` label at 136, nine 20-px slots 4 apart, and SAVE/SAVED pill right-aligned at 464.
   - Slot colours: saved tan, current orange, empty `#262626` with `#666` digits. Clicking a saved slot calls `RecallPreset`, and clicking SAVE calls `TogglePreset`.
 - Views (data from the bridge; wording from the TUI views):
@@ -387,6 +398,11 @@
      - `*StartError`: a message box (title "Screech", `MB_ICONERROR`) with `err.Error()`, exit 1.
   3. Build `session.New(rt.Core, rt.Player, session.Options{AutoHopAds: cfg.AutoHopAds, SyncLimit: cfg.SyncLimit, Notice: rt.Notice, Dot: "·"})`, the bridge and the runner.
   4. `wails.Run` with Task 1's options. Add `StartHidden: true`; `Height` from the saved fold state; `OnStartup` (store ctx, `SetEmitter`, `runner.Start()`); `OnDomReady` (restore placement, `WindowShow`); `OnBeforeClose` (save placement, `runner.Stop()`, return false); `OnShutdown` (`rt.Close()`); and `WebviewUserDataPath: filepath.Join(cfg.DataDir, "webview")`. Pass reduced motion to the page as `?reduced=1` on the start URL.
+- Icon redraw: the spike's icon is a plain L. Replace it with a real LCARS elbow at 256 × 256 on transparent, then regenerate the `.syso` files.
+  - The elbow is an orange `#FF9900` vertical block 96 wide joined to a horizontal bar 48 tall across the top.
+  - Its outer top-left corner is a quarter circle of radius 96, and the inner joint is a concave quarter circle of radius 40.
+  - It's inset 16 px from the canvas edges and must read at 16 × 16: render it at 16, 24, 32 and 48 and check by eye that the curve survives.
+  - Also emit 16/32/48 PNGs into the icon group.
 - `handoff(f windowFinder, wait time.Duration) bool` polls `f.Find("ScreechLCARS")` every 100 ms until `wait` runs out. Review Focus 3: a window still starting gets the full wait before the terminal is blamed.
 - `shell` implements `gui.Window`:
   - `SetUnfolded(true)` grows downward. If the unfolded bottom would cross the monitor work area's bottom, it moves up by the overflow and remembers the shift. `SetUnfolded(false)` shrinks and moves back down by the remembered shift. Either way it persists `WindowPlacement`.
