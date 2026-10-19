@@ -26,19 +26,19 @@ func (m Model) infoRows(iw, budget int) []string {
 	}
 
 	rows := []string{m.th.Accent.Bold(true).Render(
-		runewidth.Truncate(cleanStationName(m.st.Name), iw, m.th.G.Ellipsis))}
+		runewidth.Truncate(cleanStationName(m.s.Station.Name), iw, m.th.G.Ellipsis))}
 
 	from := []string{}
-	if c := strings.TrimSpace(m.st.Country); c != "" {
+	if c := strings.TrimSpace(m.s.Station.Country); c != "" {
 		from = append(from, core.CleanText(c))
 	}
-	if codec := strings.ToUpper(strings.TrimSpace(m.st.Codec)); codec != "" || m.st.Bitrate > 0 {
+	if codec := strings.ToUpper(strings.TrimSpace(m.s.Station.Codec)); codec != "" || m.s.Station.Bitrate > 0 {
 		stream := codec
-		if m.st.Bitrate > 0 {
+		if m.s.Station.Bitrate > 0 {
 			if stream != "" {
 				stream += " "
 			}
-			stream += fmt.Sprintf("%dK", m.st.Bitrate)
+			stream += fmt.Sprintf("%dK", m.s.Station.Bitrate)
 		}
 		from = append(from, stream)
 	}
@@ -48,14 +48,14 @@ func (m Model) infoRows(iw, budget int) []string {
 	}
 	rows = append(rows, row("FROM", fromText))
 
-	tags := strings.Join(m.st.TagList(), ", ")
+	tags := strings.Join(m.s.Station.TagList(), ", ")
 	tags = strings.TrimSpace(core.CleanText(tags))
 	if tags == "" {
 		tags = "none listed"
 	}
 	rows = append(rows, row("TAGS", tags))
 
-	home := strings.TrimSpace(core.CleanText(m.st.Homepage))
+	home := strings.TrimSpace(core.CleanText(m.s.Station.Homepage))
 	home = strings.TrimPrefix(home, "https://")
 	home = strings.TrimPrefix(home, "http://")
 	home = strings.TrimSuffix(home, "/")
@@ -65,7 +65,7 @@ func (m Model) infoRows(iw, budget int) []string {
 	rows = append(rows, row("HOME", home))
 
 	stream := "none listed"
-	if u, err := url.Parse(m.st.StreamURL()); err == nil && u.Host != "" {
+	if u, err := url.Parse(m.s.Station.StreamURL()); err == nil && u.Host != "" {
 		stream = u.Host
 	}
 	rows = append(rows, row("STREAM", stream))
@@ -119,14 +119,14 @@ func (m Model) infoRows(iw, budget int) []string {
 		rows = append(rows, m.matchRow(iw, labelW))
 	}
 
-	if slot := m.currentSlot(); slot > 0 {
+	if slot := m.s.CurrentSlot(); slot > 0 {
 		rows = append(rows, row("PRESET", fmt.Sprintf("slot %d", slot)))
 	} else {
 		rows = append(rows, row("PRESET", "not saved"+dot+"F saves"))
 	}
 
-	if m.st.FailCount > 0 {
-		rows = append(rows, row("STRIKES", fmt.Sprintf("%d of %d", m.st.FailCount, core.MaxFailCount)))
+	if m.s.Station.FailCount > 0 {
+		rows = append(rows, row("STRIKES", fmt.Sprintf("%d of %d", m.s.Station.FailCount, core.MaxFailCount)))
 	}
 
 	if len(rows) > budget {

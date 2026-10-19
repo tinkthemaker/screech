@@ -25,7 +25,7 @@ func offline(t *testing.T, s State) State {
 	t.Helper()
 	s.Phase = Offline
 	s.retryN = 1
-	s.retryAt = s.Now.Add(20 * time.Second)
+	s.RetryAt = s.Now.Add(20 * time.Second)
 	return s
 }
 
@@ -398,7 +398,7 @@ func TestPauseWhileOfflineStopsRetrying(t *testing.T) {
 	if s.Phase != Paused {
 		t.Fatalf("TogglePause while offline should pause, got %v", s.Phase)
 	}
-	if s.retryN != 0 || !s.retryAt.IsZero() {
+	if s.retryN != 0 || !s.RetryAt.IsZero() {
 		t.Fatal("pausing an outage should disarm the retry")
 	}
 	playsBefore := len(pl.callsList())
@@ -423,12 +423,12 @@ func TestSleepExpiryWhileOffline(t *testing.T) {
 	s = drive(t, s, CycleSleep{})
 	// A retry armed for later at the expiry instant is the normal real-
 	// world state — not one that raced ahead of the timer.
-	s.retryAt = s.SleepAt.Add(30 * time.Second)
+	s.RetryAt = s.SleepAt.Add(30 * time.Second)
 	s = drive(t, s, Tick{Now: s.SleepAt.Add(time.Second)})
 	if s.Phase != Paused {
 		t.Fatalf("expiry while offline should pause, got %v", s.Phase)
 	}
-	if s.retryN != 0 || !s.retryAt.IsZero() {
+	if s.retryN != 0 || !s.RetryAt.IsZero() {
 		t.Fatal("the parked outage must not keep a retry armed")
 	}
 	s = drive(t, s, Tick{Now: s.Now.Add(2 * time.Minute)})
@@ -449,7 +449,7 @@ func TestSleepExpiryRestoresVolumeFromAnyPhase(t *testing.T) {
 			s, _ = offlineStreak(t, s)
 			// Keep the armed retry out of the timer's way: it would lap
 			// at the -10s tick and move the phase before expiry.
-			s.retryAt = s.SleepAt.Add(30 * time.Second)
+			s.RetryAt = s.SleepAt.Add(30 * time.Second)
 		}
 		if ph == Paused {
 			s = drive(t, s, TogglePause{})

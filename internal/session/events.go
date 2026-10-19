@@ -75,7 +75,7 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 			s.haveLastGood = true
 			if s.retryN > 0 {
 				s.retryN = 0
-				s.retryAt = time.Time{}
+				s.RetryAt = time.Time{}
 				s.setFeedback("ONLINE  Signal restored")
 			}
 			s.Note = ""

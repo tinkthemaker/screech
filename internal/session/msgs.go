@@ -34,6 +34,13 @@ type RefreshPresets struct{}
 type Touch struct{} // any sign of life; clears the startup notice
 type Quit struct{}
 
+// Notify carries face-originated text into the session's note/feedback
+// lines — the library's "removed" confirmations, overlay errors — so the
+// face never writes feedback state of its own.
+type Notify struct {
+	Feedback, Note string
+}
+
 // Tick carries the face's clock; the connectivity watchdogs and the sleep
 // countdown run off it.
 type Tick struct{ Now time.Time }
@@ -87,6 +94,7 @@ func (Wildcard) isMsg()       {}
 func (RefreshPresets) isMsg() {}
 func (Touch) isMsg()          {}
 func (Quit) isMsg()           {}
+func (Notify) isMsg()         {}
 func (Tick) isMsg()           {}
 func (Tuned) isMsg()          {}
 func (Seeded) isMsg()         {}

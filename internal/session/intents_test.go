@@ -67,6 +67,26 @@ func TestTouchClearsNotice(t *testing.T) {
 	}
 }
 
+// Notify carries face-originated text: a feedback string timestamps like
+// setFeedback, a note lands on the note line, and either part is optional.
+func TestNotifySetsFeedbackAndNote(t *testing.T) {
+	s, _ := testState(t)
+	s = drive(t, s, Notify{Feedback: "LIBRARY  Track removed", Note: "could not open history"})
+	if s.Feedback != "LIBRARY  Track removed" {
+		t.Fatalf("feedback %q", s.Feedback)
+	}
+	if s.FeedbackAt != s.Now {
+		t.Fatal("feedback should timestamp off the session clock")
+	}
+	if s.Note != "could not open history" {
+		t.Fatalf("note %q", s.Note)
+	}
+	s = drive(t, s, Notify{Feedback: "STATIONS  Removed"})
+	if s.Feedback != "STATIONS  Removed" || s.Note != "could not open history" {
+		t.Fatalf("a lone feedback must not touch the note: %q %q", s.Feedback, s.Note)
+	}
+}
+
 func TestTogglePresetSavesThenClears(t *testing.T) {
 	s, _ := testState(t)
 	s = playing(t, s)

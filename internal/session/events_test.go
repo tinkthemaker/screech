@@ -112,12 +112,12 @@ func TestEventPlayingClearsOffline(t *testing.T) {
 	s, _ := testState(t)
 	s = playing(t, s)
 	s, _ = offlineStreak(t, s)
-	s = drive(t, s, Tick{Now: s.retryAt.Add(time.Second)})
+	s = drive(t, s, Tick{Now: s.RetryAt.Add(time.Second)})
 	s = drive(t, s, PlayerEvent(player.Event{Type: player.EventPlaying}))
 	if s.Phase != Playing {
 		t.Fatalf("a lock should restore Playing, got %v", s.Phase)
 	}
-	if s.retryN != 0 || !s.retryAt.IsZero() {
+	if s.retryN != 0 || !s.RetryAt.IsZero() {
 		t.Fatal("lock should clear offline bookkeeping")
 	}
 	if !strings.Contains(s.Feedback, "ONLINE") {

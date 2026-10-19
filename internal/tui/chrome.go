@@ -8,6 +8,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // --- chrome: header bar, rule, footer strip ---
@@ -25,7 +27,7 @@ func (m Model) headerBar() string {
 	// matters more than the tagline — and it shows whenever it fits rather
 	// than behind a fixed width cutoff.
 	sub := "  PERSONAL RADIO"
-	if m.syncing {
+	if m.s.Syncing {
 		sub = "  SYNCING DIRECTORY" + m.th.G.Ellipsis
 	}
 	sub = scaleStyle(m.th.Dim, m.settleScale()).Render(sub)
@@ -36,10 +38,10 @@ func (m Model) headerBar() string {
 	status := ""
 	statusStyle := m.th.Dim
 	switch {
-	case m.ph == phOffline:
+	case m.s.Phase == session.Offline:
 		status = "OFFLINE"
 		statusStyle = m.th.Love // coral is the warning color
-	case m.ph == phBuffer:
+	case m.s.Phase == session.Buffering:
 		status = "BUFFERING" + m.th.G.Ellipsis
 		// Buffering blinks by style, not text: an ellipsis that comes and
 		// goes would make the right-aligned header jitter a column on
@@ -49,39 +51,39 @@ func (m Model) headerBar() string {
 		} else {
 			statusStyle = m.th.Accent
 		}
-	case m.ph == phTune && m.reconnecting:
+	case m.s.Phase == session.Tuning && m.s.Reconnecting:
 		status = "RECONNECTING" + m.th.G.Ellipsis
-	case m.ph == phTune && m.resuming:
+	case m.s.Phase == session.Tuning && m.s.Resuming:
 		status = "RESUMING" + m.th.G.Ellipsis
-	case m.seeking:
+	case m.s.Seeking:
 		status = "SEEKING" + m.th.G.Ellipsis
-	case m.ph == phPaused:
+	case m.s.Phase == session.Paused:
 		status = "PAUSED"
 		statusStyle = m.th.AccentDim // held, not lit: neither LIVE nor warning
-	case m.ph == phTune:
+	case m.s.Phase == session.Tuning:
 		status = "TUNING" + m.th.G.Ellipsis
-	case m.ph == phPlay && m.haveSt:
+	case m.s.Phase == session.Playing && m.s.HaveStation:
 		status = m.th.G.Knob + " LIVE"
 		statusStyle = m.th.Accent // live: the readout is the one accent-lit instrument
-	case m.ph == phDead:
+	case m.s.Phase == session.Stopped:
 		status = "STOPPED"
 		statusStyle = m.th.Love
 	}
 	breakChip := ""
-	if m.suspect && m.ph == phPlay && m.haveSt {
+	if m.s.Suspect && m.s.Phase == session.Playing && m.s.HaveStation {
 		breakChip = m.th.Love.Bold(true).Render("  BREAK") // coral is the warning color
 	}
 	statusR := statusStyle.Render(status)
 	right := statusR
-	if m.ph == phPlay && m.haveSt {
+	if m.s.Phase == session.Playing && m.s.HaveStation {
 		if r := m.readout(); r != "" {
 			right += statusStyle.Render("  " + r)
 		}
 	}
-	if m.ph == phPaused {
+	if m.s.Phase == session.Paused {
 		// Time since the hold, on the same degradation ladder as LIVE's
 		// readout — first thing dropped when the chrome runs out of room.
-		right += statusStyle.Render("  " + fmtClock(m.now.Sub(m.pausedAt)))
+		right += statusStyle.Render("  " + fmtClock(m.now.Sub(m.s.PausedAt)))
 	}
 	right += breakChip
 
@@ -105,14 +107,14 @@ func (m Model) headerBar() string {
 
 func (m Model) readout() string {
 	parts := []string{}
-	if c := strings.ToUpper(m.st.Codec); c != "" {
+	if c := strings.ToUpper(m.s.Station.Codec); c != "" {
 		parts = append(parts, c)
 	}
-	if m.st.Bitrate > 0 {
-		parts = append(parts, fmt.Sprintf("%dK", m.st.Bitrate))
+	if m.s.Station.Bitrate > 0 {
+		parts = append(parts, fmt.Sprintf("%dK", m.s.Station.Bitrate))
 	}
-	if !m.playStart.IsZero() {
-		parts = append(parts, fmtClock(m.now.Sub(m.playStart)))
+	if !m.s.PlayStart.IsZero() {
+		parts = append(parts, fmtClock(m.now.Sub(m.s.PlayStart)))
 	}
 	return strings.Join(parts, " "+m.th.G.Dot+" ")
 }
@@ -236,41 +238,41 @@ func (m Model) footerItems() []footerItem {
 	if m.volumeOpen {
 		return []footerItem{item("LEFT/RIGHT", "adjust"), item("V", "close")}
 	}
-	if m.ph == phDead {
+	if m.s.Phase == session.Stopped {
 		// Space/l/f// do nothing while the backend is dead; the strip shows
 		// only the keys that still work.
 		return []footerItem{item("H", "library"), item("T", "theme"), item("?", "help"), footerItem{"Q", "quit", 0}}
 	}
 	save := "save"
-	if slot := m.currentSlot(); slot > 0 {
+	if slot := m.s.CurrentSlot(); slot > 0 {
 		save = fmt.Sprintf("preset %d", slot)
 	}
 	love := "love"
-	if m.lovedTrack {
+	if m.s.LovedTrack {
 		love = "loved"
 	}
 	skip := "skip"
-	if m.ph == phOffline {
+	if m.s.Phase == session.Offline {
 		skip = "retry"
 	}
 	items := []footerItem{
 		{"SPACE", skip, 2}, {"L", love, 3}, {"F", save, 3},
 	}
-	if m.haveSt {
+	if m.s.HaveStation {
 		pauseLabel, pausePrio := "pause", 2
-		if m.ph == phPaused {
+		if m.s.Phase == session.Paused {
 			pauseLabel, pausePrio = "resume", 3
 		}
 		items = append(items, footerItem{"P", pauseLabel, pausePrio})
 	}
 	items = append(items,
 		footerItem{"/", "discover", 1}, footerItem{"H", "library", 1},
-		footerItem{"V", fmt.Sprintf("%d%%", m.volume), 3})
-	if !m.sleepAt.IsZero() {
+		footerItem{"V", fmt.Sprintf("%d%%", m.s.Volume), 3})
+	if !m.s.SleepAt.IsZero() {
 		// Whole minutes while there's one to round up to, seconds for the
 		// last stretch — matching the fade the listener hears.
 		var text string
-		if left := m.sleepAt.Sub(m.now); left >= time.Minute {
+		if left := m.s.SleepAt.Sub(m.now); left >= time.Minute {
 			text = fmt.Sprintf("sleep %dm", int(left.Minutes()+0.999))
 		} else {
 			text = fmt.Sprintf("sleep %ds", int(left.Seconds()))
@@ -300,7 +302,7 @@ func (m Model) footerBar() string {
 				b.WriteString(fill.Render(sep))
 			}
 			keyStyle := key
-			if m.lovedTrack && it.key == "L" {
+			if m.s.LovedTrack && it.key == "L" {
 				keyStyle = keyStyle.Foreground(m.th.Love.GetForeground())
 			}
 			b.WriteString(keyStyle.Render(" " + it.key + " "))

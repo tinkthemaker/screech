@@ -3,10 +3,11 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 func themeChoiceIndex(name string) int {
@@ -32,10 +33,7 @@ func (m Model) handleThemeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	choices := ThemeChoices()
 	switch key {
 	case "ctrl+c", "q":
-		m.quitting = true
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
+		return m.quit()
 	case "esc", "t", "T":
 		m.previewTheme(m.themeOriginal)
 		m.themeOpen = false
@@ -51,12 +49,10 @@ func (m Model) handleThemeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.previewTheme(choices[m.themePos].ID)
 		if err := m.core.SetTheme(m.themeName); err != nil {
-			m.note = "could not save theme " + m.th.G.Dot + " " + err.Error()
-			return m, nil
+			return m.intent(session.Notify{Note: "could not save theme " + m.th.G.Dot + " " + err.Error()})
 		}
 		m.themeOpen = false
-		m.setFeedback("THEME  " + choices[m.themePos].Label + " applied")
-		return m, nil
+		return m.intent(session.Notify{Feedback: "THEME  " + choices[m.themePos].Label + " applied"})
 	}
 	if len(key) == 1 && key[0] >= '1' && int(key[0]-'1') < len(choices) {
 		m.themePos = int(key[0] - '1')

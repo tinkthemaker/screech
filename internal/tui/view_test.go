@@ -14,6 +14,7 @@ import (
 
 	"github.com/tinkthemaker/screech/internal/core"
 	"github.com/tinkthemaker/screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 type stubPlayer struct {
@@ -76,49 +77,6 @@ func (s *stubPlayer) Close() error {
 	return nil
 }
 
-// emit pushes an event the way a live backend would.
-func (s *stubPlayer) emit(ev player.Event) {
-	s.mu.Lock()
-	ch := s.ch
-	s.mu.Unlock()
-	ch <- ev
-}
-
-func (s *stubPlayer) lastPlay() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.playURLs) == 0 {
-		return ""
-	}
-	return s.playURLs[len(s.playURLs)-1]
-}
-
-func (s *stubPlayer) restartCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.restarts
-}
-
-func (s *stubPlayer) volumeLevel() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.volume
-}
-
-func (s *stubPlayer) failPlay(err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.playErr = err
-}
-
-// callsList returns the ordered command log — tests assert pause-then-
-// restore and resume-vs-reload order without parsing playURLs alone.
-func (s *stubPlayer) callsList() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.calls...)
-}
-
 func testModel(t *testing.T) Model {
 	t.Helper()
 	c, err := core.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -161,14 +119,15 @@ func TestViewNeverOverflows(t *testing.T) {
 		m.start = m.now.Add(-time.Minute)
 		st := core.SeedStations()[1]
 		st.Name = "The Interminable Frequencies Of The Outer Aetheric Reaches International"
-		m.st = st
-		m.haveSt = true
-		m.ph = phPlay
-		m.playStart = m.now.Add(-90 * time.Minute)
+		m.s.Station = st
+		m.s.HaveStation = true
+		m.s.Phase = session.Playing
+		m.s.PlayStart = m.now.Add(-90 * time.Minute)
 		m.setTrack("An Artist With A Very Long Name", "A Title That Goes On And On Forever And Then Some More")
+		m.s.HaveTrack = true
 		m.trackAt = m.now.Add(-10 * time.Second)
-		m.reason = "plays 3 artists you love and also this reason is extremely long"
-		m.tw = NewTypewriter(m.reason, m.now.Add(-time.Minute))
+		m.s.Reason = "plays 3 artists you love and also this reason is extremely long"
+		m.tw = NewTypewriter(m.s.Reason, m.now.Add(-time.Minute))
 		assertFits(t, m.View(), sz.w, sz.h)
 
 		// Decrypt mid-flight.
@@ -176,7 +135,7 @@ func TestViewNeverOverflows(t *testing.T) {
 		assertFits(t, m.View(), sz.w, sz.h)
 
 		// Loved flash frame.
-		m.lovedTrack = true
+		m.s.LovedTrack = true
 		m.loveAt = m.now.Add(-50 * time.Millisecond)
 		assertFits(t, m.View(), sz.w, sz.h)
 
@@ -266,10 +225,10 @@ func TestFaceplateClaimsTheTerminal(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 110, 32
 	m.start = m.now.Add(-time.Minute)
-	m.st = core.SeedStations()[0]
-	m.haveSt = true
-	m.ph = phPlay
-	m.reason = "wildcard"
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
+	m.s.Reason = "wildcard"
 	lines := strings.Split(m.View(), "\n")
 	if len(lines) != m.h {
 		t.Fatalf("view must fill the terminal exactly: %d lines for height %d", len(lines), m.h)
@@ -299,12 +258,13 @@ func TestWideReceiverComposition(t *testing.T) {
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: 110, Height: 32})
 	m = mm.(Model)
 	m.start = m.now.Add(-time.Minute)
-	m.st = core.SeedStations()[0]
-	m.haveSt = true
-	m.ph = phPlay
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
 	m.setTrack("Tycho", "A Walk")
+	m.s.HaveTrack = true
 	m.trackAt = m.now.Add(-time.Minute)
-	m.reason = "plays 3 artists you love"
+	m.s.Reason = "plays 3 artists you love"
 
 	view := m.View()
 	for _, want := range []string{

@@ -11,6 +11,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // Daypart temperature: midday runs brighter and cooler, night dims and warms
@@ -155,7 +156,7 @@ func TestIdleSettle(t *testing.T) {
 // its coral while loved.
 func TestLoveWashAndMaterial(t *testing.T) {
 	m := testModel(t)
-	m.lovedTrack = true
+	m.s.LovedTrack = true
 	base := fmt.Sprint(m.th.LoveFill.GetBackground())
 
 	m.loveAt = m.now
@@ -181,8 +182,9 @@ func TestLoveWashAndMaterial(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	m.loveAt = m.now.Add(-3 * time.Second) // resting wash, past the flash
 	m.w = 110
-	m.haveTrack = true
+	m.s.HaveTrack = true
 	m.setTrack("Broadcast", "Come On Let's Go")
+	m.s.HaveTrack = true
 	m.trackAt = m.now.Add(-time.Minute)
 	// termenv rounds hex -> RGB (53 -> 52), so assert the rendered value.
 	if row := m.trackRow(80, false); !strings.Contains(row, "48;2;52;23;15") {
@@ -200,7 +202,7 @@ func TestTypewriterWired(t *testing.T) {
 	m.w, m.h = 110, 32
 	m.start = m.now.Add(-time.Minute)
 
-	mm, _ := m.applyPick(core.Pick{Station: core.SeedStations()[1], Reason: "wildcard"})
+	mm, _ := m.step(session.Tuned{Pick: core.Pick{Station: core.SeedStations()[1], Reason: "wildcard"}})
 	m = mm
 	iw := m.innerWidth()
 

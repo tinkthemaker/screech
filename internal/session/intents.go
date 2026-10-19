@@ -104,6 +104,17 @@ func (s State) touch() (State, []Cmd) {
 	return s, nil
 }
 
+// notify lands face-originated text on the session's note/feedback lines.
+func (s State) notify(msg Notify) (State, []Cmd) {
+	if msg.Feedback != "" {
+		s.setFeedback(msg.Feedback)
+	}
+	if msg.Note != "" {
+		s.Note = msg.Note
+	}
+	return s, nil
+}
+
 // synced absorbs a finished directory refresh: presets may have changed
 // under us, and the listener hears the outcome once.
 func (s State) synced(msg Synced) (State, []Cmd) {

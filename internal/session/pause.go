@@ -21,7 +21,7 @@ func (s State) pause(external bool) (State, []Cmd) {
 		// and re-enters offline like any other failure.
 		s.pauseReload = true
 		s.retryN = 0
-		s.retryAt = time.Time{}
+		s.RetryAt = time.Time{}
 	}
 	s.Phase = Paused
 	s.PausedAt = s.Now

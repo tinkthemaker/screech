@@ -157,7 +157,7 @@ func (m Model) receiverMetrics() (iw, leftRows, rightFixed int) {
 	iw = m.innerWidth()
 	leftW, _, _ := receiverColumns(iw)
 	leftRows = receiverLeftRows
-	if stationTags(&m.st, leftW, m.th.G.Ellipsis) != "" {
+	if stationTags(&m.s.Station, leftW, m.th.G.Ellipsis) != "" {
 		leftRows += receiverGenreRows
 	}
 	rightFixed = receiverRightRows

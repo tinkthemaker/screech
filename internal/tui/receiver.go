@@ -9,6 +9,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // --- main screen: two tight groups with real air between them ---
@@ -20,7 +21,7 @@ func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 	var rows []string
 	if !compact {
 		micro := "NOW PLAYING"
-		if !m.haveSt {
+		if !m.s.HaveStation {
 			micro = "STANDBY"
 		}
 		micro = runewidth.Truncate(micro, iw, m.th.G.Ellipsis)
@@ -66,7 +67,7 @@ func (m Model) staticRows(width int, th Theme) []string {
 	if width < 1 {
 		return make([]string, rows)
 	}
-	elapsed := m.now.Sub(m.tuneAt)
+	elapsed := m.now.Sub(m.s.TuneAt)
 	if elapsed < 0 {
 		elapsed = 0
 	}
@@ -168,7 +169,7 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	pt.Dim = scaleStyle(pt.Dim, m.settleScale())
 	wave := m.signalRows(rightW, pt)
 
-	station := cleanStationName(m.st.Name)
+	station := cleanStationName(m.s.Station.Name)
 	if station == "" {
 		station = "NO SIGNAL"
 	}
@@ -178,33 +179,33 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	artist, title := m.trackArtist, m.trackTitle
 	titleAnchor := m.trackAt
 	switch {
-	case m.haveTrack && strings.TrimSpace(title) != "":
+	case m.s.HaveTrack && strings.TrimSpace(title) != "":
 		// A title-only track leaves the artist row blank, not populated
 		// with a label masquerading as a credit.
-	case m.haveSt:
+	case m.s.HaveStation:
 		// No title yet: the station name holds the slot, scrolling off
 		// the tune clock rather than a track clock that doesn't exist.
 		primaryLabel = "NOW PLAYING"
 		title = station
-		titleAnchor = m.tuneAt
+		titleAnchor = m.s.TuneAt
 		artist = ""
 	default:
 		primaryLabel = "STANDBY"
 		title = "No signal"
-		if m.syncing || m.seeking || m.ph == phTune {
+		if m.s.Syncing || m.s.Seeking || m.s.Phase == session.Tuning {
 			title = "Searching" + m.th.G.Ellipsis
 		}
-		titleAnchor = m.tuneAt
+		titleAnchor = m.s.TuneAt
 		artist = ""
 	}
 
 	heartW := 0
-	if m.lovedTrack {
+	if m.s.LovedTrack {
 		heartW = runewidth.StringWidth(m.th.G.Heart) + 1
 	}
 	title = m.marqueeText(title, maxI(4, leftW-heartW), titleAnchor)
 	titleCell := pt.Bright.Bold(true).Render(title)
-	if m.lovedTrack {
+	if m.s.LovedTrack {
 		titleCell += pt.Mid.Render(" ") + m.receiverHeart(pt)
 	}
 	artist = runewidth.Truncate(artist, leftW, m.th.G.Ellipsis)
@@ -257,8 +258,8 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	artistCell := pt.Mid.Render(artist)
 	if artist == "" {
 		artistCell = pt.Mid.Render(" ")
-		if m.haveSt && !m.haveTrack && m.ph == phPlay && !m.playStart.IsZero() &&
-			m.now.Sub(m.playStart) >= 10*time.Second {
+		if m.s.HaveStation && !m.s.HaveTrack && m.s.Phase == session.Playing && !m.s.PlayStart.IsZero() &&
+			m.now.Sub(m.s.PlayStart) >= 10*time.Second {
 			artistCell = pt.Dim.Render(
 				runewidth.Truncate("No track info sent", leftW, m.th.G.Ellipsis))
 		}
@@ -277,11 +278,11 @@ func (m Model) receiverRows(iw, contentH int) []string {
 	// They had no representation on screen at all, while the left bay sat
 	// empty next to a meter — so the bay gets filled with something true
 	// rather than with more blank rows.
-	if tags := stationTags(&m.st, leftW, m.th.G.Ellipsis); tags != "" {
+	if tags := stationTags(&m.s.Station, leftW, m.th.G.Ellipsis); tags != "" {
 		left = append(left, pt.Dim.Bold(true).Render("GENRE"), pt.Mid.Render(tags), "")
 	}
 	memory := ""
-	if n := len(m.presets); n > 0 {
+	if n := len(m.s.Presets); n > 0 {
 		memory = fmt.Sprintf("%d SAVED", n)
 	}
 	right := []string{surfaceLR(pt.Dim.Bold(true).Render(m.signalLabel()),
@@ -379,7 +380,7 @@ func fmtTotalTime(d time.Duration) string {
 // Silent on the first play: "heard 1x" is noise, and a first hearing is the
 // default case rather than a fact worth stating.
 func (m Model) playCountFigure() string {
-	if !m.haveTrack || m.trackPlays < 2 {
+	if !m.s.HaveTrack || m.trackPlays < 2 {
 		return ""
 	}
 	return fmt.Sprintf("heard %d%s", m.trackPlays, m.th.G.Times)
@@ -388,7 +389,7 @@ func (m Model) playCountFigure() string {
 // stereoFigure is the signal bay's right-hand readout: which channel layout
 // the backend is actually measuring, stated once rather than implied.
 func (m Model) stereoFigure() string {
-	if m.ph != phPlay {
+	if m.s.Phase != session.Playing {
 		return ""
 	}
 	if m.stereo {
@@ -422,39 +423,39 @@ func (m Model) receiverHeart(pt Theme) string {
 }
 
 func (m Model) presetLegend(width int) string {
-	if slot := m.currentSlot(); slot > 0 {
+	if slot := m.s.CurrentSlot(); slot > 0 {
 		return runewidth.Truncate(fmt.Sprintf("PRESET %d  "+m.th.G.Dot+"  SAVED", slot), width, m.th.G.Ellipsis)
 	}
-	if len(m.presets) > 0 {
-		return runewidth.Truncate(fmt.Sprintf("%d SAVED STATIONS", len(m.presets)), width, m.th.G.Ellipsis)
+	if len(m.s.Presets) > 0 {
+		return runewidth.Truncate(fmt.Sprintf("%d SAVED STATIONS", len(m.s.Presets)), width, m.th.G.Ellipsis)
 	}
 	return runewidth.Truncate("NO PRESETS YET", width, m.th.G.Ellipsis)
 }
 
 func (m Model) receiverStatusRow(iw int) string {
 	width := maxI(1, iw-4)
-	label, detail, hot := "WHY THIS STATION", m.typedText(whyDetail(m.reason)), false
+	label, detail, hot := "WHY THIS STATION", m.typedText(whyDetail(m.s.Reason)), false
 	switch {
-	case m.fatal != "":
-		label, detail, hot = "ERROR", m.fatal, true
-	case m.feedback != "" && m.now.Sub(m.feedbackAt) < feedbackDur:
+	case m.s.Fatal != "":
+		label, detail, hot = "ERROR", m.s.Fatal, true
+	case m.s.Feedback != "" && m.now.Sub(m.s.FeedbackAt) < session.FeedbackDuration:
 		// Feedback arrives as "LABEL  detail"; the readout keeps both
 		// halves rather than flattening the detail under a generic label.
-		label, detail, hot = "UPDATED", m.feedback, true
-		if i := strings.Index(m.feedback, "  "); i > 0 {
-			label, detail = m.feedback[:i], m.feedback[i+2:]
+		label, detail, hot = "UPDATED", m.s.Feedback, true
+		if i := strings.Index(m.s.Feedback, "  "); i > 0 {
+			label, detail = m.s.Feedback[:i], m.s.Feedback[i+2:]
 		}
-	case m.ph == phOffline:
+	case m.s.Phase == session.Offline:
 		label, detail, hot = "OFFLINE", m.offlineDetail(), true
-	case m.ph == phPaused:
+	case m.s.Phase == session.Paused:
 		label, detail = "PAUSED", "P resumes "+m.th.G.Dot+" SPACE tunes another station"
-	case m.notice != "":
-		label, detail = "NOTICE", m.notice
-	case m.suspect && m.ph == phPlay:
+	case m.s.Notice != "":
+		label, detail = "NOTICE", m.s.Notice
+	case m.s.Suspect && m.s.Phase == session.Playing:
 		label, detail, hot = "POSSIBLE BREAK", "Space skips without teaching against this station", true
-	case m.note != "":
-		label, detail = "NOTICE", m.note
-	case !m.haveSt:
+	case m.s.Note != "":
+		label, detail = "NOTICE", m.s.Note
+	case !m.s.HaveStation:
 		label, detail = "STANDBY", "Waiting for a station"
 	}
 
@@ -487,7 +488,7 @@ func (m Model) receiverVolumeRow(iw int) string {
 	bandStyle := m.th.AccentDim.Background(bg)
 	restStyle := m.th.Mid.Background(bg)
 
-	percent := fmt.Sprintf("%d%%", m.volume)
+	percent := fmt.Sprintf("%d%%", m.s.Volume)
 	const label = "VOLUME"
 	barW := width - runewidth.StringWidth(label) - runewidth.StringWidth(percent) - 4
 	if barW > 36 {
@@ -497,7 +498,7 @@ func (m Model) receiverVolumeRow(iw int) string {
 		content := labelStyle.Render(label) + raised.Render("  ") + restStyle.Render(percent)
 		return m.panelFull(content, iw, raised)
 	}
-	knob := int(math.Round(float64(m.volume) / 100 * float64(barW-1)))
+	knob := int(math.Round(float64(m.s.Volume) / 100 * float64(barW-1)))
 	cells := make([]string, barW)
 	for i := range cells {
 		switch {
@@ -534,7 +535,7 @@ func (m Model) receiverPromptRow(iw int) string {
 	content := labelStyle.Render(label) + raised.Render("  ") + chev
 	if len(m.buf) == 0 {
 		hint := "genre or artist " + m.th.G.Dot + " esc cancels"
-		if m.virgin {
+		if m.s.Virgin {
 			hint = "type a genre or artist " + m.th.G.Dot + " space for a wildcard"
 		}
 		hint = runewidth.Truncate(hint, maxI(0, tail-1), m.th.G.Ellipsis)
@@ -571,16 +572,16 @@ func whyDetail(reason string) string {
 }
 
 func (m Model) heroRow(iw int, idle bool) string {
-	if !m.haveSt {
+	if !m.s.HaveStation {
 		text := "NO SIGNAL"
-		if m.syncing || m.seeking || m.ph == phTune {
+		if m.s.Syncing || m.s.Seeking || m.s.Phase == session.Tuning {
 			text = "SEARCHING" + m.th.G.Ellipsis
 		}
 		return m.th.Dim.Render(runewidth.Truncate(text, iw, m.th.G.Ellipsis))
 	}
 	if m.motion() && m.decrypt.Active(m.now) {
 		return m.decrypt.Render(m.now, m.th,
-			heroText(cleanStationName(m.st.Name), iw, m.th.G.Ellipsis), iw)
+			heroText(cleanStationName(m.s.Station.Name), iw, m.th.G.Ellipsis), iw)
 	}
 	style := m.th.Bright.Bold(true)
 	// A freshly resolved name glows accent for a beat, then settles to white.
@@ -591,7 +592,7 @@ func (m Model) heroRow(iw int, idle bool) string {
 	if idle {
 		style = m.th.Dim.Bold(true)
 	}
-	return style.Render(heroText(cleanStationName(m.st.Name), iw, m.th.G.Ellipsis))
+	return style.Render(heroText(cleanStationName(m.s.Station.Name), iw, m.th.G.Ellipsis))
 }
 
 func (m Model) trackRow(iw int, idle bool) string {
@@ -599,7 +600,7 @@ func (m Model) trackRow(iw int, idle bool) string {
 	textW := iw - heartW - 2
 
 	text := ""
-	if m.haveTrack && m.track != "" {
+	if m.s.HaveTrack && m.track != "" {
 		text = m.marqueeText(m.track, textW, m.trackAt)
 	}
 
@@ -616,12 +617,12 @@ func (m Model) trackRow(iw int, idle bool) string {
 	}
 	// A loved track sits on the love wash: a coral flash at the moment of
 	// love, cooling over two seconds into the permanent coral-dark surface.
-	if m.lovedTrack {
+	if m.s.LovedTrack {
 		style = style.Background(m.loveWash())
 	}
 
 	heart := strings.Repeat(" ", heartW)
-	if m.lovedTrack {
+	if m.s.LovedTrack {
 		since := m.now.Sub(m.loveAt)
 		switch {
 		case since < 120*time.Millisecond:
@@ -646,48 +647,48 @@ func (m Model) bandRow(iw int, idle bool) string {
 // offline: whole seconds until the scheduled retry, floored at zero so a
 // lapsed timer waiting on the next tick never reads negative.
 func (m Model) offlineRetrySeconds() int {
-	return maxI(0, int(m.retryAt.Sub(m.now).Seconds()+0.999))
+	return maxI(0, int(m.s.RetryAt.Sub(m.now).Seconds()+0.999))
 }
 
 // offlineDetail is the status-row text while offline: a countdown while the
 // timer is armed, "retrying now" in the window where a retry is in flight.
 func (m Model) offlineDetail() string {
-	if m.retryAt.IsZero() {
+	if m.s.RetryAt.IsZero() {
 		return "retrying now"
 	}
 	return fmt.Sprintf("retrying in %ds "+m.th.G.Dot+" SPACE tries now", m.offlineRetrySeconds())
 }
 
 func (m Model) reasonRow(iw int) string {
-	if m.fatal != "" {
-		return m.statusRow("ERROR  "+m.fatal, iw, true)
+	if m.s.Fatal != "" {
+		return m.statusRow("ERROR  "+m.s.Fatal, iw, true)
 	}
-	if !m.haveSt {
+	if !m.s.HaveStation {
 		return ""
 	}
-	if m.feedback != "" && m.now.Sub(m.feedbackAt) < feedbackDur {
-		return m.statusRow(m.feedback, iw, true)
+	if m.s.Feedback != "" && m.now.Sub(m.s.FeedbackAt) < session.FeedbackDuration {
+		return m.statusRow(m.s.Feedback, iw, true)
 	}
-	if m.ph == phOffline {
+	if m.s.Phase == session.Offline {
 		return m.statusRow("OFFLINE  "+m.offlineDetail(), iw, true)
 	}
-	if m.ph == phPaused {
+	if m.s.Phase == session.Paused {
 		return m.statusRow("PAUSED  P resumes "+m.th.G.Dot+" SPACE tunes another station", iw, true)
 	}
-	if m.notice != "" {
+	if m.s.Notice != "" {
 		// The startup notice is the DB-recovered warning — active, not
 		// calm dim text nobody reads.
-		return m.statusRow("NOTICE  "+m.notice, iw, true)
+		return m.statusRow("NOTICE  "+m.s.Notice, iw, true)
 	}
 	// A suspected ad break earns a contextual hint: this is the moment the
 	// user wants the skip and shouldn't have to remember which key it is.
-	if m.suspect && m.ph == phPlay {
+	if m.s.Suspect && m.s.Phase == session.Playing {
 		return m.statusRow("BREAK  SPACE skips without penalty", iw, true)
 	}
-	if m.note != "" {
-		return m.statusRow("NOTICE  "+m.note, iw, false)
+	if m.s.Note != "" {
+		return m.statusRow("NOTICE  "+m.s.Note, iw, false)
 	}
-	return m.statusRow(m.typedText(statusReason(m.reason)), iw, false)
+	return m.statusRow(m.typedText(statusReason(m.s.Reason)), iw, false)
 }
 
 // statusRow renders "LABEL  detail" input as an aligned, dotted status
@@ -757,7 +758,7 @@ func (m Model) promptRow(iw int) string {
 	prefix := m.th.Accent.Render("> ")
 	if len(m.buf) == 0 {
 		hint := "genre or artist " + m.th.G.Dot + " esc cancels"
-		if m.virgin {
+		if m.s.Virgin {
 			hint = "type a genre or artist " + m.th.G.Dot + " space for a wildcard"
 		}
 		hint = runewidth.Truncate(hint, maxI(0, iw-5), m.th.G.Ellipsis)
@@ -772,7 +773,7 @@ func (m Model) promptRow(iw int) string {
 }
 
 func (m Model) volumeRow(iw int) string {
-	percent := fmt.Sprintf("%d%%", m.volume)
+	percent := fmt.Sprintf("%d%%", m.s.Volume)
 	if iw < 20 {
 		return m.th.Accent.Bold(true).Render(
 			runewidth.Truncate("VOL "+percent, iw, m.th.G.Ellipsis))
@@ -784,7 +785,7 @@ func (m Model) volumeRow(iw int) string {
 	if barW < 4 {
 		barW = 4
 	}
-	knob := int(math.Round(float64(m.volume) / 100 * float64(barW-1)))
+	knob := int(math.Round(float64(m.s.Volume) / 100 * float64(barW-1)))
 	cells := make([]string, barW)
 	for i := range cells {
 		switch {

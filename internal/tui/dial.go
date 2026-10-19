@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // dialRows is the station-memory dial: a listening-density strip, the band
@@ -135,9 +137,9 @@ func (m Model) dialDigits(width int, th Theme) string {
 	for i := range cells {
 		cells[i] = blank
 	}
-	current := m.currentSlot()
-	slots := make([]int, 0, len(m.presets))
-	for slot := range m.presets {
+	current := m.s.CurrentSlot()
+	slots := make([]int, 0, len(m.s.Presets))
+	for slot := range m.s.Presets {
 		slots = append(slots, slot)
 	}
 	sort.Ints(slots)
@@ -160,7 +162,7 @@ func (m Model) dialDigits(width int, th Theme) string {
 		return true
 	}
 	for _, slot := range slots {
-		want := int(math.Round(stationDialPos(m.presets[slot]) * float64(width-1)))
+		want := int(math.Round(stationDialPos(m.s.Presets[slot]) * float64(width-1)))
 		col := -1
 		for off := 0; off < width && col < 0; off++ {
 			switch {
@@ -195,7 +197,7 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	}
 	// Love lands on the dial: one coral pulse of the needle, seated on the
 	// same surface as its neighbors.
-	if m.lovedTrack && m.now.Sub(m.loveAt) < 600*time.Millisecond {
+	if m.s.LovedTrack && m.now.Sub(m.loveAt) < 600*time.Millisecond {
 		markerStyle = th.Love
 		if bg := th.Accent.GetBackground(); hasColor(bg) {
 			markerStyle = markerStyle.Background(bg)
@@ -207,7 +209,7 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 	for i := range cells {
 		cells[i] = dimBand
 	}
-	for _, uuid := range m.presets {
+	for _, uuid := range m.s.Presets {
 		t := int(math.Round(stationDialPos(uuid) * float64(iw-1)))
 		if t >= 0 && t < iw {
 			cells[t] = th.AccentDim.Render(th.G.Tick)
@@ -223,7 +225,7 @@ func (m Model) bandRowTheme(iw int, idle bool, th Theme) string {
 		off  int
 		frac float64
 	}{{-2, 0.18}, {-1, 0.42}, {1, 0.42}, {2, 0.18}}
-	detuning := !m.dial.Settled(m.dialTgt) || m.ph == phTune
+	detuning := !m.dial.Settled(m.dialTgt) || m.s.Phase == session.Tuning
 	if detuning {
 		bleed = []struct {
 			off  int

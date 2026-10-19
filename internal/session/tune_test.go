@@ -15,7 +15,7 @@ func TestThreeFailuresGoOffline(t *testing.T) {
 	if s.Phase != Offline {
 		t.Fatalf("three consecutive failures should go offline, got %v", s.Phase)
 	}
-	if d := s.retryAt.Sub(s.Now); d < 4*time.Second || d > 6*time.Second {
+	if d := s.RetryAt.Sub(s.Now); d < 4*time.Second || d > 6*time.Second {
 		t.Fatalf("retryAt should be ~now+5s, got %v", d)
 	}
 	for _, uuid := range struck {
@@ -31,7 +31,7 @@ func TestOfflineRetryGoesBackToLastGood(t *testing.T) {
 	lastGood := s.Station
 	s, _ = offlineStreak(t, s)
 	// Past the timer, the tick fires the retry.
-	s = drive(t, s, Tick{Now: s.retryAt.Add(time.Second)})
+	s = drive(t, s, Tick{Now: s.RetryAt.Add(time.Second)})
 	if s.Phase != Tuning {
 		t.Fatalf("retry should tune, got %v", s.Phase)
 	}
@@ -48,13 +48,13 @@ func TestOfflineFailureBacksOffWithoutStriking(t *testing.T) {
 	s = playing(t, s)
 	lastGood := s.Station
 	s, _ = offlineStreak(t, s)
-	s = drive(t, s, Tick{Now: s.retryAt.Add(time.Second)}) // fires retry
+	s = drive(t, s, Tick{Now: s.RetryAt.Add(time.Second)}) // fires retry
 	// The retry fails too: outage persists, station is innocent.
 	s = drive(t, s, evStreamError())
 	if s.Phase != Offline {
 		t.Fatalf("a failed retry should stay offline, got %v", s.Phase)
 	}
-	if d := s.retryAt.Sub(s.Now); d < 9*time.Second || d > 11*time.Second {
+	if d := s.RetryAt.Sub(s.Now); d < 9*time.Second || d > 11*time.Second {
 		t.Fatalf("second offline failure should back off ~10s, got %v", d)
 	}
 	if st, _ := s.core.StationByUUID(lastGood.UUID); st.FailCount != 0 {
@@ -104,9 +104,9 @@ func TestOfflineRetryFiresOnce(t *testing.T) {
 	s, _ = offlineStreak(t, s)
 	s.retryN = 2 // even: the retry path is a fresh pick via tuneDeadCmd
 
-	s2, cmds := s.Update(Tick{Now: s.retryAt.Add(time.Second)})
+	s2, cmds := s.Update(Tick{Now: s.RetryAt.Add(time.Second)})
 	s = s2
-	if !s.retryAt.IsZero() {
+	if !s.RetryAt.IsZero() {
 		t.Fatal("a fired retry must consume retryAt")
 	}
 	var picks int
@@ -141,7 +141,7 @@ func TestOfflineRetryPickErrorReschedules(t *testing.T) {
 	if s.retryN != 2 {
 		t.Fatalf("retryN = %d, want 2", s.retryN)
 	}
-	if d := s.retryAt.Sub(s.Now); d < 9*time.Second || d > 11*time.Second {
+	if d := s.RetryAt.Sub(s.Now); d < 9*time.Second || d > 11*time.Second {
 		t.Fatalf("rescheduled retry should be ~now+10s, got %v", d)
 	}
 }

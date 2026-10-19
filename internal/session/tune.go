@@ -18,7 +18,7 @@ func (s State) tick(msg Tick) (State, []Cmd) {
 		return s.failTune("no signal")
 	case s.Phase == Buffering && !s.bufferAt.IsZero() && s.Now.Sub(s.bufferAt) > bufferStall:
 		return s.dropStream("signal stalled")
-	case s.Phase == Offline && !s.retryAt.IsZero() && !s.Now.Before(s.retryAt):
+	case s.Phase == Offline && !s.RetryAt.IsZero() && !s.Now.Before(s.RetryAt):
 		return s.offlineRetry()
 	}
 	if s.Phase == Playing && s.drops > 0 && !s.lockAt.IsZero() && s.Now.Sub(s.lockAt) >= stableAfter {
@@ -39,7 +39,7 @@ func (s State) tuned(msg Tuned) (State, []Cmd) {
 			// A pick that fails inside an offline retry reschedules
 			// instead of stranding the session offline with no timer.
 			s.Phase = Offline
-			s.retryAt = s.Now.Add(retryBackoff(s.retryN))
+			s.RetryAt = s.Now.Add(retryBackoff(s.retryN))
 			s.retryN++
 		default:
 			s.Note = msg.Err.Error()
@@ -235,7 +235,7 @@ func (s *State) beginSkip(feedback string) Cmd {
 func (s State) failTune(reason string) (State, []Cmd) {
 	if s.retryN > 0 {
 		s.core.EndListen(time.Now())
-		s.retryAt = s.Now.Add(retryBackoff(s.retryN))
+		s.RetryAt = s.Now.Add(retryBackoff(s.retryN))
 		s.retryN++
 		s.Phase = Offline
 		s.Reconnecting = false
@@ -253,7 +253,7 @@ func (s State) failTune(reason string) (State, []Cmd) {
 		s.failStreak = nil
 		s.core.EndListen(time.Now())
 		s.retryN = 1
-		s.retryAt = s.Now.Add(retryBackoff(0))
+		s.RetryAt = s.Now.Add(retryBackoff(0))
 		s.Phase = Offline
 		s.Reconnecting = false
 		s.Resuming = false
@@ -268,7 +268,7 @@ func (s State) failTune(reason string) (State, []Cmd) {
 // even ones try the pool again. retryN makes the outcome legible in
 // failTune: a retry failure backs off, it doesn't strike.
 func (s State) offlineRetry() (State, []Cmd) {
-	s.retryAt = time.Time{} // consume the timer before the async part
+	s.RetryAt = time.Time{} // consume the timer before the async part
 	if s.retryN%2 == 1 {
 		uuid := s.Station.UUID
 		if s.haveLastGood {

@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // The ? sheet opens over the main screen and esc puts it away.
@@ -24,7 +25,7 @@ func TestHelpOpensAndEscCloses(t *testing.T) {
 			t.Fatalf("help sheet missing %q: %q", want, plain)
 		}
 	}
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = driveUI(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.helpOpen {
 		t.Fatal("esc should close the help sheet")
 	}
@@ -39,7 +40,7 @@ func TestHelpPassesKeysThrough(t *testing.T) {
 	if m.helpOpen {
 		t.Fatal("another key should close the sheet")
 	}
-	if !m.lovedTrack {
+	if !m.s.LovedTrack {
 		t.Fatal("the l should still have loved after closing the sheet")
 	}
 }
@@ -56,7 +57,7 @@ func TestHelpFromLibraryReturnsToLibrary(t *testing.T) {
 	if !m.helpOpen {
 		t.Fatal("? should open help over the library")
 	}
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = driveUI(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.helpOpen {
 		t.Fatal("esc should close help")
 	}
@@ -84,7 +85,7 @@ func TestHelpListsEveryMainKey(t *testing.T) {
 func TestInfoOpensAndLoads(t *testing.T) {
 	m := playing(t, testModel(t))
 	m = pressRune(t, m, 'i')
-	if !m.infoOpen || m.infoFor != m.st.UUID {
+	if !m.infoOpen || m.infoFor != m.s.Station.UUID {
 		t.Fatalf("i should open info for the tuned station: open=%v for=%q", m.infoOpen, m.infoFor)
 	}
 	if m.info.Daypart == "" {
@@ -111,7 +112,7 @@ func TestInfoFollowsTheRadio(t *testing.T) {
 	m := playing(t, testModel(t))
 	m = pressRune(t, m, 'i')
 	seeds := testSeeds()
-	m = drive(t, m, tunedMsg{pick: pickSeed(seeds[1])})
+	m = drive(t, m, session.Tuned{Pick: pickSeed(seeds[1])})
 	if !m.infoOpen {
 		t.Fatal("the sheet should stay open across a tune")
 	}
@@ -127,8 +128,8 @@ func TestInfoWithoutStationGivesFeedback(t *testing.T) {
 	if m.infoOpen {
 		t.Fatal("no station, no sheet")
 	}
-	if !strings.Contains(m.feedback, "Nothing tuned") {
-		t.Fatalf("feedback %q", m.feedback)
+	if !strings.Contains(m.s.Feedback, "Nothing tuned") {
+		t.Fatalf("feedback %q", m.s.Feedback)
 	}
 }
 
@@ -137,7 +138,7 @@ func TestInfoWithoutStationGivesFeedback(t *testing.T) {
 func TestInfoPassesKeysThrough(t *testing.T) {
 	m := playing(t, testModel(t))
 	m = pressRune(t, m, 'i')
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = driveUI(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.infoOpen {
 		t.Fatal("esc should close the info sheet")
 	}
@@ -159,8 +160,8 @@ func TestFooterHidesPauseWithoutStation(t *testing.T) {
 	if got := stripANSI(m.footerBar()); strings.Contains(got, " P ") {
 		t.Fatalf("stationless strip shows a pause chip: %q", got)
 	}
-	m.st = testSeeds()[0]
-	m.haveSt = true
+	m.s.Station = testSeeds()[0]
+	m.s.HaveStation = true
 	if got := stripANSI(m.footerBar()); !strings.Contains(got, " P ") {
 		t.Fatalf("tuned strip lost the pause chip: %q", got)
 	}
@@ -170,7 +171,7 @@ func TestFooterHidesPauseWithoutStation(t *testing.T) {
 func TestFooterDeadStrip(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 80, 24
-	m.ph = phDead
+	m.s.Phase = session.Stopped
 	got := stripANSI(m.footerBar())
 	for _, want := range []string{"H", "T", "?", "Q"} {
 		if !strings.Contains(got, want) {
@@ -196,61 +197,5 @@ func TestFooterOverlayStripIsEscOnly(t *testing.T) {
 	got = stripANSI(m.footerBar())
 	if !strings.Contains(got, "ESC") || strings.Contains(got, "SPACE") {
 		t.Fatalf("info strip should be ESC alone: %q", got)
-	}
-}
-
-// offline parks the model mid-outage the way the connectivity tests leave
-// it: a station held, retries armed.
-func offline(t *testing.T, m Model) Model {
-	t.Helper()
-	m.ph = phOffline
-	m.retryN = 1
-	m.retryAt = m.now.Add(20 * time.Second)
-	return m
-}
-
-// Pausing an outage parks the radio instead of retrying: no retry fires,
-// nothing tunes itself, and resume reloads into a fresh try.
-func TestPauseWhileOfflineStopsRetrying(t *testing.T) {
-	m := offline(t, playing(t, testModel(t)))
-	m = pressRune(t, m, 'p')
-	if m.ph != phPaused {
-		t.Fatalf("p while offline should pause, got %v", m.ph)
-	}
-	if m.retryN != 0 || !m.retryAt.IsZero() {
-		t.Fatal("pausing an outage should disarm the retry")
-	}
-	playsBefore := len(callsSoFar(m))
-	for i := 0; i < 3; i++ {
-		m = drive(t, m, tickMsg(m.now.Add(time.Minute)))
-	}
-	if m.ph != phPaused || len(callsSoFar(m)) != playsBefore {
-		t.Fatalf("paused-over-offline must not retry or tune: ph=%v calls %v", m.ph, callsSoFar(m))
-	}
-	m = pressRune(t, m, 'p')
-	if lastCall(m) != "play "+m.st.StreamURL() {
-		t.Fatalf("resume from paused-over-offline should reload, calls %v", callsSoFar(m))
-	}
-}
-
-// The sleep timer reaching zero on an offline radio parks it — no full-
-// volume surprise when the network comes back.
-func TestSleepExpiryWhileOffline(t *testing.T) {
-	m := offline(t, playing(t, testModel(t)))
-	m = pressRune(t, m, 'z')
-	// A retry armed for later at the expiry instant is the normal real-
-	// world state — not one that raced ahead of the timer.
-	m.retryAt = m.sleepAt.Add(30 * time.Second)
-	m.now = m.sleepAt.Add(time.Second)
-	m = drive(t, m, tickMsg(m.now))
-	if m.ph != phPaused {
-		t.Fatalf("expiry while offline should pause, got %v", m.ph)
-	}
-	if m.retryN != 0 || !m.retryAt.IsZero() {
-		t.Fatal("the parked outage must not keep a retry armed")
-	}
-	m = drive(t, m, tickMsg(m.now.Add(2*time.Minute)))
-	if m.ph != phPaused {
-		t.Fatalf("no retry should fire under the pause, got %v", m.ph)
 	}
 }

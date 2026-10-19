@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 
 	"github.com/tinkthemaker/screech/internal/app"
+	"github.com/tinkthemaker/screech/internal/session"
 	"github.com/tinkthemaker/screech/internal/tui"
 	versionpkg "github.com/tinkthemaker/screech/internal/version"
 )
@@ -160,7 +161,8 @@ func run() (exit int) {
 	}
 	defer rt.Close()
 
-	opts := tui.Options{Accent: rt.Config.Accent, ASCII: rt.Config.ASCII, SyncLimit: rt.Config.SyncLimit, ReducedMotion: reducedMotion, AutoHopAds: rt.Config.AutoHopAds, Notice: rt.Notice}
+	opts := tui.Options{Accent: rt.Config.Accent, ASCII: rt.Config.ASCII, ReducedMotion: reducedMotion,
+		Session: session.Options{SyncLimit: rt.Config.SyncLimit, AutoHopAds: rt.Config.AutoHopAds, Notice: rt.Notice}}
 	if os.Getenv("SCREECH_REDUCED_MOTION") != "" {
 		reducedMotion = true
 		opts.ReducedMotion = true

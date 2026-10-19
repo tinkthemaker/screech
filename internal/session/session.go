@@ -131,12 +131,14 @@ type State struct {
 	// Connectivity bookkeeping. retryN doubles as the offline flag:
 	// nonzero means the current tune attempt came out of an offline retry
 	// and its failure extends the backoff instead of striking the station.
-	drops        int
-	lockAt       time.Time
-	bufferAt     time.Time
-	failStreak   []string
-	retryN       int
-	retryAt      time.Time
+	drops      int
+	lockAt     time.Time
+	bufferAt   time.Time
+	failStreak []string
+	retryN     int
+	// RetryAt arms the offline retry; a face renders its countdown. Zero
+	// while a retry is in flight (or none is armed).
+	RetryAt      time.Time
 	lastGood     core.Station
 	haveLastGood bool
 	restarts     []time.Time
@@ -221,6 +223,8 @@ func (s State) Update(msg Msg) (State, []Cmd) {
 		return s.wildcard()
 	case Touch:
 		return s.touch()
+	case Notify:
+		return s.notify(msg)
 	case Synced:
 		return s.synced(msg)
 	case VolumeSet:

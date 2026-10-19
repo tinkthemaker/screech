@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // The resize contract at every size: no panic, no overflow, no extra lines.
@@ -43,32 +44,35 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 		// real frame and used to overflow small terminals outright.
 		{"boot", func(m *Model) { m.start = m.now.Add(-300 * time.Millisecond) }},
 		{"playing", func(m *Model) {
-			m.st = core.SeedStations()[1]
-			m.st.Name = "The Interminable Frequencies Of The Outer Aetheric Reaches International"
-			m.haveSt = true
-			m.ph = phPlay
-			m.playStart = m.now.Add(-90 * time.Minute)
+			m.s.Station = core.SeedStations()[1]
+			m.s.Station.Name = "The Interminable Frequencies Of The Outer Aetheric Reaches International"
+			m.s.HaveStation = true
+			m.s.Phase = session.Playing
+			m.s.PlayStart = m.now.Add(-90 * time.Minute)
 			m.setTrack("An Artist With A Very Long Name", "A Title That Goes On And On Forever And Then Some More")
+			m.s.HaveTrack = true
 			m.trackAt = m.now.Add(-10 * time.Second)
-			m.reason = "plays 3 artists you love and also this reason is extremely long"
-			m.tw = NewTypewriter(m.reason, m.now.Add(-time.Minute))
-			m.presets = map[int]string{1: "a", 3: "b", 7: "c"}
+			m.s.Reason = "plays 3 artists you love and also this reason is extremely long"
+			m.tw = NewTypewriter(m.s.Reason, m.now.Add(-time.Minute))
+			m.s.Presets = map[int]string{1: "a", 3: "b", 7: "c"}
 		}},
 		{"reduced-motion", func(m *Model) {
 			m.reduceMotion = true
-			m.st = core.SeedStations()[1]
-			m.haveSt = true
-			m.ph = phPlay
-			m.playStart = m.now.Add(-90 * time.Minute)
+			m.s.Station = core.SeedStations()[1]
+			m.s.HaveStation = true
+			m.s.Phase = session.Playing
+			m.s.PlayStart = m.now.Add(-90 * time.Minute)
 			m.setTrack("Broadcast", "Come On Let's Go")
+			m.s.HaveTrack = true
 			m.trackAt = m.now.Add(-10 * time.Second)
 		}},
 		{"playing-with-history", func(m *Model) {
-			m.st = core.SeedStations()[1]
-			m.st.Tags = "ambient electronic downtempo"
-			m.haveSt = true
-			m.ph = phPlay
+			m.s.Station = core.SeedStations()[1]
+			m.s.Station.Tags = "ambient electronic downtempo"
+			m.s.HaveStation = true
+			m.s.Phase = session.Playing
 			m.setTrack("Broadcast", "Come On Let's Go")
+			m.s.HaveTrack = true
 			m.trackAt = m.now.Add(-10 * time.Second)
 			// Nonzero totals put the density strip on the dial, which
 			// costs the receiver a row of headroom.
@@ -137,60 +141,60 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 			m.volumeOpen = true
 		}},
 		{"fatal", func(m *Model) {
-			m.fatal = "player backend closed"
-			m.ph = phDead
+			m.s.Fatal = "player backend closed"
+			m.s.Phase = session.Stopped
 		}},
 		{"offline", func(m *Model) {
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
-			m.ph = phOffline
-			m.retryN = 1
-			m.retryAt = m.now.Add(8 * time.Second)
-			m.reason = "because you love stations like this"
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
+			m.s.Phase = session.Offline
+			m.s.RetryAt = m.now.Add(8 * time.Second)
+			m.s.Reason = "because you love stations like this"
 		}},
 		{"paused", func(m *Model) {
-			m.st = core.SeedStations()[1]
-			m.haveSt = true
-			m.ph = phPaused
-			m.pausedAt = m.now.Add(-4 * time.Minute)
+			m.s.Station = core.SeedStations()[1]
+			m.s.HaveStation = true
+			m.s.Phase = session.Paused
+			m.s.PausedAt = m.now.Add(-4 * time.Minute)
 			m.setTrack("An Artist", "A Title")
+			m.s.HaveTrack = true
 			m.trackAt = m.now.Add(-time.Minute)
 		}},
 		{"resuming", func(m *Model) {
-			m.st = core.SeedStations()[1]
-			m.haveSt = true
-			m.ph = phTune
-			m.resuming = true
-			m.tuneAt = m.now
+			m.s.Station = core.SeedStations()[1]
+			m.s.HaveStation = true
+			m.s.Phase = session.Tuning
+			m.s.Resuming = true
+			m.s.TuneAt = m.now
 		}},
 		{"sleep-timer", func(m *Model) {
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
-			m.ph = phPlay
-			m.playStart = m.now.Add(-time.Hour)
-			m.sleepStep = 1
-			m.sleepAt = m.now.Add(29 * time.Minute)
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
+			m.s.Phase = session.Playing
+			m.s.PlayStart = m.now.Add(-time.Hour)
+			m.s.SleepStep = 1
+			m.s.SleepAt = m.now.Add(29 * time.Minute)
 		}},
 		{"help", func(m *Model) {
 			m.helpOpen = true
 		}},
 		{"info-loading", func(m *Model) {
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
 			m.infoOpen = true
-			m.infoFor = m.st.UUID
+			m.infoFor = m.s.Station.UUID
 		}},
 		{"info-loaded", func(m *Model) {
-			m.st = core.SeedStations()[1]
-			m.st.Name = "The Interminable Frequencies Of The Outer Aetheric Reaches International"
-			m.st.Country = "Japan"
-			m.st.Codec = "aac"
-			m.st.Bitrate = 320
-			m.st.Tags = "free jazz, turntablism, sound collage, radio art"
-			m.st.Homepage = "https://example.org/avery/long/path/on/the/radio/"
-			m.haveSt = true
+			m.s.Station = core.SeedStations()[1]
+			m.s.Station.Name = "The Interminable Frequencies Of The Outer Aetheric Reaches International"
+			m.s.Station.Country = "Japan"
+			m.s.Station.Codec = "aac"
+			m.s.Station.Bitrate = 320
+			m.s.Station.Tags = "free jazz, turntablism, sound collage, radio art"
+			m.s.Station.Homepage = "https://example.org/avery/long/path/on/the/radio/"
+			m.s.HaveStation = true
 			m.infoOpen = true
-			m.infoFor = m.st.UUID
+			m.infoFor = m.s.Station.UUID
 			m.info = core.StationInfo{
 				Listened: 4*time.Hour + 12*time.Minute, Visits: 23,
 				FirstHeard: m.now.Add(-40 * 24 * time.Hour), LastHeard: m.now.Add(-2 * time.Hour),
@@ -198,25 +202,25 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 			}
 		}},
 		{"info-error", func(m *Model) {
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
 			m.infoOpen = true
-			m.infoFor = m.st.UUID
+			m.infoFor = m.s.Station.UUID
 			m.infoErr = fmt.Errorf("database read failed")
 		}},
 		{"info-never-heard", func(m *Model) {
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
 			m.infoOpen = true
-			m.infoFor = m.st.UUID
+			m.infoFor = m.s.Station.UUID
 			m.info = core.StationInfo{Daypart: "day"}
 		}},
 		{"info-strikes", func(m *Model) {
-			m.st = core.SeedStations()[0]
-			m.st.FailCount = 1
-			m.haveSt = true
+			m.s.Station = core.SeedStations()[0]
+			m.s.Station.FailCount = 1
+			m.s.HaveStation = true
 			m.infoOpen = true
-			m.infoFor = m.st.UUID
+			m.infoFor = m.s.Station.UUID
 			m.info = core.StationInfo{Daypart: "day", Heard: true, Match: 0.4}
 		}},
 	}
@@ -271,10 +275,10 @@ func TestReceiverFitsWheneverShapeSaysSo(t *testing.T) {
 		m := testModel(t)
 		m.w = w
 		m.start = m.now.Add(-time.Minute)
-		m.st = core.SeedStations()[0]
-		m.haveSt = true
-		m.ph = phPlay
-		m.reason = "wildcard"
+		m.s.Station = core.SeedStations()[0]
+		m.s.HaveStation = true
+		m.s.Phase = session.Playing
+		m.s.Reason = "wildcard"
 		for h := 10; h <= 40; h++ {
 			// The row-accounting check runs for every combination; the
 			// full-screen render only once per cell — its assertions are
@@ -283,9 +287,9 @@ func TestReceiverFitsWheneverShapeSaysSo(t *testing.T) {
 			for _, tags := range []bool{false, true} {
 				for _, density := range []bool{false, true} {
 					m.h = h
-					m.st.Tags = ""
+					m.s.Station.Tags = ""
 					if tags {
-						m.st.Tags = "ambient electronic"
+						m.s.Station.Tags = "ambient electronic"
 					}
 					m.listenTotals = nil
 					if density {
@@ -322,9 +326,9 @@ func TestReceiverFitsWheneverShapeSaysSo(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 100, 40
 	m.start = m.now.Add(-time.Minute)
-	m.st = core.SeedStations()[0]
-	m.haveSt = true
-	m.ph = phPlay
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
 	m.relayout()
 	if !m.receiverShape() {
 		t.Fatal("100x40 should give the receiver")
@@ -361,32 +365,32 @@ func TestHeaderStatusSurvivesNarrowWidths(t *testing.T) {
 	}
 
 	live := func(m *Model) {
-		m.st = core.SeedStations()[0]
-		m.haveSt = true
-		m.ph = phPlay
-		m.playStart = m.now.Add(-time.Minute)
+		m.s.Station = core.SeedStations()[0]
+		m.s.HaveStation = true
+		m.s.Phase = session.Playing
+		m.s.PlayStart = m.now.Add(-time.Minute)
 	}
 	if got := header(live, 30); !strings.Contains(got, "LIVE") {
 		t.Fatalf("30-col playing header lost the status: %q", got)
 	}
-	if got := header(func(m *Model) { m.ph = phOffline }, 20); !strings.Contains(got, "OFFLINE") {
+	if got := header(func(m *Model) { m.s.Phase = session.Offline }, 20); !strings.Contains(got, "OFFLINE") {
 		t.Fatalf("20-col offline header lost the status: %q", got)
 	}
 	if got := header(func(m *Model) {
 		live(m)
-		m.suspect = true
+		m.s.Suspect = true
 	}, 40); !strings.Contains(got, "BREAK") {
 		t.Fatalf("40-col break header lost the chip: %q", got)
 	}
 	if got := header(func(m *Model) {
 		live(m)
-		m.syncing = true
+		m.s.Syncing = true
 	}, 30); !strings.Contains(got, "LIVE") {
 		t.Fatalf("syncing must not evict LIVE: %q", got)
 	}
 	if got := header(func(m *Model) {
 		live(m)
-		m.syncing = true
+		m.s.Syncing = true
 	}, 100); !strings.Contains(got, "SYNCING DIRECTORY") || !strings.Contains(got, "LIVE") {
 		t.Fatalf("wide syncing header: %q", got)
 	}
@@ -398,8 +402,7 @@ func TestBufferingBlinkKeepsWidth(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 80, 24
 	m.start = m.now.Add(-time.Minute)
-	m.ph = phBuffer
-	m.bufferAt = m.now.Add(-time.Second)
+	m.s.Phase = session.Buffering
 	on := m.headerBar()
 	m.now = m.now.Add(600 * time.Millisecond)
 	off := m.headerBar()
@@ -419,10 +422,10 @@ func TestReceiverNoTitleHint(t *testing.T) {
 		m := testModel(t)
 		m.w, m.h = 80, 24
 		m.start = m.now.Add(-time.Minute)
-		m.st = core.SeedStations()[0]
-		m.haveSt = true
-		m.ph = phPlay
-		m.playStart = m.now.Add(-playStarted)
+		m.s.Station = core.SeedStations()[0]
+		m.s.HaveStation = true
+		m.s.Phase = session.Playing
+		m.s.PlayStart = m.now.Add(-playStarted)
 		return stripANSI(m.View())
 	}
 	if got := hintAt(30 * time.Second); !strings.Contains(got, "No track info") {
@@ -475,12 +478,12 @@ func TestFooterKeepsLabelsAtEighty(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 80, 24
 	m.start = m.now.Add(-time.Minute)
-	m.st = core.SeedStations()[0]
-	m.haveSt = true
-	m.ph = phPlay
-	m.volume = 100
-	m.sleepStep = 1
-	m.sleepAt = m.now.Add(29 * time.Minute)
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
+	m.s.Volume = 100
+	m.s.SleepStep = 1
+	m.s.SleepAt = m.now.Add(29 * time.Minute)
 	got := stripANSI(m.footerBar())
 	for _, want := range []string{"SPACE", "L", "F", "P", "/", "H", "V", "Z", "?", "Q"} {
 		if !strings.Contains(got, want) {
@@ -502,10 +505,10 @@ func TestReceiverFeedbackSplit(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 80, 24
 	m.start = m.now.Add(-time.Minute)
-	m.st = core.SeedStations()[0]
-	m.haveSt = true
-	m.ph = phPlay
-	m.setFeedback("LOVED  Track and station")
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
+	m.s.Feedback, m.s.FeedbackAt = "LOVED  Track and station", m.now
 	if !m.receiverShape() {
 		t.Skip("needs the receiver layout")
 	}
@@ -523,18 +526,19 @@ func TestStartupNoticeSurvivesPick(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	m := New(c, newStubPlayer(), Options{Accent: "#FFB000", Notice: "database was damaged; moved aside"})
+	m := New(c, newStubPlayer(), Options{Accent: "#FFB000",
+		Session: session.Options{Notice: "database was damaged; moved aside"}})
 	m.w, m.h = 80, 24
 	m.start = m.now.Add(-time.Minute)
 
-	nm, _ := m.applyPick(core.Pick{Station: core.SeedStations()[0]})
+	nm, _ := m.step(session.Tuned{Pick: core.Pick{Station: core.SeedStations()[0]}})
 	m = nm
 	if !strings.Contains(stripANSI(m.View()), "NOTICE") {
 		t.Fatal("notice must survive a pick")
 	}
 	km, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	m = km.(Model)
-	if m.notice != "" {
+	if m.s.Notice != "" {
 		t.Fatal("first keypress must acknowledge the notice")
 	}
 }
@@ -546,7 +550,7 @@ func TestReducedMotionSkipsTheCeremony(t *testing.T) {
 	m.w, m.h = 100, 30
 	m.reduceMotion = true
 	m.now = m.now.Add(time.Second)
-	nm, _ := m.applyPick(core.Pick{Station: core.SeedStations()[0]})
+	nm, _ := m.step(session.Tuned{Pick: core.Pick{Station: core.SeedStations()[0]}})
 	m = nm
 	// No scramble was ever armed.
 	if m.decrypt.Active(m.now) || m.stDecrypt.Active(m.now) {
@@ -568,7 +572,7 @@ func TestReducedMotionSkipsTheCeremony(t *testing.T) {
 		}
 	}
 	plain := strings.Join(lines, "\n")
-	if !strings.Contains(plain, strings.ToUpper(cleanStationName(m.st.Name))) {
+	if !strings.Contains(plain, strings.ToUpper(cleanStationName(m.s.Station.Name))) {
 		t.Fatalf("settled name missing under reduced motion: %q", plain)
 	}
 }
@@ -591,28 +595,28 @@ func TestASCIIModeIsSevenBit(t *testing.T) {
 			m.start = m.now
 		},
 		func(m *Model) { // playing with track, love, feedback
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
-			m.ph = phPlay
-			m.playStart = m.now.Add(-time.Minute)
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
+			m.s.Phase = session.Playing
+			m.s.PlayStart = m.now.Add(-time.Minute)
 			m.setTrack("An Artist", "A Title")
+			m.s.HaveTrack = true
 			m.trackAt = m.now.Add(-time.Second)
-			m.lovedTrack = true
-			m.setFeedback("LOVED  Track and station")
-			m.presets = map[int]string{1: "a"}
-			m.reason = "wildcard"
+			m.s.LovedTrack = true
+			m.s.Feedback, m.s.FeedbackAt = "LOVED  Track and station", m.now
+			m.s.Presets = map[int]string{1: "a"}
+			m.s.Reason = "wildcard"
 			m.listenTotals = map[string]time.Duration{"a": time.Hour}
 			m.rebuildDensity()
 		},
 		func(m *Model) { // standby with notice
-			m.notice = "database was damaged; moved aside"
+			m.s.Notice = "database was damaged; moved aside"
 		},
 		func(m *Model) { // offline
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
-			m.ph = phOffline
-			m.retryN = 1
-			m.retryAt = m.now.Add(8 * time.Second)
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
+			m.s.Phase = session.Offline
+			m.s.RetryAt = m.now.Add(8 * time.Second)
 		},
 		func(m *Model) { // recent history
 			m.history = true
@@ -662,40 +666,40 @@ func TestASCIIModeIsSevenBit(t *testing.T) {
 		},
 		func(m *Model) { // volume strip
 			m.volumeOpen = true
-			m.volume = 42
+			m.s.Volume = 42
 		},
 		func(m *Model) { // paused
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
-			m.ph = phPaused
-			m.pausedAt = m.now.Add(-2 * time.Minute)
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
+			m.s.Phase = session.Paused
+			m.s.PausedAt = m.now.Add(-2 * time.Minute)
 		},
 		func(m *Model) { // resuming
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
-			m.ph = phTune
-			m.resuming = true
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
+			m.s.Phase = session.Tuning
+			m.s.Resuming = true
 		},
 		func(m *Model) { // sleep timer armed
-			m.st = core.SeedStations()[0]
-			m.haveSt = true
-			m.ph = phPlay
-			m.playStart = m.now.Add(-time.Hour)
-			m.sleepStep = 0
-			m.sleepAt = m.now.Add(14 * time.Minute)
+			m.s.Station = core.SeedStations()[0]
+			m.s.HaveStation = true
+			m.s.Phase = session.Playing
+			m.s.PlayStart = m.now.Add(-time.Hour)
+			m.s.SleepStep = 0
+			m.s.SleepAt = m.now.Add(14 * time.Minute)
 		},
 		func(m *Model) { // help sheet
 			m.helpOpen = true
 		},
 		func(m *Model) { // info sheet, loaded
-			m.st = core.SeedStations()[0]
-			m.st.Country = "Japan"
-			m.st.Bitrate = 128
-			m.st.Tags = "jazz, soul"
-			m.st.Homepage = "https://example.org/radio/"
-			m.haveSt = true
+			m.s.Station = core.SeedStations()[0]
+			m.s.Station.Country = "Japan"
+			m.s.Station.Bitrate = 128
+			m.s.Station.Tags = "jazz, soul"
+			m.s.Station.Homepage = "https://example.org/radio/"
+			m.s.HaveStation = true
 			m.infoOpen = true
-			m.infoFor = m.st.UUID
+			m.infoFor = m.s.Station.UUID
 			m.info = core.StationInfo{
 				Listened: 2 * time.Hour, Visits: 5,
 				FirstHeard:  m.now.Add(-72 * time.Hour),

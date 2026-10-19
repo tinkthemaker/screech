@@ -12,6 +12,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 func (m *Model) loadHistory(view historyView) bool {
@@ -73,10 +74,7 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "q", "ctrl+c":
-		m.quitting = true
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
+		return m.quit()
 	case "esc":
 		if m.historyView == historyLoved && len(m.libraryQuery) > 0 {
 			m.libraryQuery = nil
@@ -151,22 +149,16 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.history = false
-			m.seeking = true
-			m.note = ""
-			return m, m.seedCmd(query)
+			return m.intent(session.Seed{Query: query})
 		case "r":
 			entry, ok := m.selectedLovedTrack()
 			if !ok || entry.StationUUID == "" {
 				return m, nil
 			}
-			pick, err := m.core.TuneTo(entry.StationUUID, time.Now())
-			if err != nil {
-				m.note = err.Error()
-				m.history = false
-				return m, nil
-			}
-			pick.Reason = "from a loved track"
-			return m.applyPick(pick)
+			m.history = false
+			// When the track's station is already on, the engine no-ops
+			// and the music continues — the library simply closes.
+			return m.intent(session.TuneTo{UUID: entry.StationUUID, Reason: "from a loved track"})
 		case "x":
 			entry, ok := m.selectedLovedTrack()
 			if !ok {
@@ -180,12 +172,11 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			removed, err := m.core.ForgetLovedTrack(entry.ArtistKey, entry.Title)
 			if err != nil {
-				m.note = "could not remove loved track"
-				return m, nil
+				return m.intent(session.Notify{Note: "could not remove loved track"})
 			}
 			if removed {
 				m.loadHistory(historyLoved)
-				m.setFeedback("LIBRARY  Track removed")
+				return m.intent(session.Notify{Feedback: "LIBRARY  Track removed"})
 			}
 			return m, nil
 		}
@@ -223,16 +214,10 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.history = false
-			if m.haveSt && entry.UUID == m.st.UUID {
+			if m.s.HaveStation && entry.UUID == m.s.Station.UUID {
 				return m, nil // already playing it
 			}
-			pick, err := m.core.TuneTo(entry.UUID, time.Now())
-			if err != nil {
-				m.note = err.Error()
-				return m, nil
-			}
-			pick.Reason = "from saved stations"
-			return m.applyPick(pick)
+			return m.intent(session.TuneTo{UUID: entry.UUID, Reason: "from saved stations"})
 		case "x":
 			entry, ok := m.selectedSaved()
 			if !ok {
@@ -244,33 +229,23 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if err := m.core.RemoveStation(entry.UUID); err != nil {
-				m.note = "could not remove station"
-				return m, nil
+				return m.intent(session.Notify{Note: "could not remove station"})
 			}
-			m.presets = m.core.Presets()
 			m.loadHistory(historyStations)
-			m.setFeedback("STATIONS  Removed")
-			return m, nil
+			return m.intent(session.RefreshPresets{}, session.Notify{Feedback: "STATIONS  Removed"})
 		}
 		// Digits still tune from the saved list when a preset holds that slot.
 		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
 			slot := int(key[0] - '0')
-			uuid, ok := m.presets[slot]
+			uuid, ok := m.s.Presets[slot]
 			if !ok {
 				return m, nil
 			}
-			if m.haveSt && uuid == m.st.UUID {
-				m.history = false
+			m.history = false
+			if m.s.HaveStation && uuid == m.s.Station.UUID {
 				return m, nil
 			}
-			pick, err := m.core.TuneTo(uuid, time.Now())
-			if err != nil {
-				m.note = err.Error()
-				m.history = false
-				return m, nil
-			}
-			pick.Reason = fmt.Sprintf("preset %d", slot)
-			return m.applyPick(pick)
+			return m.intent(session.TuneTo{UUID: uuid, Reason: fmt.Sprintf("preset %d", slot)})
 		}
 		return m, nil
 	}
@@ -301,10 +276,7 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleSavedFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		m.quitting = true
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
+		return m.quit()
 	case tea.KeyEsc, tea.KeyEnter:
 		m.savedFind = false
 		return m, nil
@@ -343,10 +315,7 @@ func (m Model) handleSavedFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleLibraryFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		m.quitting = true
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
+		return m.quit()
 	case tea.KeyEsc, tea.KeyEnter:
 		m.libraryFind = false
 		return m, nil
