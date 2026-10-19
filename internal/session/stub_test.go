@@ -90,6 +90,12 @@ func (s *stubPlayer) restartCount() int {
 	return s.restarts
 }
 
+func (s *stubPlayer) volumeLevel() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.volume
+}
+
 func (s *stubPlayer) failPlay(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

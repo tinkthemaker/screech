@@ -120,10 +120,14 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 		}
 		return s, []Cmd{s.listen()}
 
-	case player.EventPaused, player.EventResumed, player.EventStopped:
-		// Pause semantics are another task's; the listener still re-arms
-		// or the event stream goes silent behind them.
-		return s, []Cmd{s.listen()}
+	case player.EventPaused:
+		return s.externalPause()
+
+	case player.EventResumed:
+		return s.externalResume()
+
+	case player.EventStopped:
+		return s.externalStop()
 
 	case player.EventDied:
 		// The dead process's channel is gone; restartCmd brings up the

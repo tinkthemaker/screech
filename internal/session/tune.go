@@ -24,7 +24,9 @@ func (s State) tick(msg Tick) (State, []Cmd) {
 	if s.Phase == Playing && s.drops > 0 && !s.lockAt.IsZero() && s.Now.Sub(s.lockAt) >= stableAfter {
 		s.drops = 0
 	}
-	return s, nil
+	// The sleep timer shares the frame clock: the countdown, the fade
+	// and the expiry all live in sleepTick.
+	return s.sleepTick()
 }
 
 func (s State) tuned(msg Tuned) (State, []Cmd) {

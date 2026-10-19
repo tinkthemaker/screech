@@ -29,8 +29,15 @@ const (
 	maxRestarts   = 3
 	restartWindow = 5 * time.Minute
 
-	// resumeInPlace and sleepFade arrive with the pause/sleep task that
-	// consumes them; unreferenced constants fail the unused check.
+	// resumeInPlace is how long a pause can still pick up where it left
+	// off: a short pause resumes from mpv's buffer a few seconds behind
+	// live, like pausing live TV; past that the buffer is stale or the
+	// server has hung up, so resume rejoins the live edge instead.
+	resumeInPlace = 30 * time.Second
+
+	// sleepFade is the volume's glide path to silence in the last stretch
+	// before the sleep timer pauses the radio.
+	sleepFade = 30 * time.Second
 
 	defaultSyncLimit = 20000
 
@@ -190,12 +197,36 @@ func (s State) Update(msg Msg) (State, []Cmd) {
 		return s.playFailed(msg)
 	case Next:
 		return s.next()
+	case TogglePause:
+		return s.togglePause()
+	case CycleSleep:
+		return s.cycleSleep()
+	case Love:
+		return s.love()
+	case TogglePreset:
+		return s.togglePreset()
+	case RecallPreset:
+		return s.recallPreset(msg)
+	case StepVolume:
+		return s.adjustVolume(msg.Delta)
+	case SetVolume:
+		return s.volumeTo(msg.Percent)
+	case RefreshPresets:
+		return s.refreshPresets()
 	case TuneTo:
 		return s.tuneTo(msg)
 	case Seed:
 		return s.seed(msg)
 	case Wildcard:
 		return s.wildcard()
+	case Touch:
+		return s.touch()
+	case Synced:
+		return s.synced(msg)
+	case VolumeSet:
+		return s.volumeSet(msg)
+	case PauseSet:
+		return s.pauseSet(msg)
 	case PlayerEvent:
 		return s.handlePlayerEvent(player.Event(msg))
 	case EventsClosed:
