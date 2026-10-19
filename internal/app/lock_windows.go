@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package app
 
 import (
 	"crypto/sha256"
@@ -12,10 +12,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// acquireSingleInstance uses a named mutex whose name is derived from the
+// AcquireSingleInstance uses a named mutex whose name is derived from the
 // data directory, so two users with different data directories do not block
 // one another. The mutex is destroyed when the returned cleanup runs.
-func acquireSingleInstance(dataDir string) (func(), error) {
+func AcquireSingleInstance(dataDir string) (func(), error) {
 	name, _ := syscall.UTF16PtrFromString("screech-" + hashDataDir(dataDir))
 	h, err := windows.CreateMutex(nil, false, name)
 	if err != nil {
@@ -24,7 +24,7 @@ func acquireSingleInstance(dataDir string) (func(), error) {
 			// mutex alongside the error; leaving it open leaks one
 			// per failed launch.
 			_ = windows.CloseHandle(h)
-			return nil, errAlreadyRunning
+			return nil, ErrAlreadyRunning
 		}
 		return nil, err
 	}

@@ -1,6 +1,6 @@
 //go:build !windows
 
-package main
+package app
 
 import (
 	"errors"
@@ -10,10 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// acquireSingleInstance takes an advisory flock on a file in the data
+// AcquireSingleInstance takes an advisory flock on a file in the data
 // directory. The lock is released when the returned cleanup function runs
 // (process exit also drops it).
-func acquireSingleInstance(dataDir string) (func(), error) {
+func AcquireSingleInstance(dataDir string) (func(), error) {
 	p := filepath.Join(dataDir, "screech.lock")
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -22,7 +22,7 @@ func acquireSingleInstance(dataDir string) (func(), error) {
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) {
-			return nil, errAlreadyRunning
+			return nil, ErrAlreadyRunning
 		}
 		return nil, err
 	}

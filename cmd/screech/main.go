@@ -4,12 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 
-	"github.com/tinkthemaker/screech/internal/config"
-	"github.com/tinkthemaker/screech/internal/core"
-	"github.com/tinkthemaker/screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/app"
 	"github.com/tinkthemaker/screech/internal/tui"
 	versionpkg "github.com/tinkthemaker/screech/internal/version"
 )
@@ -37,11 +34,6 @@ var usage = "screech " + version + " - terminal internet radio\n\n" +
 	"  SCREECH_REDUCED_MOTION  set to any value for the same effect as --reduced-motion\n"
 
 var reducedMotion bool
-
-// errAlreadyRunning is the single-instance lock's "someone else has it"
-// answer. Startup must be able to tell it apart from a real lock failure:
-// only this error leaves the running instance's log file alone.
-var errAlreadyRunning = errors.New("another screech is already running")
 
 type command int
 
@@ -143,147 +135,49 @@ func main() {
 }
 
 func run() (exit int) {
+	log := app.NewLog(app.DefaultLogPath())
 	// Nothing may die silently: panics land in the log and the console stays
 	// open when Windows created it just for us (double-click launch).
 	defer func() {
 		if r := recover(); r != nil {
-			openLog()
+			log.Open()
 			msg := fmt.Sprintf("panic: %v\n\n%s", r, debug.Stack())
-			logLine("%s", msg)
-			fmt.Fprintf(os.Stderr, "screech crashed. Details written to:\n  %s\n\n%s\n", logPath(), msg)
+			log.Linef("%s", msg)
+			fmt.Fprintf(os.Stderr, "screech crashed. Details written to:\n  %s\n\n%s\n", log.Path(), msg)
 			holdConsoleOnExit()
 			exit = 2
 		}
 	}()
 
-	logLine("screech %s starting", version)
-
-	cfg, dbPath, err := config.Load()
+	rt, err := app.Start(log)
 	if err != nil {
-		return fail("config: %v", err)
-	}
-	logLine("config ok; db at %s", dbPath)
-	for _, w := range cfg.Warnings {
-		logLine("config warning: %s", w)
-	}
-
-	release, err := acquireSingleInstance(cfg.DataDir)
-	if err != nil {
-		if errors.Is(err, errAlreadyRunning) {
-			// Another instance owns the session — and its log. The
-			// buffered lines die with this process rather than
-			// truncating what the running screech is writing.
+		if errors.Is(err, app.ErrAlreadyRunning) {
 			fmt.Fprintln(os.Stderr, "screech: "+err.Error())
 			holdConsoleOnExit()
 			return 1
 		}
-		return fail("single instance lock: %v", err)
+		return fail("%s", err.Error())
 	}
-	defer release()
-	openLog()
-	defer closeLog()
+	defer rt.Close()
 
-	c, err := core.Open(dbPath)
-	if err != nil {
-		return fail("opening database: %v", err)
-	}
-	defer c.Close()
-	logLine("database open; %d stations cached", c.StationCount())
-
-	opts := tui.Options{Accent: cfg.Accent, ASCII: cfg.ASCII, SyncLimit: cfg.SyncLimit, ReducedMotion: reducedMotion, AutoHopAds: cfg.AutoHopAds}
-	if recovered := c.RecoveredFrom(); recovered != "" {
-		notice := fmt.Sprintf("database was damaged; moved aside to %s and started fresh", filepath.Base(recovered))
-		logLine("%s", notice)
-		opts.Notice = notice
-	}
-
-	pl, err := player.NewMPV(cfg.MpvPath, cfg.DataDir)
-	if err != nil {
-		return fail("%v\n\nscreech needs mpv for playback.\n  windows:  scoop install mpv   (or choco install mpv, or https://mpv.io)\n  macos:    brew install mpv\n  linux:    apt/dnf/pacman install mpv\n\nJust installed it? Open a NEW terminal so PATH refreshes.\nmpv somewhere odd? Set mpv_path in the config file.\nRun `screech doctor` for a full checkup.", err)
-	}
-	defer pl.Close()
-	logLine("mpv connected over IPC")
-
-	// mpv boots at --volume=100; restore the persisted level now, on this
-	// thread, so the first Play can't beat the TUI's async volume command
-	// to the speakers.
-	if err := pl.SetVolume(c.Volume()); err != nil {
-		logLine("volume restore failed: %v", err)
-	}
+	opts := tui.Options{Accent: rt.Config.Accent, ASCII: rt.Config.ASCII, SyncLimit: rt.Config.SyncLimit, ReducedMotion: reducedMotion, AutoHopAds: rt.Config.AutoHopAds, Notice: rt.Notice}
 	if os.Getenv("SCREECH_REDUCED_MOTION") != "" {
 		reducedMotion = true
 		opts.ReducedMotion = true
 	}
-	if err := tui.Run(c, pl, opts); err != nil {
+	if err := tui.Run(rt.Core, rt.Player, opts); err != nil {
+		log.Linef("FATAL: ui: %v", err)
 		return fail("ui: %v", err)
 	}
-	logLine("clean exit")
+	log.Linef("clean exit")
 	return 0
 }
 
-var (
-	logF   *os.File
-	logBuf []string
-)
-
-func logPath() string {
-	if base, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(base, "screech", "screech.log")
-	}
-	if exe, err := os.Executable(); err == nil {
-		return filepath.Join(filepath.Dir(exe), "screech.log")
-	}
-	return "screech.log"
-}
-
-// openLog starts a fresh last-run log: one launch, one file, easy to paste.
-// It runs only once startup is allowed to touch the user's directory —
-// after the single-instance lock, or when failing for any other reason —
-// so a second screech never truncates the running instance's log.
-func openLog() {
-	if logF != nil {
-		return
-	}
-	p := logPath()
-	_ = os.MkdirAll(filepath.Dir(p), 0o700)
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return
-	}
-	logF = f
-	for _, l := range logBuf {
-		fmt.Fprintln(logF, l)
-	}
-	logBuf = nil
-	_ = logF.Sync()
-}
-
-func closeLog() {
-	if logF != nil {
-		_ = logF.Close()
-		logF = nil
-	}
-}
-
-// logLine buffers until the log file exists. Lines written before the
-// single-instance lock (startup, config) still land, but only once openLog
-// proves this process is allowed to write.
-func logLine(format string, args ...any) {
-	line := fmt.Sprintf(format, args...)
-	if logF == nil {
-		logBuf = append(logBuf, line)
-		return
-	}
-	fmt.Fprintln(logF, line)
-	_ = logF.Sync()
-}
-
 func fail(format string, args ...any) int {
-	// A startup failure that isn't "already running" still gets its log:
-	// config errors are exactly what the log is for.
-	openLog()
+	// The FATAL line is written where the failure happened — app.Start
+	// logs startup failures, run() logs the UI's — so fail is only the
+	// user-facing half: stderr, console hold, exit code.
 	msg := fmt.Sprintf(format, args...)
-	logLine("FATAL: %s", msg)
 	fmt.Fprintln(os.Stderr, "screech: "+msg)
 	holdConsoleOnExit()
 	return 1
