@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -404,25 +403,7 @@ func (m *Model) clampSavedPos() {
 }
 
 func (m Model) filteredSaved() []core.SavedStation {
-	query := strings.ToLower(strings.TrimSpace(string(m.savedQuery)))
-	if query == "" {
-		return m.saved
-	}
-	var out []core.SavedStation
-	for _, e := range m.saved {
-		name := strings.ToLower(e.Name)
-		ok := true
-		for _, term := range strings.Fields(query) {
-			if !strings.Contains(name, term) {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			out = append(out, e)
-		}
-	}
-	return out
+	return core.FilterSavedStations(m.saved, string(m.savedQuery))
 }
 
 func (m Model) selectedSaved() (core.SavedStation, bool) {
@@ -442,58 +423,7 @@ func (m Model) selectedLovedTrack() (core.LovedTrack, bool) {
 }
 
 func (m Model) filteredLibrary() []core.LovedTrack {
-	query := strings.ToLower(strings.TrimSpace(string(m.libraryQuery)))
-	if query == "" {
-		return m.library
-	}
-	type match struct {
-		entry core.LovedTrack
-		score int
-	}
-	var matches []match
-	for _, entry := range m.library {
-		score, ok := lovedMatchScore(entry, query)
-		if ok {
-			matches = append(matches, match{entry: entry, score: score})
-		}
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		if matches[i].score == matches[j].score {
-			return matches[i].entry.LovedAt.After(matches[j].entry.LovedAt)
-		}
-		return matches[i].score > matches[j].score
-	})
-	out := make([]core.LovedTrack, len(matches))
-	for i := range matches {
-		out[i] = matches[i].entry
-	}
-	return out
-}
-
-func lovedMatchScore(entry core.LovedTrack, query string) (int, bool) {
-	artist := strings.ToLower(entry.Artist)
-	title := strings.ToLower(entry.Title)
-	station := strings.ToLower(entry.StationName)
-	all := artist + " " + title + " " + station
-	score := 0
-	for _, term := range strings.Fields(query) {
-		if !strings.Contains(all, term) {
-			return 0, false
-		}
-		switch {
-		case strings.HasPrefix(title, term):
-			score += 80
-		case strings.HasPrefix(artist, term):
-			score += 70
-		case strings.Contains(title, term):
-			score += 50
-		case strings.Contains(artist, term):
-			score += 40
-		default:
-			score += 10
-		}
-	}
-	return score, true
+	return core.FilterLovedTracks(m.library, string(m.libraryQuery))
 }
 
 func lovedTrackKey(entry core.LovedTrack) string {
