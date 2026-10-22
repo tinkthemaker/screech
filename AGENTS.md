@@ -52,6 +52,14 @@ done
   change to the pool, rewards, decay or priors and compare the late-window
   E[like]; `EVAL_SEED_BASE=101` reruns on fresh worlds so a tweak isn't
   tuned to one seed set.
+- `go test -tags layout -run "Layout|KeyboardMap" -v ./internal/gui` (about
+  75 s) is the GUI layout guard: Windows-only, drives headless Edge (`msedge`
+  on PATH or under `%ProgramFiles(x86)%\Microsoft\Edge\Application`, skips
+  when absent) against `internal/gui/testdata` fixtures and checks the 4-px
+  grid, columns, text fit and leaf overlap at scales 1 and 1.5, in folded
+  and unfolded modes; `TestKeyboardMap` replays scripted keys and wheel
+  events on the real page and checks the bridge calls. Run it after any
+  change to `internal/gui/frontend/`; screenshots land in `.review/gui/`.
 - `go test -tags live ./internal/core -run Live` hits the real radio-browser
   directory; plain unit tests must never touch the network (`openTestCore`
   points the client at a dead transport).
