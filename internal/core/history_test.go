@@ -77,6 +77,50 @@ func TestRecentlyHeardIncludesLoveAndNewestFirst(t *testing.T) {
 	}
 }
 
+// Relaunches and reconnects repeat the same track as a new heard row; a
+// face's RECENT list collapses the consecutive repeats to the newest.
+// The store keeps every row — `screech export heard` reads it raw.
+func TestRecentlyHeardCollapsesConsecutiveRepeats(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	ins := func(artist, title string, at time.Time) {
+		if err := c.store.InsertTrack("seed:wfmu", NormalizeArtist(artist), artist, title, artist+" - "+title, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins("Northcape", "Indigo Line", now)                    // oldest A
+	ins("Other Artist", "Track B", now.Add(time.Minute))    // B
+	ins("Northcape", "Indigo Line", now.Add(2*time.Minute)) // A relaunch
+	ins("Northcape", "Indigo Line", now.Add(3*time.Minute)) // A reconnected (newest)
+
+	// Raw store keeps all four — the export path is unchanged.
+	raw, err := c.store.RecentlyHeard(10)
+	if err != nil || len(raw) != 4 {
+		t.Fatalf("raw rows: %d err=%v", len(raw), err)
+	}
+
+	got, err := c.RecentlyHeard(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("collapsed to %d rows: %+v", len(got), got)
+	}
+	if got[0].Title != "Indigo Line" || got[1].Title != "Track B" || got[2].Title != "Indigo Line" {
+		t.Fatalf("order: %+v", got)
+	}
+	// The collapse keeps the newest row of a run.
+	if got[0].HeardAt.Unix() != now.Add(3*time.Minute).Unix() {
+		t.Fatalf("newest not kept: %v", got[0].HeardAt)
+	}
+
+	// A smaller window trims after collapsing, not before.
+	got2, err := c.RecentlyHeard(2)
+	if err != nil || len(got2) != 2 || got2[1].Title != "Track B" {
+		t.Fatalf("n=2: %+v err=%v", got2, err)
+	}
+}
+
 func TestLovedTracksDeduplicatesAndCanForget(t *testing.T) {
 	c := openTestCore(t)
 	now := time.Now()

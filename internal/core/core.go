@@ -238,8 +238,34 @@ func (c *Core) RemoveStation(uuid string) error {
 	return nil
 }
 
+// RecentlyHeard is the face's view of the last n heard rows: consecutive
+// rows with the same station, artist and title collapse to the newest —
+// a relaunch or reconnect repeats the current track without it being a
+// new listen. Overfetch refills the window collapse shrinks. The store
+// stays raw: `screech export heard` needs every row.
 func (c *Core) RecentlyHeard(n int) ([]RecentTrack, error) {
-	return c.store.RecentlyHeard(n)
+	fetch := -1 // store treats a negative limit as "all"
+	if n > 0 {
+		fetch = 3 * n
+	}
+	rows, err := c.store.RecentlyHeard(fetch)
+	if err != nil {
+		return nil, err
+	}
+	out := rows[:0]
+	for _, r := range rows {
+		if last := len(out) - 1; last >= 0 {
+			p := out[last]
+			if p.StationUUID == r.StationUUID && p.Artist == r.Artist && p.Title == r.Title {
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	if n > 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
 }
 
 // StationTotal is cumulative listen time for one station, for the
