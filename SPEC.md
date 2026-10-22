@@ -134,6 +134,65 @@ Four layers, buildable in vertical slices:
    Tailscale HTTPS). One big NEXT button, a small heart, now-playing text. Tailscale
    for off-LAN, zero exposed ports.
 
+### Faces over one engine
+
+Layers 1 and 2 above are a dependency direction, not just a list. `core`
+knows no UI. `internal/session` sits on `core` and `player` and knows no
+face either. A face imports `session` and draws it:
+
+    core -> session -> faces: tui (terminal), gui (Windows window)
+    app  = the shared startup both programs call first
+
+`cmd/screech` runs `app.Start`, then the Bubble Tea faceplate over a
+`session.State`. `cmd/screech-gui` (Windows only; every file in it is
+`//go:build windows`) runs the same `app.Start`, then a frameless Wails v2
+window. The window has no Bubble Tea loop to ride, so the engine runs on a
+`session.Runner`: one goroutine owns the `State`, each command runs on its
+own goroutine, a 250 ms tick republishes the changes no message causes
+(feedback expiring, the sleep minutes), and the face receives a
+`session.Snapshot` only when it differs from the last. A `Snapshot` is a
+comparable value: everything the now-playing area draws and nothing it
+needs a slice or map for. Level readings go out at most every 33 ms; the
+meter animates between them. The single-instance lock covers both
+programs, so only one of them plays at a time. The window's own design
+record is `docs/superpowers/specs/2026-10-18-lcars-gui-design.md`.
+
+**The bridge contract** (`internal/gui`, which imports neither Wails nor
+`x/sys/windows`, so its tests run on every OS). `gui.Bridge` is the one
+object bound to the page, and every bound method is exactly one of two
+things: a single queued session intent, which first sends `session.Touch`
+so a startup notice clears on the first interaction, as it does in the
+terminal; or a single `core` read for a library view (recent, loved,
+stations, taste, info), returned as a DTO with lowerCamel JSON, times in unix
+milliseconds and durations in whole seconds. Nothing on that surface
+blocks; slow work runs on the runner and reports back as an event. Go
+pushes two events, `snapshot` (a `session.Snapshot`) and `level` (`[L, R,
+peak]`). The page draws `Snapshot`s and never decides behaviour: wording
+the terminal already has is reused verbatim, and even the first-run
+wildcard is an intent (`Wildcard`), not page logic. What only the shell
+can do goes through the small `gui.Window` interface (fold and unfold,
+quit), and display choices the page can't read for itself (reduced motion)
+come from `Bridge.Prefs()`. Two tests pin the surface from both sides:
+`TestBoundSurface` lists the exported methods, and `TestBridgeJSContract`
+requires `bridge.js` to name exactly those, so a method can't exist on one
+side only.
+
+**The layout guard.** The front end is plain ES modules served from
+`embed.FS` with no build step, so nothing but a test stands between a CSS
+edit and a crooked panel. `go test -tags layout -run "Layout|KeyboardMap"
+./internal/gui` (Windows only; skipped when Edge is absent) renders every
+window state (each strip state, every console view, empty and 150-row
+lists, nine full presets) in headless Edge, at 100% and 150% scaling,
+folded and unfolded. The fixtures are built from the bridge's own Go types
+and fed to the real page through a fake bridge. It fails on any box edge off
+the 4 px grid, text off the x = 136 column (filled rows 124), text that
+overflows or escapes its box, two leaves that overlap, wrong words or
+colours where a fixture pins them, and any strip element that moves between
+states or between folded and unfolded. `TestKeyboardMap` replays scripted
+key and wheel events on the real page and checks which bridge calls each
+one makes, including that the wheel never sets the volume. Screenshots land
+in `.review/gui/`, and CI uploads them.
+
 ## Playback (TUI)
 
 Shell out to `mpv --no-video --idle` over JSON IPC. mpv handles codecs, ICY,
@@ -664,7 +723,10 @@ and in `screech doctor`; only invalid TOML is fatal.
 bubbletea + lipgloss + harmonica · hand-rolled mpv IPC client (unix socket +
 windows named pipe) · hand-rolled radio-browser client · modernc.org/sqlite ·
 go-runewidth · BurntSushi/toml. No bubbles/list in v1 (nothing to list).
-Daemon later: net/http stdlib; phone page: htmx.
+The Windows window: Wails v2.16.0 (builds with plain `go build` and
+`-tags desktop,production`; no Wails CLI, no Node, no cgo), a plain-JS front
+end, Antonio (OFL) as its font. Daemon later: net/http stdlib; phone page:
+htmx.
 
 ## Build order (v2 — data starts flowing on day one)
 
@@ -683,7 +745,8 @@ Daemon later: net/http stdlib; phone page: htmx.
 
 ## Path 2 notes (do not build, do not preclude)
 
-Wails desktop app reusing core unchanged. mpv → pure-Go audio (oto + decoders) or
-webview `<audio>`. Daemon optional. ICY reading in-process. Real FFT feeds the
-same wave renderer. Known tradeoff: without the daemon, multi-device state doesn't
-sync (acceptable; SQLite sync or optional daemon later).
+A Wails desktop app reusing core unchanged: the Windows window (`cmd/screech-gui`,
+v0.9) is its first step, and it keeps mpv. What stays Path 2: mpv → pure-Go audio
+(oto + decoders) or webview `<audio>`. Daemon optional. ICY reading in-process.
+Real FFT feeds the same wave renderer. Known tradeoff: without the daemon,
+multi-device state doesn't sync (acceptable; SQLite sync or optional daemon later).

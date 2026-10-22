@@ -185,8 +185,10 @@ mpv and restore the volume. Move the reusable parts into an internal package
   still passes.
 - WebView2 ships with Windows 10 and 11. If it is missing, Wails's built-in
   install prompt handles it.
-- **Font:** Antonio (SIL Open Font License), bundled as woff2 in the embedded
-  assets with its licence file. No network font loading.
+- **Font:** Antonio (SIL Open Font License), bundled as the variable TTF
+  (`Antonio[wght].ttf`, `font-weight: 100 700`) in the embedded assets with
+  its licence file. A TTF, not woff2 — Google's repo ships the variable
+  font only as TTF. No network font loading.
 
 ### 4. The Go/JS bridge
 
@@ -398,3 +400,54 @@ meter, which is information, not decoration.
 - Exact feedback wording where the terminal's doesn't fit the strip.
 - What the decorative number in the bottom elbow shows (the mockup has
   `08-47`).
+
+## Decided while building
+
+The points "Left to the builder" leaves open, as shipped in 0.9.0. Where the
+code differs from what this spec or the plan said, the code is recorded.
+
+- **Unfolding near the bottom of the work area.** Unfolding grows downward
+  from the window's top-left corner. If the 428-px window would cross the
+  bottom of the work area of the monitor under its top bar, it moves up by
+  the overflow (and never above that work area's top) and remembers the
+  shift. Folding moves it back down by that shift, unless the window was
+  dragged in between; then it folds where it is. Position and fold state
+  are saved either way. (`cmd/screech-gui/shell.go`)
+- **No visible close or minimise control.** The frame stays as mocked. Q,
+  Alt+F4 and the taskbar's Close all quit through one path that saves the
+  placement, stops the session runner and then closes mpv, the database and
+  the lock, once. A minimised window is restored by the second-launch
+  handoff.
+- **The bottom elbow shows the local time** as `HH-MM`, taken from the
+  page's clock and rechecked each second while the console is unfolded, so
+  it turns over on the minute. The mockup's `08-47` is only the markup's
+  placeholder. (`js/console.js`)
+- **The icon is an orange (`#FF9900`) LCARS elbow** on transparent, drawn
+  for this project: a 96-px block joined to a 48-px bar with an outer
+  quarter circle of radius 96 and a concave inner one of radius 40. The
+  executable carries 256, 48, 32 and 16 px images as resource ID 3, which
+  Wails loads.
+- **Reduced motion reaches the page through a bound `Bridge.Prefs()`
+  method**, not a start-URL query: Wails v2 has no start-URL option. This
+  replaces the plan's `?reduced=1`. The shell fills `Prefs.ReducedMotion`
+  from `--reduced-motion` or `SCREECH_REDUCED_MOTION`, and the page also
+  honours the `prefers-reduced-motion` media query. The layout guard's
+  `reduced` fixture goes through the same call. The meter keeps moving.
+- **`Bridge.Wildcard()`** carries the first-run wildcard to the engine, as
+  the terminal's `session.Wildcard`. The hint is the terminal's own wording,
+  `type a genre or artist · space for a wildcard`, shown in the SEARCH
+  input's placeholder on a first launch, and SPACE in an empty SEARCH box
+  calls `Wildcard()`. (The plan's draft said NEXT; NEXT is a skip and stays
+  one.)
+- **ESC** unwinds in this order: filter text, the filter box, the SEARCH
+  box (cleared, then blurred), a filter left behind, then the fold. INFO
+  isn't a transient panel in the window, so ESC folds straight from it
+  rather than closing it first.
+- **Feedback wording** is the engine's, unchanged. On the strip, its lead
+  word (up to the first double space) takes the status word's place in
+  peach and the remainder follows after a `·`, so `LEARNED  Fast skip noted`
+  reads `LEARNED · Fast skip noted`.
+- **Packages:** `internal/app` (shared startup), `internal/session` (the
+  engine, `Snapshot`, `Runner`), `internal/gui` (the bridge, the row types,
+  the embedded front end), `cmd/screech-gui` (the Windows shell:
+  `main.go`, `shell.go`, `handoff.go`, `winapi.go`).

@@ -45,11 +45,14 @@ a compact stacked layout.
 
 - Windows, with [Scoop](https://scoop.sh):
   `scoop install https://github.com/tinkthemaker/screech/releases/latest/download/screech.json`
+  (this also adds `screech-gui` and a "Screech" Start-menu shortcut for
+  [the window](#the-window-windows))
 - Anywhere with Go 1.26 or newer:
   `go install github.com/tinkthemaker/screech/cmd/screech@latest`
 - Or download the archive for Windows, macOS, or Linux from the
   [releases page](https://github.com/tinkthemaker/screech/releases) and put
-  `screech` somewhere on your PATH.
+  `screech` somewhere on your PATH. The Windows archives also carry
+  `screech-gui.exe`.
 
 From a checkout, `go run ./cmd/screech` runs it without installing.
 
@@ -187,6 +190,87 @@ any other key closes it and still does its own job. The same goes for `i`.
 
 **q** — quit.
 
+## The window (Windows)
+
+![The Screech window folded to its strip: station, track, level meter, volume slider, and the NEXT, LOVE, PAUSE and MORE buttons](docs/screenshots/strip.png)
+
+On Windows, Screech also comes as a small window in the LCARS style of a
+starship control panel: something to leave open beside other work, glance
+at, and click NEXT or LOVE on. It is the same Screech as the terminal with
+another face on the same listening engine: the same library, loves,
+presets, history, taste model and `config.toml` (`mpv_path`, `data_dir`,
+`auto_hop_ads` and `sync_limit` apply; `accent`, `ascii` and the theme
+picker are terminal-only, since the window has one palette). Pause, sleep,
+reconnects, offline retries and mpv restarts follow the same rules, and
+`--reduced-motion` or `SCREECH_REDUCED_MOTION=1` calms the window too.
+
+Start it with `screech-gui.exe`, which sits next to `screech.exe` in the
+Windows zip, or with the "Screech" Start-menu shortcut the Scoop package
+adds. It needs mpv, like the terminal, and **WebView2**, Microsoft's web
+view, which is built into Windows 10 and 11; if it's missing, the window
+offers to install it. If startup fails (a config that isn't valid TOML, mpv
+missing), a message box says why.
+
+Only one Screech runs per data directory, window or terminal. Opening the
+window a second time brings the first to the front. The terminal refuses to
+start while the window is open, and the window says so if a terminal is
+already playing.
+
+The strip is 480 × 128: the station and a level meter, the track, then a
+status row (`LIVE`, `TUNING`, `RECONNECTING`, `BUFFERING`, `PAUSED`, the
+pick reason, feedback such as `LEARNED  Fast skip noted`) ending in the
+volume slider, and the NEXT, LOVE, PAUSE and MORE buttons. Offline turns the
+whole frame red and NEXT reads RETRY NOW. **Volume is the slider, or `-`/`+`
+(`[`/`]`); the mouse wheel never changes it**, so a stray scroll over a
+window sitting behind a game or a web page can't. There is no close button:
+`q`, Alt+F4 or the taskbar's Close quits Screech and stops the radio, like
+`q` in the terminal. Drag the window by its frame (the top bar and the left
+block).
+
+![The unfolded window: the LOVED tab with its actions, and the presets row](docs/screenshots/window.png)
+
+**MORE** unfolds the strip downward into a 480 × 428 console, and LESS (or
+`esc`) folds it back; nothing in the strip moves. Near the bottom of the
+screen, the window moves up by exactly as much as it needs to fit and moves
+back when you fold it, unless you dragged it in between. The tabs down the
+left are the terminal's views: **RECENT**, **LOVED**, **STATIONS** and
+**TASTE**, then **SEARCH** (`/` in the terminal), **INFO** (`i`) and
+**SLEEP**, which steps 15, 30, 45, 60 and 90 minutes and off like `z` and
+shows the minutes left. LOVED and STATIONS have a `/ FILTER` pill. The
+actions under a list are RETURN TO STATION, MORE FROM ARTIST and REMOVE on
+LOVED, and TUNE and REMOVE on STATIONS; REMOVE asks for a second press
+(it reads CONFIRM for three seconds), like `x` twice. The footer holds your
+nine presets (saved ones tan, the one playing orange; click one to tune it)
+and a SAVE pill that saves or frees the current station like `f`. The
+elbow at the bottom left shows the local time.
+
+When the window has focus, the terminal's keys work:
+
+| Key | Does |
+|---|---|
+| `space`, `n` | next station (RETRY NOW while offline) |
+| `l` | love or unlove the track |
+| `f` | save the station to a preset, or free it |
+| `1`-`9` | jump to a preset |
+| `p` | pause and resume |
+| `z` | sleep timer |
+| `-` `[` / `+` `=` `]` | volume down / up by 5 |
+| `/` | open SEARCH and type; on LOVED or STATIONS, open the filter instead |
+| `h`, `H` | unfold to RECENT, or to LOVED |
+| `i` | unfold to INFO |
+| `tab`, `shift+tab` | next or previous tab, while unfolded |
+| `j` `k`, arrows, `pgup` `pgdn`, `home` `end` | move through the rows |
+| `enter` | the row's main action: MORE FROM ARTIST on LOVED, TUNE on STATIONS; in SEARCH, seed the radio |
+| `r` | return to the station a loved track came from |
+| `x` | remove the selected row (press twice) |
+| `esc` | clear the filter or the search box first, then fold |
+| `q` | quit |
+
+Holding a key repeats only the volume and row keys, so a held `space`
+skips one station. While the SEARCH or filter box has focus, keys type into
+it: `enter` submits and `esc` backs out. On a first launch, `space` in an
+empty SEARCH box tunes a wildcard, as it does in the terminal.
+
 ## What it's doing underneath
 
 Every station carries Beta(α, β) counts split by daypart (morning, day,
@@ -298,8 +382,17 @@ displays or stores them.
 go build -o dist/screech ./cmd/screech
 ```
 
+The window needs its build tags. Without them, Windows builds only Wails'
+stub, which shows an error box instead of a window (other platforms skip
+the window entirely), so a plain `go build ./...` still works everywhere:
+
+```
+CGO_ENABLED=0 GOOS=windows go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" -o dist/screech-gui.exe ./cmd/screech-gui
+```
+
 Tagged releases are built for Windows, macOS, and Linux by the release
-workflow. SQLite is pure Go, so cross-compilation does not require CGO.
+workflow. SQLite is pure Go, so cross-compilation does not require CGO, and
+neither does the window.
 
 ## Troubleshooting
 

@@ -4,6 +4,51 @@ User-visible changes, newest first. Each version's section becomes its
 GitHub release notes. Releases before 0.8.0 are described on their GitHub
 release pages.
 
+## 0.9.0 — 2026-10-22
+
+### New: a window for Windows
+
+- **The LCARS window.** `screech-gui.exe` opens a small window in the style
+  of a starship panel: a 480 × 128 strip with the station, the track, a
+  level meter, a volume slider and the NEXT, LOVE, PAUSE and MORE buttons.
+  MORE unfolds it into a console with your library (RECENT, LOVED, STATIONS,
+  TASTE), SEARCH, INFO, the sleep timer and the nine presets. It sits behind
+  other windows like any other, remembers where you left it and whether it
+  was unfolded, and opens centred if that spot is no longer on any screen.
+  Windows only for now; the terminal works as it always has.
+- **How to open it.** Run `screech-gui.exe`, which sits next to
+  `screech.exe` in the Windows zip, or use the "Screech" Start-menu shortcut
+  the Scoop package adds. No terminal needed. If startup fails (a config
+  that isn't valid TOML, mpv missing), the window says why in a message box.
+- **It is the same Screech.** The window and the terminal share your
+  library, loves, presets, history, volume and learning, and both read
+  `config.toml` (`mpv_path`, `data_dir`, `auto_hop_ads` and `sync_limit`
+  apply; `accent` and `ascii` are terminal-only). Pause, sleep, reconnects,
+  offline retries and mpv restarts behave the same, because they are the
+  same engine. The terminal's keys work when the window has focus; the
+  README lists them.
+- **Volume is the slider and the keys, nothing else.** Click or drag the
+  slider on the strip, or press `-`/`+` (or `[`/`]`). The mouse wheel never
+  changes it, so a stray scroll over a window parked behind a game or a web
+  page can't.
+- **One Screech at a time.** Opening the window a second time brings the
+  first to the front. The terminal refuses to start while the window is
+  open, and the window says so if a terminal is already playing.
+- **No close button.** Press `q`, press Alt+F4, or close it from the
+  taskbar; any of them quits Screech and stops the radio, as `q` does in
+  the terminal. Drag the window by its top bar or the block at the left.
+- **Needs WebView2**, Microsoft's web view, which is built into Windows 10
+  and 11. If it's missing, the window offers to install it.
+- `--reduced-motion`, `SCREECH_REDUCED_MOTION` and Windows' own animation
+  setting calm the window too: no button flash, no fade-in, no pulsing.
+  The level meter keeps moving, since it's information.
+
+### Interface
+
+- The RECENT list, in both the terminal and the window, no longer repeats a
+  track that a relaunch or reconnect logged twice in a row. The CSV from
+  `screech export heard` still has every row.
+
 ## 0.8.0 — 2026-10-14
 
 0.7.0 was never published; its changes ship here too, so this covers
