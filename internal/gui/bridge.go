@@ -23,20 +23,31 @@ type Window interface {
 	Quit()
 }
 
+// Prefs are the shell's display choices the page can't read on its own —
+// Wails v2 has no start-URL option, so --reduced-motion has no query
+// string to ride on.
+type Prefs struct {
+	ReducedMotion bool `json:"reducedMotion"`
+}
+
 // Bridge is the page's bound object: every method Wails exposes is one
 // queued intent or one core read — nothing on this surface blocks.
 type Bridge struct {
 	c      *core.Core
 	runner *session.Runner
 	win    Window
+	prefs  Prefs
 	em     atomic.Value // Emitter; nil until SetEmitter
 }
 
 // New builds the bridge; Attach and SetEmitter finish the wiring once the
 // shell has a runner and a runtime.
-func New(c *core.Core, win Window) *Bridge {
-	return &Bridge{c: c, win: win}
+func New(c *core.Core, win Window, prefs Prefs) *Bridge {
+	return &Bridge{c: c, win: win, prefs: prefs}
 }
+
+// Prefs reports the shell's display choices to the page.
+func (b *Bridge) Prefs() Prefs { return b.prefs }
 
 func (b *Bridge) Attach(r *session.Runner) { b.runner = r }
 
@@ -100,6 +111,9 @@ func (b *Bridge) Seed(query string) {
 	}
 	b.intent(session.Seed{Query: query})
 }
+
+// Wildcard is the virgin first-run shortcut: pick anything.
+func (b *Bridge) Wildcard() { b.intent(session.Wildcard{}) }
 
 // ReturnToStation tunes to the station a loved track came from.
 func (b *Bridge) ReturnToStation(uuid string) {

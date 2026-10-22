@@ -104,7 +104,7 @@ func testBridge(t *testing.T, opts session.Options) (*Bridge, *core.Core, *fakeP
 	pl := newFakePlayer()
 	win := &recWindow{}
 	em := &recEmitter{}
-	b := New(c, win)
+	b := New(c, win, Prefs{})
 	s := session.New(c, pl, opts)
 	r := session.NewRunner(s, b.Sink())
 	b.Attach(r)
@@ -153,6 +153,17 @@ func TestIntentsReachSession(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	if r.Current() != before {
 		t.Fatalf("out-of-range preset recall changed the snapshot: %+v → %+v", before, r.Current())
+	}
+}
+
+func TestWildcardTouchesAndTunes(t *testing.T) {
+	b, _, _, r, _, _ := testBridge(t, session.Options{Dot: "·", Notice: "database recovered"})
+	b.Wildcard()
+	sn := waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool {
+		return s.Notice == "" && (s.Phase == "tuning" || s.HaveStation)
+	})
+	if sn.Notice != "" {
+		t.Fatalf("wildcard did not count as a touch: notice %q", sn.Notice)
 	}
 }
 
@@ -294,7 +305,7 @@ func TestEventsBeforeEmitterDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
-	b := New(c, &recWindow{})
+	b := New(c, &recWindow{}, Prefs{})
 	pl := newFakePlayer()
 	r := session.NewRunner(session.New(c, pl, session.Options{}), b.Sink())
 	b.Attach(r)
@@ -324,6 +335,7 @@ func TestBoundSurface(t *testing.T) {
 		"RemoveLoved", "RemoveStation", "ReturnToStation", "Seed",
 		"SetEmitter", "SetUnfolded", "SetVolume", "Sink", "Stations",
 		"StepVolume", "Taste", "TogglePause", "TogglePreset", "TuneSaved",
+		"Wildcard", "Prefs",
 	}
 	typ := reflect.TypeOf((*Bridge)(nil))
 	var got []string
