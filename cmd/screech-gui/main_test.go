@@ -4,6 +4,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -39,6 +41,25 @@ func TestStartMessageOtherStage(t *testing.T) {
 	got := startMessage(err)
 	if got != "Screech couldn't start.\n\nopening database: file is locked\n\nscreech doctor in a terminal checks everything." {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestWailsLogWritesToSharedLog(t *testing.T) {
+	l := app.NewLog(filepath.Join(t.TempDir(), "screech.log"))
+	l.Open()
+	defer l.Close()
+	wl := wailsLog{l}
+	wl.Warning("WebVie2wProcess failed with kind render")
+	wl.Error("another failure")
+	l.Close()
+	data, err := os.ReadFile(l.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"webview warning: WebVie2wProcess failed", "webview error: another failure"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("log missing %q; got:\n%s", want, data)
+		}
 	}
 }
 

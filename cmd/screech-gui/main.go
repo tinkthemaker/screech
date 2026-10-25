@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/logger"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	wailsoptions "github.com/wailsapp/wails/v2/pkg/options/windows"
@@ -34,6 +35,22 @@ type wailsEmitter struct{ ctx context.Context }
 
 func (e wailsEmitter) Emit(event string, data any) {
 	wailsruntime.EventsEmit(e.ctx, event, data)
+}
+
+// wailsLog routes the Wails framework's own log into the shared log file.
+// Without it Wails writes to stdout, which -H windowsgui discards — a
+// WebView2 process failure would leave no trace anywhere.
+type wailsLog struct{ log *app.Log }
+
+func (l wailsLog) Print(msg string)   { l.log.Linef("webview print: %s", msg) }
+func (l wailsLog) Trace(msg string)   { l.log.Linef("webview trace: %s", msg) }
+func (l wailsLog) Debug(msg string)   { l.log.Linef("webview debug: %s", msg) }
+func (l wailsLog) Info(msg string)    { l.log.Linef("webview info: %s", msg) }
+func (l wailsLog) Warning(msg string) { l.log.Linef("webview warning: %s", msg) }
+func (l wailsLog) Error(msg string)   { l.log.Linef("webview error: %s", msg) }
+func (l wailsLog) Fatal(msg string) {
+	l.log.Linef("webview fatal: %s", msg)
+	os.Exit(1)
 }
 
 // reducedMotion: --reduced-motion or a nonempty SCREECH_REDUCED_MOTION,
@@ -107,15 +124,18 @@ func main() {
 	}
 
 	err = wails.Run(&options.App{
-		Title:            "Screech",
-		Width:            stripW,
-		Height:           height,
-		Frameless:        true,
-		DisableResize:    true,
-		StartHidden:      true,
-		BackgroundColour: options.NewRGB(0, 0, 0),
-		AssetServer:      &assetserver.Options{Assets: assets},
-		Bind:             []any{br},
+		Title:              "Screech",
+		Width:              stripW,
+		Height:             height,
+		Frameless:          true,
+		DisableResize:      true,
+		StartHidden:        true,
+		BackgroundColour:   options.NewRGB(0, 0, 0),
+		AssetServer:        &assetserver.Options{Assets: assets},
+		Bind:               []any{br},
+		Logger:             wailsLog{log},
+		LogLevel:           logger.INFO,
+		LogLevelProduction: logger.WARNING,
 		OnStartup: func(ctx context.Context) {
 			sh.onStartup(ctx)
 			br.SetEmitter(wailsEmitter{ctx})
@@ -125,7 +145,7 @@ func main() {
 			sh.onDomReady()
 		},
 		OnBeforeClose: func(ctx context.Context) bool {
-			sh.doBeforeClose()
+			sh.doBeforeClose("window closed (Alt+F4 or taskbar)")
 			return false
 		},
 		OnShutdown: func(ctx context.Context) {

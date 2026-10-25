@@ -87,6 +87,7 @@ type shell struct {
 	runner *session.Runner
 	rt     *app.Runtime
 	hwnd   uintptr
+	logf   func(format string, args ...any) // test seam over rt.Log.Linef
 
 	beforeClose sync.Once
 	shutdown    sync.Once
@@ -103,6 +104,7 @@ func newShell(rt *app.Runtime) *shell {
 			}
 		},
 		unfoldTop: sentinelY,
+		logf:      rt.Log.Linef,
 	}
 	s.self = func() (hwndOps, bool) {
 		if s.hwnd == 0 {
@@ -165,7 +167,7 @@ func (s *shell) SetUnfolded(unfolded bool) {
 // Quit is the gui.Window face for the page's Q. The Once means a Q at
 // the same moment as a taskbar close still stops the runner once.
 func (s *shell) Quit() {
-	s.doBeforeClose()
+	s.doBeforeClose("q")
 	if s.ctx != nil {
 		wailsruntime.Quit(s.ctx)
 	}
@@ -182,10 +184,12 @@ func (s *shell) onDomReady() {
 	}
 }
 
-// doBeforeClose is shared by OnBeforeClose and Quit: save the place,
-// stop the runner, exactly once.
-func (s *shell) doBeforeClose() {
+// doBeforeClose is shared by OnBeforeClose and Quit: log which quit got
+// here first (a silent exit is undiagnosable otherwise), save the place,
+// stop the runner — exactly once.
+func (s *shell) doBeforeClose(reason string) {
 	s.beforeClose.Do(func() {
+		s.logf("quit: %s", reason)
 		s.persistCurrent()
 		if s.runner != nil {
 			s.runner.Stop()

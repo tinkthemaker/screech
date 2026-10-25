@@ -6,6 +6,7 @@ package main
 // saves. The cases cover the plan's four plus the owner's three.
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/tinkthemaker/screech/internal/core"
@@ -47,7 +48,26 @@ func testShell(ops hwndOps, m monitors, saved core.WindowPlacement) (*shell, *[]
 			saves = append(saves, p)
 		},
 		unfoldTop: sentinelY,
+		logf:      func(string, ...any) {},
 	}, &saves
+}
+
+// A quit must say which path took it — the first reason inside the Once
+// wins, whether Q raced a taskbar close or not.
+func TestQuitLogsFirstReason(t *testing.T) {
+	var lines []string
+	sh := &shell{
+		logf:      func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) },
+		place:     func() core.WindowPlacement { return core.WindowPlacement{} },
+		save:      func(core.WindowPlacement) {},
+		self:      func() (hwndOps, bool) { return nil, false },
+		unfoldTop: sentinelY,
+	}
+	sh.Quit()
+	sh.doBeforeClose("window closed (Alt+F4 or taskbar)")
+	if len(lines) != 1 || lines[0] != "quit: q" {
+		t.Fatalf("quit lines = %v, want [quit: q]", lines)
+	}
 }
 
 func TestUnfoldNearBottomGrowsUp(t *testing.T) {

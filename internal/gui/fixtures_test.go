@@ -221,6 +221,24 @@ func fixtures() []fixture {
 			"track":       "An Artist Whose Name Is Absurdly Long And Keeps Going — And A Title That Will Not Fit Inside The Track Row Either Because Some Streams Send Whole Sentences As Titles",
 			"status-word": "● LIVE 00:42",
 		})},
+		// A stream that names no artist must not gain a dangling "— ".
+		{Name: "artistless-track", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
+			s.Artist = ""
+			s.Title = "Hi-Fi Internet Stream"
+		}), Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{
+			"track": "Hi-Fi Internet Stream",
+		})},
+		// Ten seconds locked with no title: say why the row is empty.
+		{Name: "no-track-info", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
+			s.Artist, s.Title = "", ""
+			s.HaveTrack = false
+			s.PlayStartMs = fixtureNowMs - 15_000
+		}), Expect: exp(map[string]string{
+			"track":       "No track info sent",
+			"status-word": "● LIVE 00:15",
+		}), ExpectStyle: map[string]map[string]string{
+			"track": {"color": "rgb(122, 153, 179)"},
+		}},
 		{Name: "volume-0", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
 			s.Volume = 0
 		}), Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{

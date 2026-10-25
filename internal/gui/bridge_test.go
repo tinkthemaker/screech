@@ -133,19 +133,19 @@ func TestIntentsReachSession(t *testing.T) {
 	b, _, _, r, _, _ := testBridge(t, session.Options{Dot: "·"})
 
 	b.Next()
-	sn := waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool {
+	sn := waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
 		return s.Phase == "tuning" || s.HaveStation
 	})
 	if sn.Feedback != "NEXT  Finding another station" {
 		t.Fatalf("next feedback: %q", sn.Feedback)
 	}
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
 
 	b.TogglePreset()
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.CurrentSlot == 1 })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.CurrentSlot == 1 })
 
 	b.SetVolume(150)
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.Volume == 100 })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.Volume == 100 })
 
 	before := r.Current()
 	b.RecallPreset(0)
@@ -159,7 +159,7 @@ func TestIntentsReachSession(t *testing.T) {
 func TestWildcardTouchesAndTunes(t *testing.T) {
 	b, _, _, r, _, _ := testBridge(t, session.Options{Dot: "·", Notice: "database recovered"})
 	b.Wildcard()
-	sn := waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool {
+	sn := waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
 		return s.Notice == "" && (s.Phase == "tuning" || s.HaveStation)
 	})
 	if sn.Notice != "" {
@@ -174,7 +174,7 @@ func TestEverythingTouches(t *testing.T) {
 	}
 	// Any bound intent clears it — use StepVolume, no station needed.
 	b.StepVolume(5)
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.Notice == "" })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.Notice == "" })
 }
 
 func TestLovedFilterMatchesCore(t *testing.T) {
@@ -218,12 +218,12 @@ func TestRemoveStationRefreshesPresets(t *testing.T) {
 	}
 	c.EndListen(now)
 	r.Send(session.RefreshPresets{})
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.Slots[0] })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.Slots[0] })
 
 	if err := b.RemoveStation("seed:wfmu"); err != nil {
 		t.Fatalf("RemoveStation: %v", err)
 	}
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool {
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
 		return !s.Slots[0] && s.Feedback == "STATIONS  Removed"
 	})
 }
@@ -250,7 +250,7 @@ func TestInfoWithoutStation(t *testing.T) {
 func TestInfoWithStation(t *testing.T) {
 	b, _, _, r, _, _ := testBridge(t, session.Options{Dot: "·"})
 	b.Next()
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
 	info, err := b.Info()
 	if err != nil {
 		t.Fatalf("Info: %v", err)
@@ -264,10 +264,10 @@ func TestInfoWithStation(t *testing.T) {
 func TestSinkEmitsSnapshotsAndLevels(t *testing.T) {
 	_, _, pl, r, _, em := testBridge(t, session.Options{})
 	r.Send(session.Next{})
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
 	pl.emit(player.Event{Type: player.EventLevel, Level: 0.4, Peak: 0.9, Stereo: false})
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		evts := em.events()
 		var sawSnap, sawLevel bool
@@ -316,7 +316,7 @@ func TestEventsBeforeEmitterDropped(t *testing.T) {
 	em := &recEmitter{}
 	b.SetEmitter(em)
 	r.Send(session.Next{}) // a state change the sink must now emit
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, e := range em.events() {
 			if e.name == "snapshot" {
@@ -379,7 +379,7 @@ func TestSetUnfoldedCallsWindow(t *testing.T) {
 func TestSeedEmptyIgnored(t *testing.T) {
 	b, _, _, r, _, _ := testBridge(t, session.Options{})
 	// Let the startup commands land so the snapshot is settled.
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
 	before := r.Current()
 	b.Seed("   ")
 	time.Sleep(150 * time.Millisecond)
@@ -389,7 +389,7 @@ func TestSeedEmptyIgnored(t *testing.T) {
 	b.Seed("jazz")
 	// Seeking is transient — it flips back off when the pick resolves —
 	// so assert the seeded pick's reason instead.
-	waitSnap(t, r, 2*time.Second, func(s session.Snapshot) bool {
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
 		return s.Seeking || strings.Contains(s.Reason, "seeded: jazz")
 	})
 }

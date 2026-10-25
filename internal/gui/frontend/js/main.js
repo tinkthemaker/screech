@@ -141,8 +141,15 @@ const trackText = (s) => {
   const b = bucket(s);
   if (b === 'virgin') return { text: 'Finding a station…', cls: '' };
   if (b === 'tuning') return { text: s.reason || '', cls: 'dim' };
-  if (s.haveTrack) return { text: s.artist + ' — ' + s.title, cls: '' };
+  if (s.haveTrack) return { text: [s.artist, s.title].filter(Boolean).join(' — '), cls: '' };
   if (s.reconnecting || s.resuming) return { text: s.reason || '', cls: 'dim' };
+  // Ten locked seconds with a station and no title: the blank stops
+  // reading as patience and starts reading as a hole — the terminal
+  // face's rule.
+  if (s.phase === 'playing' && s.haveStation && s.playStartMs &&
+      bridge.now() - s.playStartMs >= 10000) {
+    return { text: 'No track info sent', cls: 'dim' };
+  }
   return { text: '', cls: '' };
 };
 
