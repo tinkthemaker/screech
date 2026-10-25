@@ -132,6 +132,7 @@ jobs:
           name: screech-release
           path: release/*
           if-no-files-found: error
+          retention-days: 3
       # Notes come from CHANGELOG.md's section for this version, so the
       # release page says what changed in words, not commit subjects. A tag
       # without a section still publishes, with generated notes.
