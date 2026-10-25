@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tinkthemaker/screech/internal/streamurl"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -324,6 +325,10 @@ CREATE INDEX IF NOT EXISTS idx_loved_station ON loved(station_uuid);
 	// Before the player suppressed mpv's URL-basename media-title, every
 	// tune logged the stream filename ("aac-128") as a heard track.
 	{4, "", purgeFilenameTracks},
+	// mpv's real fallback is wider than a URL basename: decoded text after
+	// the last '/' of the whole URL, query included — rows like
+	// "rqqps6cbe3quv?rj-ttl=5&rj-tok=AA" went in as tracks.
+	{5, "", purgeMpvFilenameTracks},
 }
 
 func (s *Store) migrate() error {
@@ -492,6 +497,68 @@ func purgeFilenameTracks(tx *sql.Tx) error {
 			if base, esc := urlBasenames(raw); base != "" {
 				names[uuid] = append(names[uuid], base, esc)
 			}
+		}
+	}
+	srows.Close()
+	if err := srows.Err(); err != nil {
+		return err
+	}
+
+	var ids []int64
+	trows, err := tx.Query(`SELECT id, station_uuid, title FROM tracks_heard
+		WHERE artist_key = '' AND artist = '' AND title <> ''`)
+	if err != nil {
+		return err
+	}
+	for trows.Next() {
+		var id int64
+		var uuid, title string
+		if err := trows.Scan(&id, &uuid, &title); err != nil {
+			trows.Close()
+			return err
+		}
+		if slices.Contains(names[uuid], title) {
+			ids = append(ids, id)
+		}
+	}
+	trows.Close()
+	if err := trows.Err(); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`DELETE FROM tracks_heard WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		if _, err := stmt.Exec(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// purgeMpvFilenameTracks is migration 4's purge under mpv's real filename
+// rule: the percent-decoded text after the last '/' of the whole URL,
+// query string included. Same shape — artist-less titles only, matched
+// against that row's own station URLs, loved untouched.
+func purgeMpvFilenameTracks(tx *sql.Tx) error {
+	names := map[string][]string{}
+	srows, err := tx.Query(`SELECT uuid, url, url_resolved FROM stations`)
+	if err != nil {
+		return err
+	}
+	for srows.Next() {
+		var uuid, u, ur string
+		if err := srows.Scan(&uuid, &u, &ur); err != nil {
+			srows.Close()
+			return err
+		}
+		for _, raw := range []string{u, ur} {
+			names[uuid] = append(names[uuid], streamurl.MpvFilenames(raw)...)
 		}
 	}
 	srows.Close()

@@ -281,6 +281,88 @@ func TestMigrationV4PurgesFilenameTracks(t *testing.T) {
 	}
 }
 
+// Migration 4 only knew URL basenames; mpv's real fallback is the decoded
+// text after the last '/' of the whole URL. Migration 5 purges those
+// shapes while sparing real titles, rows with artists, loved rows, and
+// identical-looking titles on other stations.
+func TestMigrationV5PurgesMpvFilenameTracks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.db")
+	db, err := sql.Open("sqlite", "file:"+escapeDSNPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[0].sql + migrations[1].sql); err != nil {
+		t.Fatalf("build v4 schema: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(`INSERT INTO stations(uuid, name, url, url_resolved, fetched_at)
+		VALUES('s1','Radio','https://h/rq?rj-ttl=5&rj-tok=AA','https://h/k%20exp.mp3',?),
+		      ('s2','Other','https://o/other-64','',?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	ins := `INSERT INTO tracks_heard(station_uuid, artist_key, artist, title, raw, heard_at) VALUES(?,?,?,?,?,?)`
+	rows := [][4]string{
+		{"s1", "", "", "rq?rj-ttl=5&rj-tok=AA"},   // query-string junk → delete
+		{"s1", "", "", "k exp.mp3"},               // decoded basename → delete
+		{"s1", "", "", "Night Session"},           // real artistless title → keep
+		{"s1", "someone", "Someone", "k exp.mp3"}, // has an artist → keep
+		{"s2", "", "", "rq?rj-ttl=5&rj-tok=AA"},   // junk-looking, wrong station → keep
+	}
+	for _, r := range rows {
+		if _, err := db.Exec(ins, r[0], r[1], r[2], r[3], r[3], now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO loved(station_uuid, artist_key, artist, title, loved_at)
+		VALUES('s1','','','rq?rj-ttl=5&rj-tok=AA',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore on v4 db: %v", err)
+	}
+	defer st.Close()
+	if v, _ := st.SchemaVersion(); v != 5 {
+		t.Fatalf("user_version=%d, want 5", v)
+	}
+	count := func(where string) int {
+		var n int
+		if err := st.db.QueryRow(`SELECT COUNT(*) FROM tracks_heard WHERE ` + where).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(`station_uuid='s1' AND title='rq?rj-ttl=5&rj-tok=AA'`); n != 0 {
+		t.Errorf("query-string junk should be purged, %d remain", n)
+	}
+	if n := count(`station_uuid='s1' AND title='k exp.mp3' AND artist=''`); n != 0 {
+		t.Errorf("decoded-basename junk should be purged, %d remain", n)
+	}
+	if n := count(`title='Night Session'`); n != 1 {
+		t.Errorf("artistless real title should survive, found %d", n)
+	}
+	if n := count(`title='k exp.mp3' AND artist='Someone'`); n != 1 {
+		t.Errorf("titled row with an artist should survive, found %d", n)
+	}
+	if n := count(`station_uuid='s2' AND title='rq?rj-ttl=5&rj-tok=AA'`); n != 1 {
+		t.Errorf("same title on a different station should survive, found %d", n)
+	}
+	var loved int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM loved`).Scan(&loved); err != nil {
+		t.Fatal(err)
+	}
+	if loved != 1 {
+		t.Errorf("loved row with a junk title must be kept, found %d", loved)
+	}
+}
+
 func padInt(i int) string {
 	s := strconv.Itoa(i)
 	for len(s) < 4 {

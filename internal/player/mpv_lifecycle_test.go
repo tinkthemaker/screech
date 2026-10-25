@@ -3,6 +3,7 @@ package player
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -10,11 +11,17 @@ import (
 	"time"
 )
 
-// silentWAV returns a PCM WAV of the given duration: silence only, but
-// enough file for mpv to demux, decode, and end on its own.
-func silentWAV(dur time.Duration) []byte {
-	const rate, chans, bps = 8000, 1, 2
-	data := make([]byte, int(dur.Seconds())*rate*chans*bps)
+// sineWAV returns a stereo PCM WAV of a mid-level sine: astats reports
+// -inf on silence, so a meter assertion needs real signal.
+func sineWAV(dur time.Duration) []byte {
+	const rate, chans, bps = 8000, 2, 2
+	n := int(dur.Seconds()) * rate
+	data := make([]byte, n*chans*bps)
+	for i := 0; i < n; i++ {
+		v := int16(12000 * math.Sin(2*math.Pi*440*float64(i)/rate))
+		binary.LittleEndian.PutUint16(data[i*4:], uint16(v))
+		binary.LittleEndian.PutUint16(data[i*4+2:], uint16(v))
+	}
 	var b bytes.Buffer
 	b.WriteString("RIFF")
 	_ = binary.Write(&b, binary.LittleEndian, uint32(36+len(data)))
@@ -32,6 +39,29 @@ func silentWAV(dur time.Duration) []byte {
 	return b.Bytes()
 }
 
+// waitLevel fails unless an EventLevel carrying real signal arrives
+// within the deadline.
+func waitLevel(t *testing.T, m *MPV, d time.Duration) {
+	t.Helper()
+	deadline := time.After(d)
+	for {
+		select {
+		case ev, ok := <-m.Events():
+			if !ok {
+				t.Fatal("event channel closed before any EventLevel arrived")
+			}
+			if ev.Type == EventLevel && ev.LevelL > 0 {
+				return
+			}
+			if ev.Type == EventStreamEnded {
+				t.Fatal("stream ended before any EventLevel arrived")
+			}
+		case <-deadline:
+			t.Fatal("no EventLevel with signal before the deadline")
+		}
+	}
+}
+
 // TestMPVLifecycle drives a real mpv through the whole spawn → play → eof →
 // kill → restart arc. Skipped without mpv on PATH or under -short.
 func TestMPVLifecycle(t *testing.T) {
@@ -47,7 +77,7 @@ func TestMPVLifecycle(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/wav")
-		_, _ = w.Write(silentWAV(1500 * time.Millisecond))
+		_, _ = w.Write(sineWAV(2500 * time.Millisecond))
 	}))
 	defer srv.Close()
 
@@ -59,6 +89,10 @@ func TestMPVLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantEvent(t, m, EventPlaying)
+
+	// The meter must carry real astats data: an unlabelled lavfi filter
+	// left the observed keys empty and the wave flat forever.
+	waitLevel(t, m, 5*time.Second)
 	wantEvent(t, m, EventStreamEnded) // finite file ends on its own
 
 	// Killing the process must surface as EventDied + a closed channel —

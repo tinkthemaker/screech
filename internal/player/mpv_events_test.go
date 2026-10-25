@@ -16,7 +16,9 @@ func pipeMPV(t *testing.T) (*MPV, net.Conn) {
 	t.Helper()
 	a, b := net.Pipe()
 	m := &MPV{conn: a, events: make(chan Event, 64), stderr: newTailBuf()}
-	go m.readLoop(a, m.events, m.stderr)
+	exited := make(chan struct{})
+	close(exited) // no process behind a pipe: the drain wait is a no-op
+	go m.readLoop(a, m.events, m.stderr, exited)
 	go func() { _, _ = io.Copy(io.Discard, b) }()
 	t.Cleanup(func() { _ = b.Close() })
 	return m, b
@@ -179,6 +181,36 @@ func TestMediaTitleRealTitleStillEmits(t *testing.T) {
 	if ev := wantEvent(t, m, EventTitle); ev.Title != "Artist - Song" {
 		t.Fatalf("title = %q", ev.Title)
 	}
+	sendLine(t, peer, `{"event":"property-change","name":"media-title","data":"Who Are You?"}`)
+	if ev := wantEvent(t, m, EventTitle); ev.Title != "Who Are You?" {
+		t.Fatalf("title = %q", ev.Title)
+	}
+}
+
+// With no path segment at all, mpv's media-title fallback is the decoded
+// text after the last '/' of the whole URL — the query comes with it.
+func TestMediaTitleQueryFilenameIsSuppressed(t *testing.T) {
+	m, peer := pipeMPV(t)
+	if err := m.Play("https://h/rqqps6cbe3quv?rj-ttl=5&rj-tok=AA"); err != nil {
+		t.Fatal(err)
+	}
+	sendLine(t, peer, `{"event":"property-change","name":"media-title","data":"rqqps6cbe3quv?rj-ttl=5&rj-tok=AA"}`)
+	wantQuiet(t, m)
+	m2, peer2 := pipeMPV(t)
+	if err := m2.Play("https://h/s?tok=AA%2FBB%20cc"); err != nil {
+		t.Fatal(err)
+	}
+	sendLine(t, peer2, `{"event":"property-change","name":"media-title","data":"BB cc"}`)
+	wantQuiet(t, m2)
+}
+
+// A media-title equal to the filename property mpv last observed is the
+// same fallback — needed for playlist entries whose URL we never saw.
+func TestMediaTitleMpvFilenameIsSuppressed(t *testing.T) {
+	m, peer := pipeMPV(t)
+	sendLine(t, peer, `{"event":"property-change","name":"filename","data":"plentry-128.mp3"}`)
+	sendLine(t, peer, `{"event":"property-change","name":"media-title","data":"plentry-128.mp3"}`)
+	wantQuiet(t, m)
 }
 
 func TestPlayRejectsBadURLs(t *testing.T) {

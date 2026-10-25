@@ -48,10 +48,10 @@ func closeTo(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
 
 func TestStereoLevelEventCombinesChannelsAndPeak(t *testing.T) {
 	m := newTestMPV()
-	feed(t, m, "af-metadata/lavfi.astats.Overall.RMS_level", "-24")
-	feed(t, m, "af-metadata/lavfi.astats.1.RMS_level", "-12")
-	feed(t, m, "af-metadata/lavfi.astats.2.RMS_level", "-30")
-	feed(t, m, "af-metadata/lavfi.astats.Overall.Peak_level", "-6")
+	feed(t, m, propMeterOverallRMS, "-24")
+	feed(t, m, propMeterRMSL, "-12")
+	feed(t, m, propMeterRMSR, "-30")
+	feed(t, m, propMeterPeak, "-6")
 
 	events := drain(m)
 	if len(events) != 4 {
@@ -80,7 +80,7 @@ func TestStereoLevelEventCombinesChannelsAndPeak(t *testing.T) {
 
 func TestMonoStreamMirrorsChannelIntoBoth(t *testing.T) {
 	m := newTestMPV()
-	feed(t, m, "af-metadata/lavfi.astats.1.RMS_level", "-24")
+	feed(t, m, propMeterRMSL, "-24")
 
 	events := drain(m)
 	if len(events) != 1 {
@@ -119,7 +119,7 @@ func TestMeterRangeCoversRealBroadcastLevels(t *testing.T) {
 func TestLevelEmitsAreThrottled(t *testing.T) {
 	m := newTestMPV()
 	raw, _ := json.Marshal("-12")
-	msg := mpvMsg{Event: "property-change", Name: "af-metadata/lavfi.astats.1.RMS_level", Data: raw}
+	msg := mpvMsg{Event: "property-change", Name: propMeterRMSL, Data: raw}
 
 	m.handleProperty(m.events, msg) // first emit goes through immediately
 	for i := 0; i < 10; i++ {

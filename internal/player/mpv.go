@@ -7,12 +7,12 @@ import (
 	"net"
 	"net/url"
 	"os/exec"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tinkthemaker/screech/internal/streamurl"
 	"github.com/tinkthemaker/screech/internal/version"
 )
 
@@ -47,11 +47,13 @@ type MPV struct {
 	// idle, and both gates suppress their own echoes.
 	paused, coreIdle bool
 
-	// curFile is the unescaped URL basename of the current stream and
-	// curFileEsc its still-escaped form: until an ICY title arrives, mpv
-	// reports media-title as that filename, which must not be mistaken for
-	// a track title.
-	curFile, curFileEsc string
+	// junkTitles are the media-title values mpv falls back to before any
+	// ICY title: the stream URL's filename shapes (percent-decoded, query
+	// included — mpv's rule is text after the last '/' of the whole URL)
+	// plus the filename property it last reported, which covers playlist
+	// entries whose URL we never saw.
+	junkTitles  []string
+	mpvFilename string
 
 	mpvPath string
 	dataDir string
@@ -66,14 +68,22 @@ type MPV struct {
 	sawL, sawR bool
 }
 
+// The labelled astats filter emits per-frame loudness into filter metadata
+// under af-metadata/meter/…; an unlabelled lavfi never populates these keys
+// on mpv 0.41 — the meter read zero forever.
+const (
+	propMeterOverallRMS = "af-metadata/meter/lavfi.astats.Overall.RMS_level"
+	propMeterRMSL       = "af-metadata/meter/lavfi.astats.1.RMS_level"
+	propMeterRMSR       = "af-metadata/meter/lavfi.astats.2.RMS_level"
+	propMeterPeak       = "af-metadata/meter/lavfi.astats.Overall.Peak_level"
+)
+
 // observedProperties are subscribed right after IPC connects, before the
-// first event can arrive.
+// first event can arrive. filename lands before media-title so a
+// filename-as-title report is suppressed from its first emission.
 var observedProperties = []string{
-	"metadata", "media-title", "core-idle", "paused-for-cache", "pause",
-	"af-metadata/lavfi.astats.Overall.RMS_level",
-	"af-metadata/lavfi.astats.1.RMS_level",
-	"af-metadata/lavfi.astats.2.RMS_level",
-	"af-metadata/lavfi.astats.Overall.Peak_level",
+	"metadata", "filename", "media-title", "core-idle", "paused-for-cache", "pause",
+	propMeterOverallRMS, propMeterRMSL, propMeterRMSR, propMeterPeak,
 }
 
 func NewMPV(mpvPath, dataDir string) (*MPV, error) {
@@ -116,7 +126,9 @@ func (m *MPV) spawn() error {
 		"--user-agent=" + version.UserAgent(),
 		// astats injects per-frame loudness into filter metadata; the wave
 		// visualizer reads it so its amplitude is real, not theatrical.
-		"--af=lavfi=[astats=metadata=1:reset=1]",
+		// The @meter label is load-bearing: unlabelled, mpv reports these
+		// keys under a path that never carries values.
+		"--af=@meter:lavfi=[astats=metadata=1:reset=1]",
 		// Let ffmpeg ride out brief mid-stream drops on ICY streams; the
 		// app-level reconnect in the TUI is the backstop.
 		"--stream-lavf-o=reconnect_streamed=1",
@@ -203,12 +215,12 @@ func (m *MPV) spawn() error {
 	m.reqID = reqID
 	m.loadPending = false
 	m.sawIcy, m.sawL, m.sawR = false, false, false
-	m.curFile, m.curFileEsc = "", ""
+	m.junkTitles, m.mpvFilename = nil, ""
 	m.paused, m.coreIdle = false, true
 	m.mu.Unlock()
 	// The loop owns conn and the channel: it closes the channel itself, so
 	// a restarted generation's death can never land in the new stream.
-	go m.readLoop(conn, m.events, stderr)
+	go m.readLoop(conn, m.events, stderr, exited)
 	return nil
 }
 
@@ -229,11 +241,8 @@ func (m *MPV) Play(streamURL string) error {
 	// mono station following a stereo one must not inherit its stereo flag.
 	m.sawL, m.sawR = false, false
 	m.loadPending = true
-	m.curFile, m.curFileEsc = "", ""
-	if u.Path != "" && u.Path != "/" {
-		m.curFile = path.Base(u.Path)
-		m.curFileEsc = path.Base(u.EscapedPath())
-	}
+	m.junkTitles = streamurl.MpvFilenames(streamURL)
+	m.mpvFilename = ""
 	m.mu.Unlock()
 	if err := m.send("loadfile", streamURL); err != nil {
 		return err
@@ -345,7 +354,7 @@ type mpvMsg struct {
 // EventDied unless this MPV was closed deliberately, then closes the
 // channel itself — the single owner means a restarted process's loop can
 // never write or close the wrong generation's stream.
-func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf) {
+func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited chan struct{}) {
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -389,6 +398,13 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf) {
 	closed := m.closed
 	m.mu.Unlock()
 	if !closed {
+		// stderr is fully drained only when cmd.Wait returns (exited
+		// closes); the conn dies first, so wait briefly or the died
+		// error can miss mpv's last words.
+		select {
+		case <-exited:
+		case <-time.After(time.Second):
+		}
 		emit(events, Event{Type: EventDied, Err: fmt.Errorf("mpv exited%s", stderr.suffix())})
 	}
 	close(events)
@@ -410,6 +426,16 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 				return
 			}
 		}
+	case "filename":
+		// mpv's own filename property, observed before media-title: any
+		// media-title equal to it is the same fallback, not a track.
+		var fn string
+		if json.Unmarshal(msg.Data, &fn) != nil {
+			return
+		}
+		m.mu.Lock()
+		m.mpvFilename = fn
+		m.mu.Unlock()
 	case "media-title":
 		// Fallback for streams without ICY metadata. mpv sets media-title to
 		// the URL or station name otherwise, so only forward plausible titles.
@@ -419,11 +445,18 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 		}
 		m.mu.Lock()
 		saw := m.sawIcy
-		curFile, curFileEsc := m.curFile, m.curFileEsc
+		junk := title != "" && title == m.mpvFilename
+		for _, f := range m.junkTitles {
+			if title == f {
+				junk = true
+				break
+			}
+		}
 		m.mu.Unlock()
-		// Until an ICY title lands, mpv reports the URL's last path segment
-		// ("aac-128", "kexp128.mp3") — a filename is not a track title.
-		if curFile != "" && (title == curFile || title == curFileEsc) {
+		// Until an ICY title lands, mpv reports a URL-derived filename —
+		// the last path segment, or decoded text after the last '/' of the
+		// whole URL, query included. A filename is not a track title.
+		if junk {
 			return
 		}
 		if !saw && title != "" && !isURLish(title) {
@@ -480,10 +513,7 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 		} else {
 			emit(events, Event{Type: EventPlaying})
 		}
-	case "af-metadata/lavfi.astats.Overall.RMS_level",
-		"af-metadata/lavfi.astats.1.RMS_level",
-		"af-metadata/lavfi.astats.2.RMS_level",
-		"af-metadata/lavfi.astats.Overall.Peak_level":
+	case propMeterOverallRMS, propMeterRMSL, propMeterRMSR, propMeterPeak:
 		// Arrives per audio frame; throttle to ~20Hz so the UI channel
 		// never floods. Values are dB, roughly -60 (silence) to 0 (loud).
 		db, err := parseDB(msg.Data)
@@ -539,15 +569,15 @@ func (m *MPV) handleLevel(events chan Event, name string, db float64) {
 	lv := dbToUnit(db)
 	m.mu.Lock()
 	switch name {
-	case "af-metadata/lavfi.astats.Overall.RMS_level":
+	case propMeterOverallRMS:
 		m.lvlOverall = lv
-	case "af-metadata/lavfi.astats.1.RMS_level":
+	case propMeterRMSL:
 		m.lvlL = lv
 		m.sawL = true
-	case "af-metadata/lavfi.astats.2.RMS_level":
+	case propMeterRMSR:
 		m.lvlR = lv
 		m.sawR = true
-	case "af-metadata/lavfi.astats.Overall.Peak_level":
+	case propMeterPeak:
 		m.lvlPeak = lv
 	}
 	now := time.Now()
