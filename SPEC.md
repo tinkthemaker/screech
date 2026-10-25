@@ -231,10 +231,14 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   end-file maps to stopped), and `Play` always sends `pause=false` after
   `loadfile` because mpv's pause survives the load — a chosen station must
   never start silent.
-- Until an ICY title arrives, `media-title` is just the URL's basename
-  (`aac-128`, `kexp128.mp3`; KEXP sends an empty `icy-title`, so its stays
-  that forever). That fallback is suppressed; it used to show as the track
-  and log a junk heard-track on every tune (migration 4 purged them).
+- Until an ICY title arrives, `media-title` falls back to mpv's `filename`:
+  the whole URL percent-decoded, then everything after its last `/`, query
+  included (`aac-128`, `kexp128.mp3`, `rq?rj-ttl=5&rj-tok=…`; KEXP sends an
+  empty `icy-title`, so its stays that forever). The player drops a
+  media-title equal to any form `streamurl.MpvFilenames` derives from the
+  URL it loaded, or to the `filename` mpv last reported, which covers
+  playlist entries Screech never saw. It used to show as the track and log
+  a junk heard-track on every tune (migrations 4 and 5 purged them).
 - A failure *before* lock (error, eof, or 12s of nothing) is the station's:
   one strike, move on. A failure *after* lock (eof, error, or a 20s buffer
   stall) is a drop: re-`loadfile` the same station without touching the open
@@ -603,9 +607,12 @@ peak and peak-hold ticks that cool through the ramp as they fall. Bars are
 bass-weighted, so per-channel levels still read as a spectrum, not a uniform
 bounce; the tilt is a lean (1.0 → 0.74), not a cliff, or the right of the
 bay goes structurally dead. Amplitude is real (mpv astats per-channel RMS +
-peak over IPC ~20Hz, mono mixdown fallback); texture is synthetic. If level
-data stops (other backends), it falls back to self-animated breathing after
-3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already takes
+peak over IPC ~20Hz, mono mixdown fallback); texture is synthetic. The
+filter is labelled (`--af=@meter:lavfi=[astats…]`) and read as
+`af-metadata/meter/lavfi.astats.*`: an unlabelled path is an error on mpv
+0.41, and an observed property that errors simply never fires, which left
+the wave on its fallback unnoticed until 0.9. If level data stops (other
+backends), it falls back to self-animated breathing after 3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already takes
 a `[]float64` either way.
 
 **Resolution is per-row, and one row is not enough.** A braille cell's eight

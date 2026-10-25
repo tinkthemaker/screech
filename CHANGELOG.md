@@ -43,6 +43,26 @@ release pages.
   setting calm the window too: no button flash, no fade-in, no pulsing.
   The level meter keeps moving, since it's information.
 
+### Upgrading
+
+- The first launch deletes the web-address "tracks" described under Fixes
+  from your listening history. Loved tracks are left alone.
+
+### Fixes
+
+- **The level meter follows the music.** Screech asked mpv for its loudness
+  readings under a name mpv 0.41 doesn't answer to, so the terminal's wave
+  had been breathing on its own fallback, not the audio. It now reads them
+  the way mpv documents, and both the wave and the window's meter move with
+  the real level.
+- **No more web addresses in RECENT.** On a station that sends no track
+  titles, mpv reports the stream's file name instead, and when the address
+  ends in a query (`…?token=…`) Screech took it for a track and logged it.
+  It now recognises those however the address is written.
+- When mpv dies, the reason Screech shows now reliably carries mpv's own
+  last words; it used to report the death before mpv's error output had
+  arrived.
+
 ### Interface
 
 - The RECENT list, in both the terminal and the window, no longer repeats a

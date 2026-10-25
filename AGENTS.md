@@ -1,11 +1,15 @@
 # Working on screech
 
-Go terminal radio: `cmd/screech` (entry, doctor, export, console hold),
+Go radio with two faces: `cmd/screech` (terminal entry, doctor, export,
+console hold), `cmd/screech-gui` (the Windows LCARS window: Wails shell,
+placement, handoff, message boxes; every file `//go:build windows`),
 `internal/app` (shared startup: config, per-OS single-instance lock, log,
 database, mpv), `internal/core` (SQLite store, bandit, fingerprints,
 radio-browser client), `internal/player` (mpv over JSON IPC),
+`internal/streamurl` (mpv's filename rule, shared by player and core),
 `internal/session` (the listening state machine every face drives),
 `internal/tui` (Bubble Tea faceplate over a `session.State`),
+`internal/gui` (the window's bridge and embedded front end),
 `internal/config`, `internal/version`.
 [SPEC.md](SPEC.md) is the design record; keep it in step with behavior.
 
@@ -17,9 +21,10 @@ go mod tidy -diff              # must print nothing
 go vet ./...
 staticcheck ./...              # honnef.co/go/tools/cmd/staticcheck@v0.8.1
 GOOS=linux staticcheck ./...   # unix-only files (IPC socket, flock, SIGHUP)
+GOOS=windows staticcheck ./... # cmd/screech-gui, from a non-Windows host
 go test -race -count=1 ./...
 govulncheck ./...              # golang.org/x/vuln/cmd/govulncheck@v1.8.0
-for t in linux/amd64 darwin/arm64 linux/arm64 windows/arm64 freebsd/amd64; do
+for t in windows/amd64 linux/amd64 darwin/arm64 linux/arm64 windows/arm64 freebsd/amd64; do
   GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build ./...
 done
 ```
@@ -32,7 +37,9 @@ done
   scripted mpv (`fakempv_test.go`), so CI covers spawn, IPC, crash, restart
   and close without mpv installed. `TestMPVLifecycle` drives a real mpv
   (`--ao=null`) and skips when mpv isn't on PATH or under `-short`; run it
-  locally when touching `internal/player`.
+  locally when touching `internal/player`. It is the only check that the
+  observed property names are real: mpv never fires an observed property
+  whose path is wrong, so a typo there is silence, not an error.
 - `TestViewFitsEveryTerminalSize` renders every overlay at every small
   terminal size; any view change must keep it green (no panic, no overflow).
 - `receiverShape` is the single faceplate-vs-stacked decision; `View`, the
@@ -60,6 +67,12 @@ done
   and unfolded modes; `TestKeyboardMap` replays scripted keys and wheel
   events on the real page and checks the bridge calls. Run it after any
   change to `internal/gui/frontend/`; screenshots land in `.review/gui/`.
+- The real window needs Wails' build tags: `CGO_ENABLED=0 go build -tags
+  desktop,production -trimpath -ldflags "-H windowsgui -s -w" -o
+  dist/screech-gui.exe ./cmd/screech-gui`. Without them Windows links the
+  stub, which only shows an error box. Under `-H windowsgui` stdout goes
+  nowhere, so Wails' own messages (WebView2 failures included) are routed
+  into the shared log as `webview <level>:` lines.
 - `go test -tags live ./internal/core -run Live` hits the real radio-browser
   directory; plain unit tests must never touch the network (`openTestCore`
   points the client at a dead transport).
