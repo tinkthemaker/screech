@@ -1,6 +1,9 @@
 package gui
 
 import (
+	"errors"
+	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -13,6 +16,19 @@ import (
 	"github.com/tinkthemaker/screech/internal/player"
 	"github.com/tinkthemaker/screech/internal/session"
 )
+
+// Bridge tests use the seed directory; a background sync must never
+// fetch a live directory or change the fixture while an assertion runs.
+type offlineTransport struct{}
+
+func (offlineTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("network disabled in GUI tests")
+}
+
+func TestMain(m *testing.M) {
+	http.DefaultTransport = offlineTransport{}
+	os.Exit(m.Run())
+}
 
 // fakePlayer is the gui tests' player.Player: an event channel plus a
 // call log, like the session package's own stub.
@@ -130,16 +146,24 @@ func waitSnap(t *testing.T, r *session.Runner, d time.Duration, cond func(sessio
 }
 
 func TestIntentsReachSession(t *testing.T) {
-	b, _, _, r, _, _ := testBridge(t, session.Options{Dot: "·"})
-
-	b.Next()
-	sn := waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
-		return s.Phase == "tuning" || s.HaveStation
-	})
-	if sn.Feedback != "NEXT  Finding another station" {
-		t.Fatalf("next feedback: %q", sn.Feedback)
+	b, c, pl, r, _, _ := testBridge(t, session.Options{Dot: "·"})
+	// A snapshot names the pick before the asynchronous play command opens
+	// its listen. Finish each tune before testing the next serial intent.
+	waitReady := func(wantPlays int) {
+		waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
+			pl.mu.Lock()
+			plays := len(pl.urls)
+			pl.mu.Unlock()
+			return !s.Syncing && s.HaveStation && plays >= wantPlays &&
+				c.ListenOpen() && c.ResumeUUID() == s.Station.UUID
+		})
 	}
-	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
+	waitReady(1)
+	b.Next()
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
+		return s.Feedback == "NEXT  Finding another station"
+	})
+	waitReady(2)
 
 	b.TogglePreset()
 	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.CurrentSlot == 1 })
@@ -230,17 +254,22 @@ func TestRemoveStationRefreshesPresets(t *testing.T) {
 
 func TestRemoveLovedMissingIsQuiet(t *testing.T) {
 	b, _, _, r, _, _ := testBridge(t, session.Options{Dot: "·"})
+	// Finish startup feedback before checking that a no-op leaves it alone.
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
+		return s.HaveStation && !s.Syncing
+	})
+	before := r.Current().Feedback
 	if err := b.RemoveLoved("no-such-artist", "No Such Track"); err != nil {
 		t.Fatalf("removing an absent track should not error: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	if r.Current().Feedback != "" {
-		t.Fatalf("no feedback for a no-op removal: %q", r.Current().Feedback)
+	if got := r.Current().Feedback; got != before {
+		t.Fatalf("no-op removal changed feedback: %q -> %q", before, got)
 	}
 }
 
 func TestInfoWithoutStation(t *testing.T) {
-	b, _, _, _, _, _ := testBridge(t, session.Options{})
+	b := New(nil, nil, Prefs{})
 	_, err := b.Info()
 	if err == nil || err.Error() != "nothing tuned yet" {
 		t.Fatalf("want 'nothing tuned yet', got %v", err)
@@ -379,17 +408,20 @@ func TestSetUnfoldedCallsWindow(t *testing.T) {
 func TestSeedEmptyIgnored(t *testing.T) {
 	b, _, _, r, _, _ := testBridge(t, session.Options{})
 	// Let the startup commands land so the snapshot is settled.
-	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool { return s.HaveStation })
+	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
+		return s.HaveStation && !s.Syncing
+	})
 	before := r.Current()
 	b.Seed("   ")
 	time.Sleep(150 * time.Millisecond)
 	if r.Current() != before {
 		t.Fatal("blank seed changed the snapshot")
 	}
-	b.Seed("jazz")
+	// Several embedded stations carry ambient, even if one is already playing.
+	b.Seed("ambient")
 	// Seeking is transient — it flips back off when the pick resolves —
 	// so assert the seeded pick's reason instead.
 	waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
-		return s.Seeking || strings.Contains(s.Reason, "seeded: jazz")
+		return strings.Contains(s.Reason, "seeded: ambient")
 	})
 }
