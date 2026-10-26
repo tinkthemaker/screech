@@ -3,6 +3,7 @@ package session
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/player"
@@ -96,26 +97,33 @@ func TestRunnerRepublishesWhenFeedbackExpires(t *testing.T) {
 }
 
 func TestRunnerThrottlesLevels(t *testing.T) {
-	s, pl := testState(t)
+	s, _ := testState(t)
 	s = playing(t, s)
 	sink := &recSink{}
-	r := NewRunner(s, sink)
-	r.Start()
-	defer r.Stop()
 
-	for i := 0; i < 100; i++ {
-		pl.emit(player.Event{Type: player.EventLevel, Level: 0.5, Peak: 0.5, Stereo: false})
-		time.Sleep(time.Millisecond)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for sink.levelCount() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	time.Sleep(200 * time.Millisecond) // let stragglers land
-	got := sink.levelCount()
-	if got < 2 || got > 5 {
-		t.Fatalf("100 level events over ~100ms should yield 2-5 publishes, got %d", got)
-	}
+	// Virtual time tests the publication interval without depending on
+	// how long the OS actually takes to schedule a one-millisecond sleep.
+	synctest.Test(t, func(t *testing.T) {
+		// step re-arms listen(), parking a goroutine on the player's
+		// event channel; a channel made before the bubble would block it
+		// non-durably and stall the fake clock, so the player and the
+		// runner (and its queues) are built inside.
+		pl := newStubPlayer()
+		s.pl = pl
+		r := NewRunner(s, sink)
+		for i := 0; i < 100; i++ {
+			r.step(PlayerEvent(player.Event{Type: player.EventLevel, Level: 0.5, Peak: 0.5, Stereo: false}))
+			time.Sleep(time.Millisecond)
+		}
+		// Closing the player channel and the runner's done lets the parked
+		// listen goroutines leave the bubble before synctest's exit check.
+		close(pl.ch)
+		close(r.done)
+		// The first event and the events at 33, 66 and 99 ms are published.
+		if got := sink.levelCount(); got != 4 {
+			t.Fatalf("100 level events one millisecond apart should yield 4 publishes, got %d", got)
+		}
+	})
 }
 
 func TestRunnerStopWithSlowCommand(t *testing.T) {

@@ -579,13 +579,6 @@ func TestFakePlayUnpausesStream(t *testing.T) {
 	if err := m.Play("http://stream.test/ok2"); err != nil {
 		t.Fatal(err)
 	}
-	// The new load is ordered before the unpause so no stale buffer blips.
-	text := waitForLog(t, logPath, `"loadfile","http://stream.test/ok2"`)
-	load := strings.Index(text, `"loadfile","http://stream.test/ok2"`)
-	unpause := strings.Index(text[load:], `"set_property","pause",false`)
-	if load < 0 || unpause < 0 {
-		t.Fatalf("expected loadfile before pause=false:\n%s", text)
-	}
 	ev := waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool {
 		return ev.Type == EventResumed || ev.Type == EventPlaying
 	})
@@ -593,6 +586,15 @@ func TestFakePlayUnpausesStream(t *testing.T) {
 		t.Fatalf("first event = %v, want EventResumed", ev.Type)
 	}
 	waitForEvent(t, m.Events(), 3*time.Second, func(ev Event) bool { return ev.Type == EventPlaying })
+	// The resume/playing events mean the fake has processed the unpause,
+	// so its log now contains both commands. The new load must precede
+	// the unpause so no stale buffer blips.
+	text := waitForLog(t, logPath, `"loadfile","http://stream.test/ok2"`)
+	load := strings.Index(text, `"loadfile","http://stream.test/ok2"`)
+	unpause := strings.Index(text[load:], `"set_property","pause",false`)
+	if load < 0 || unpause < 0 {
+		t.Fatalf("expected loadfile before pause=false:\n%s", text)
+	}
 }
 
 func TestFakeExternalPause(t *testing.T) {
