@@ -29,10 +29,10 @@ for t in windows/amd64 linux/amd64 darwin/arm64 linux/arm64 windows/arm64 freebs
 done
 ```
 
-- The `go.mod` `toolchain` line (go1.26.9) carries the stdlib security
+- The `go.mod` `toolchain` line (go1.26.10) carries the stdlib security
   fixes, but a newer local Go wins over it. If yours is older than the
   patched releases, run `govulncheck` and release builds with
-  `GOTOOLCHAIN=go1.26.9`. Go 1.27.2's export data breaks staticcheck v0.8.1.
+  `GOTOOLCHAIN=go1.26.10`. Go 1.27.2's export data breaks staticcheck v0.8.1.
 - The `TestFake*` tests in `internal/player` re-exec the test binary as a
   scripted mpv (`fakempv_test.go`), so CI covers spawn, IPC, crash, restart
   and close without mpv installed. `TestMPVLifecycle` drives a real mpv

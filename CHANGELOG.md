@@ -1,10 +1,13 @@
 # Changelog
 
 User-visible changes, newest first. Each version's section becomes its
-GitHub release notes. Releases before 0.8.0 are described on their GitHub
+GitHub release notes. Releases before 0.9.0 are described on their GitHub
 release pages.
 
-## 0.9.0 — 2026-10-22
+## 0.9.0 — 2026-10-26
+
+0.7.0 and 0.8.0 were never published; their changes ship here too, so this
+covers everything since 0.6.1.
 
 ### New: a window for Windows
 
@@ -45,46 +48,16 @@ release pages.
 
 ### Upgrading
 
-- The first launch deletes the web-address "tracks" described under Fixes
-  from your listening history. Loved tracks are left alone.
-
-### Fixes
-
-- **The level meter follows the music.** Screech asked mpv for its loudness
-  readings under a name mpv 0.41 doesn't answer to, so the terminal's wave
-  had been breathing on its own fallback, not the audio. It now reads them
-  the way mpv documents, and both the wave and the window's meter move with
-  the real level.
-- **No more web addresses in RECENT.** On a station that sends no track
-  titles, mpv reports the stream's file name instead, and when the address
-  ends in a query (`…?token=…`) Screech took it for a track and logged it.
-  It now recognises those however the address is written.
-- When mpv dies, the reason Screech shows now reliably carries mpv's own
-  last words; it used to report the death before mpv's error output had
-  arrived.
-
-### Interface
-
-- The RECENT list, in both the terminal and the window, no longer repeats a
-  track that a relaunch or reconnect logged twice in a row. The CSV from
-  `screech export heard` still has every row.
-
-## 0.8.0 — 2026-10-14
-
-0.7.0 was never published; its changes ship here too, so this covers
-everything since 0.6.1.
-
-### Upgrading
-
-- The first launch upgrades the database in place: station and track text
-  stored by older versions is cleaned, and the fake "tracks" taken from
+- The first radio launch upgrades the database in place: station and track
+  text stored by older versions is cleaned, and fake "tracks" taken from
   stream URLs are deleted. Loves are kept, and each step either completes
-  or rolls back. Running `screech export backup old.db` before that first
-  launch gives you an easy way back; export never upgrades the database.
+  or rolls back. Before that first launch, run the new terminal executable
+  with `screech export backup old.db` to keep an easy way back; export works
+  with the old database and never upgrades it.
 - `go install github.com/tinkthemaker/screech/cmd/screech@latest` now works.
   On Windows, the release page carries a Scoop manifest (`screech.json`).
 
-### New
+### New in the terminal and shared engine
 
 - **Pause** with `p`. Keyboard media keys, headset buttons and the OS media
   flyout drive the same pause instead of silencing mpv behind screech's
@@ -121,6 +94,21 @@ everything since 0.6.1.
 - Settings in a personal `mpv.conf` that break live radio are overridden
   for screech's mpv, and its buffers are bounded.
 
+### Fixes
+
+- **The level meter follows the music.** Screech asked mpv for its loudness
+  readings under a name mpv 0.41 doesn't answer to, so the terminal's wave
+  had been breathing on its own fallback, not the audio. It now reads them
+  the way mpv documents, and both the wave and the window's meter move with
+  the real level.
+- **No more web addresses in RECENT.** On a station that sends no track
+  titles, mpv reports the stream's file name instead, and when the address
+  ends in a query (`…?token=…`) Screech took it for a track and logged it.
+  It now recognises those however the address is written.
+- When mpv dies, the reason Screech shows now reliably carries mpv's own
+  last words; it used to report the death before mpv's error output had
+  arrived.
+
 ### Learning
 
 - Stations you've listened to happily without ever pressing love now come
@@ -133,6 +121,9 @@ everything since 0.6.1.
 
 ### Interface
 
+- The RECENT list, in both the terminal and the window, no longer repeats a
+  track that a relaunch or reconnect logged twice in a row. The CSV from
+  `screech export heard` still has every row.
 - The full two-column panel now appears whenever it fits — including a
   standard 80x24 window — and never with rows cut off. Smaller windows get
   the compact layout instead of a refusal to start.
@@ -155,5 +146,6 @@ everything since 0.6.1.
   unknown arguments are rejected instead of ignored.
 - Config typos are repaired with a warning; `data_dir` accepts `~` and
   paths relative to the config file.
-- Built with Go 1.26.9, which carries the October 2026 standard-library
-  security fixes for HTTP and TLS.
+- Built with Go 1.26.10, which includes the October 2026 HTTP and TLS
+  security fixes and rejects compromised intermediate certificates
+  (GO-2026-6809).

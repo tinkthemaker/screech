@@ -92,7 +92,7 @@ thought out UI." Every edge, gap and state has to look deliberate.
 
 ## Constraints
 
-- Go module `github.com/tinkthemaker/screech`, Go 1.26.9 toolchain, existing
+- Go module `github.com/tinkthemaker/screech`, Go 1.26.10 toolchain, existing
   CI pins and the one-week rule for new dependency versions (AGENTS.md).
 - The terminal build must keep building for linux/amd64, darwin/arm64,
   linux/arm64, windows/arm64, freebsd/amd64 with `CGO_ENABLED=0`, and

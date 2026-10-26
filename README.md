@@ -378,8 +378,11 @@ displays or stores them.
 
 ## Building
 
+The commands below select Go 1.26.10, which includes the certificate
+verification security fix. Go downloads that toolchain if needed.
+
 ```
-go build -o dist/screech ./cmd/screech
+GOTOOLCHAIN=go1.26.10 go build -o dist/screech ./cmd/screech
 ```
 
 The window needs its build tags. Without them, Windows builds only Wails'
@@ -387,7 +390,7 @@ stub, which shows an error box instead of a window (other platforms skip
 the window entirely), so a plain `go build ./...` still works everywhere:
 
 ```
-CGO_ENABLED=0 GOOS=windows go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" -o dist/screech-gui.exe ./cmd/screech-gui
+GOTOOLCHAIN=go1.26.10 CGO_ENABLED=0 GOOS=windows go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" -o dist/screech-gui.exe ./cmd/screech-gui
 ```
 
 Tagged releases are built for Windows, macOS, and Linux by the release
