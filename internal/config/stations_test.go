@@ -273,3 +273,46 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// Page links need yt-dlp: while ytdlp_path is empty each one gets a
+// warning, and once it's set they are ordinary stations.
+func TestPageLinksNeedYtdlp(t *testing.T) {
+	body := `[[stations]]
+name = "Lofi"
+url = "https://www.youtube.com/watch?v=jfKfPfyJRdk"
+`
+	dir := t.TempDir()
+	writeConfig(t, dir, body)
+	cfg, _, _, err := readFrom(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Stations) != 1 || !contains(cfg.Warnings, `station "Lofi" is a page link, not a stream; it plays only with ytdlp_path set`) {
+		t.Fatalf("stations=%v warnings=%q", cfg.Stations, cfg.Warnings)
+	}
+
+	writeConfig(t, dir, `ytdlp_path = "  yt-dlp "`+"\n\n"+body)
+	cfg, _, _, err = readFrom(dir)
+	if err != nil || cfg.YtdlpPath != "yt-dlp" || len(cfg.Warnings) != 0 {
+		t.Fatalf("ytdlp_path=%q warnings=%q err=%v", cfg.YtdlpPath, cfg.Warnings, err)
+	}
+}
+
+// TOML's trap: a setting typed below a [[stations]] header belongs to
+// that station. The warning says so instead of calling it unknown.
+func TestSettingBelowStationsIsNamed(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, `[[stations]]
+name = "Mine"
+url = "https://mine.example/"
+ytdlp_path = "yt-dlp"
+`)
+	cfg, _, _, err := readFrom(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[[stations]] #1 "Mine": ytdlp_path here belongs to this station, not the file (ignored); move it above the first [[stations]]`
+	if cfg.YtdlpPath != "" || !contains(cfg.Warnings, want) {
+		t.Fatalf("ytdlp_path=%q warnings=%q", cfg.YtdlpPath, cfg.Warnings)
+	}
+}

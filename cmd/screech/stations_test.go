@@ -61,7 +61,7 @@ func TestAddRemoveCommands(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	link := "https://www.stream.example/live.mp3"
-	if code := addStation(&out, &errOut, add, link, "", "jazz"); code != 0 {
+	if code := addStation(&out, &errOut, add, link, "", "jazz", false); code != 0 {
 		t.Fatalf("add exit %d: %s", code, errOut.String())
 	}
 	if got.Name != "stream.example" || got.URL != link || got.Tags != "jazz" {
@@ -113,5 +113,41 @@ func TestDoctorCountsCustomStations(t *testing.T) {
 	out.Reset()
 	if code := reportConfig(&out, "config.toml", config.Config{}, os.ErrNotExist); code != 0 || strings.Contains(out.String(), "custom") {
 		t.Fatalf("a missing config is not a failure and has no count: %d\n%s", code, out.String())
+	}
+}
+
+func TestAddPageLinkHints(t *testing.T) {
+	add := func(st config.Station) (string, config.Station, error) { return "config.toml", st, nil }
+	page := "https://soundcloud.com/artist/track"
+	for _, tc := range []struct {
+		on   bool
+		want string
+	}{
+		{false, "plays only once ytdlp_path"},
+		{true, "asks yt-dlp"},
+	} {
+		var out, errOut bytes.Buffer
+		if code := addStation(&out, &errOut, add, page, "", "", tc.on); code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out.String(), tc.want) {
+			t.Errorf("pagesOn=%v: output lacks %q:\n%s", tc.on, tc.want, out.String())
+		}
+	}
+	var out, errOut bytes.Buffer
+	addStation(&out, &errOut, add, "https://ice1.somafm.com/x", "", "", false)
+	if strings.Contains(out.String(), "page link") {
+		t.Errorf("a stream link needs no page hint:\n%s", out.String())
+	}
+}
+
+func TestDoctorYtdlp(t *testing.T) {
+	var out bytes.Buffer
+	if code := reportYtdlp(&out, ""); code != 0 || !strings.Contains(out.String(), "[ -- ] yt-dlp   off") {
+		t.Fatalf("off: exit %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := reportYtdlp(&out, "no-such-yt-dlp-anywhere"); code != ecYtdlp || !strings.Contains(out.String(), "[FAIL] yt-dlp") {
+		t.Fatalf("missing: exit %d\n%s", code, out.String())
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tinkthemaker/screech/internal/streamurl"
 )
 
 type Config struct {
@@ -21,6 +22,9 @@ type Config struct {
 	DataDir    string `toml:"data_dir"`
 	AutoHopAds bool   `toml:"auto_hop_ads"`
 	SyncLimit  int    `toml:"sync_limit"`
+	// YtdlpPath turns on page links (YouTube, SoundCloud…) among the
+	// listener's own stations; "" leaves them off.
+	YtdlpPath string `toml:"ytdlp_path"`
 
 	// Stations are the listener's own streams, the [[stations]] tables.
 	// They're decoded on their own (parseStations) so one bad entry is a
@@ -74,10 +78,18 @@ auto_hop_ads = false
 # The directory refreshes in the background weekly.
 sync_limit = 20000
 
+# Page links among your own stations - YouTube, SoundCloud, Vimeo,
+# Mixcloud, Bandcamp, Twitch - play only through yt-dlp, which you install
+# yourself. Empty = off. "yt-dlp" if it's on PATH, else its full path.
+# Each tune of a page link runs it once, for at most 6 seconds.
+ytdlp_path = ""
+
 # Your own stations: any http or https stream link, one [[stations]] table
 # each. "screech add <link>" writes one for you. name and url are required;
 # tags, codec, bitrate, country and homepage are optional. They join the
 # rotation the next time Screech starts and survive every directory refresh.
+# Keep every setting above this point: in TOML, a line below a [[stations]]
+# header belongs to that station.
 #
 # [[stations]]
 # name = "My station"
@@ -160,6 +172,14 @@ func decode(data []byte) (Config, error) {
 	var warns []string
 	cfg.Stations, warns = parseStations(raw.Stations)
 	cfg.Warnings = append(cfg.Warnings, warns...)
+	cfg.YtdlpPath = strings.TrimSpace(cfg.YtdlpPath)
+	if cfg.YtdlpPath == "" {
+		for _, st := range cfg.Stations {
+			if streamurl.IsPage(st.URL) {
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("station %q is a page link, not a stream; it plays only with ytdlp_path set", st.Name))
+			}
+		}
+	}
 	return cfg, nil
 }
 

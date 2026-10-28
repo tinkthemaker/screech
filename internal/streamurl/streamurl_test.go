@@ -35,3 +35,22 @@ func TestMpvFilenames(t *testing.T) {
 		}
 	}
 }
+
+func TestIsPage(t *testing.T) {
+	for link, want := range map[string]bool{
+		"https://www.youtube.com/watch?v=jfKfPfyJRdk":        true,
+		"https://youtu.be/jfKfPfyJRdk":                       true,
+		"https://music.YouTube.com/watch?v=x":                true,
+		"https://soundcloud.com/artist/track":                true,
+		"https://artist.bandcamp.com/track/song":             true,
+		"https://vimeo.com/123":                              true,
+		"https://rr3---sn-abc.googlevideo.com/videoplayback": false,
+		"https://ice1.somafm.com/groovesalad-128-mp3":        false,
+		"https://notyoutube.com/live":                        false,
+		"://broken":                                          false,
+	} {
+		if got := IsPage(link); got != want {
+			t.Errorf("IsPage(%q) = %v, want %v", link, got, want)
+		}
+	}
+}

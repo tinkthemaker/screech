@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -54,6 +53,15 @@ type MPV struct {
 	// entries whose URL we never saw.
 	junkTitles  []string
 	mpvFilename string
+
+	// pages resolves page links (nil: ytdlp_path is off and they go to mpv
+	// as-is, as before). page is the link behind the current load when it
+	// was resolved, so a failure can forget the stale answer. playSeq
+	// counts Play calls: a resolution that finishes after a newer Play
+	// began must not load over it.
+	pages   *pageResolver
+	page    string
+	playSeq int
 
 	mpvPath string
 	dataDir string
@@ -132,9 +140,11 @@ func (m *MPV) spawn() error {
 		// Let ffmpeg ride out brief mid-stream drops on ICY streams; the
 		// app-level reconnect in the TUI is the backstop.
 		"--stream-lavf-o=reconnect_streamed=1",
-		// Radio streams never need yt-dlp: without this, mpv's ytdl hook
-		// runs it (when installed) on every URL that fails to load,
-		// delaying the failure the tune watchdog and offline logic rely on.
+		// mpv never runs yt-dlp itself: its ytdl hook would run it (when
+		// installed) on every URL that fails to load, delaying the failure
+		// the tune watchdog and offline logic rely on. Page links, the one
+		// case that needs it, are resolved before loadfile, under a timeout
+		// of screech's own (extract.go).
 		"--ytdl=no",
 		// mpv still reads the user's mpv.conf — audio device, exclusive
 		// mode, that stays — but these pin options a personal config can
@@ -230,26 +240,72 @@ func (m *MPV) Events() <-chan Event {
 	return m.events
 }
 
+// SetExtractor turns page-link resolution on (ytdlp_path). Without it a
+// page link goes to mpv as-is and fails there, as it always has.
+func (m *MPV) SetExtractor(ex Extractor) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pages = newPageResolver(ex)
+}
+
 func (m *MPV) Play(streamURL string) error {
-	u, err := url.Parse(streamURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if !validStreamURL(streamURL) {
 		return fmt.Errorf("invalid stream URL %q: only http/https are supported", streamURL)
 	}
 	m.mu.Lock()
+	m.playSeq++
+	seq, pages := m.playSeq, m.pages
+	m.mu.Unlock()
+
+	target, title, page := streamURL, "", ""
+	if pages != nil && streamurl.IsPage(streamURL) {
+		// Silence the old station before the seconds yt-dlp takes: its
+		// titles would otherwise land on the new station's listen. The
+		// stop's end-file falls inside loadPending and is dropped, so it
+		// never reads as the listener pressing Stop.
+		m.mu.Lock()
+		m.loadPending = true
+		m.mu.Unlock()
+		_ = m.send("stop")
+		r, err := pages.resolve(streamURL)
+		if err != nil {
+			return err
+		}
+		target, title, page = r.URL, r.Title, streamURL
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.playSeq != seq {
+		return ErrSuperseded
+	}
 	m.sawIcy = false
 	// Channel reporting is a property of the stream, not the process: a
 	// mono station following a stereo one must not inherit its stereo flag.
 	m.sawL, m.sawR = false, false
 	m.loadPending = true
-	m.junkTitles = streamurl.MpvFilenames(streamURL)
+	m.junkTitles = streamurl.MpvFilenames(target)
+	if page != "" {
+		m.junkTitles = append(m.junkTitles, streamurl.MpvFilenames(page)...)
+	}
 	m.mpvFilename = ""
-	m.mu.Unlock()
-	if err := m.send("loadfile", streamURL); err != nil {
+	m.page = page
+	load := []any{"loadfile", target}
+	if title != "" {
+		// A resolved URL carries no ICY metadata and its filename is junk,
+		// so the page's own title rides the media-title path instead. %n%
+		// is mpv's length-prefixed quoting: commas, quotes and '=' in a
+		// title can't break the option list.
+		load = append(load, "replace", -1, fmt.Sprintf("force-media-title=%%%d%%%s", len(title), title))
+	}
+	// Sent under the lock that checked playSeq, so a newer Play can't slip
+	// its loadfile in between and be replaced by this older one.
+	if err := m.sendLocked(load...); err != nil {
 		return err
 	}
 	// mpv's pause survives loadfile; choosing a station must never start
 	// silent, whoever paused it.
-	return m.send("set_property", "pause", false)
+	return m.sendLocked("set_property", "pause", false)
 }
 
 func (m *MPV) SetVolume(percent int) error {
@@ -324,6 +380,10 @@ func (m *MPV) Close() error {
 func (m *MPV) send(command ...any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.sendLocked(command...)
+}
+
+func (m *MPV) sendLocked(command ...any) error {
 	if m.conn == nil {
 		return fmt.Errorf("mpv: not connected")
 	}
@@ -384,12 +444,14 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 				// button sends it. Screech never does.
 				emit(events, Event{Type: EventStopped})
 			case "error":
+				m.forgetPage()
 				err := fmt.Errorf("stream failed")
 				if msg.FileError != "" {
 					err = fmt.Errorf("stream failed: %s", msg.FileError)
 				}
 				emit(events, Event{Type: EventStreamError, Err: err})
 			case "eof":
+				m.forgetPage()
 				emit(events, Event{Type: EventStreamEnded})
 			}
 		}
@@ -408,6 +470,18 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 		emit(events, Event{Type: EventDied, Err: fmt.Errorf("mpv exited%s", stderr.suffix())})
 	}
 	close(events)
+}
+
+// forgetPage drops the cached resolution behind a stream that failed or
+// ended, so the reconnect or the next visit resolves the page afresh: an
+// expired signature fails exactly like a dead server.
+func (m *MPV) forgetPage() {
+	m.mu.Lock()
+	pages, page := m.pages, m.page
+	m.mu.Unlock()
+	if pages != nil && page != "" {
+		pages.forget(page)
+	}
 }
 
 func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {

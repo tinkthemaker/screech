@@ -82,6 +82,11 @@ covers everything since 0.6.1.
   tags, and say `added by you` when picked for being yours.
   `screech doctor` counts them. The config file is all you need to keep: a
   fresh database rebuilds them from it.
+- **YouTube, SoundCloud and other page links, if you want them.** Install
+  yt-dlp and set `ytdlp_path` in `config.toml`, and your own stations can
+  be page links too: each tune asks yt-dlp for the audio (giving it 6
+  seconds at most) and shows the artist and track it reports. It's off
+  unless you set it, and `screech doctor` checks it when it's on.
 - **Export**: `screech export loved` and `screech export heard` write CSV to
   stdout; `screech export backup <path>` writes a consistent copy of the
   database. All three work while the radio is playing.

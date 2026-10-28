@@ -2,7 +2,8 @@
 // stream carries no ICY title, mpv reports the percent-decoded text after
 // the last '/' of the whole URL — query included — which lands in the
 // heard list as a bogus track ("rqqps6cbe3quv?rj-ttl=5&rj-tok=…") unless
-// it is filtered out.
+// it is filtered out. It also knows which links are web pages rather than
+// streams (page.go), the ones only yt-dlp can turn into something mpv plays.
 package streamurl
 
 import (

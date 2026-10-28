@@ -22,7 +22,8 @@ var usage = "screech " + version + " - terminal internet radio\n\n" +
 	"  screech                 start the TUI (default)\n" +
 	"  screech doctor          run a read-only diagnostic check\n" +
 	"                          exit status is a bitmask of failed checks\n" +
-	"                          (1 config, 2 database, 4 mpv, 8 ipc, 16 network)\n" +
+	"                          (1 config, 2 database, 4 mpv, 8 ipc, 16 network,\n" +
+	"                          32 yt-dlp when ytdlp_path is set)\n" +
 	"  screech export loved    write the loved-track list as CSV to stdout\n" +
 	"  screech export heard    write the heard-track history as CSV to stdout\n" +
 	"  screech export backup <path>\n" +

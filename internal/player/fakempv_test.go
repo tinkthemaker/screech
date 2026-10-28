@@ -20,6 +20,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("SCREECH_FAKE_MPV") != "" {
 		os.Exit(runFakeMPV(os.Args[1:]))
 	}
+	if mode := os.Getenv("SCREECH_FAKE_YTDLP"); mode != "" {
+		os.Exit(runFakeYTDLP(mode, os.Args[1:]))
+	}
 	os.Exit(m.Run())
 }
 
@@ -120,9 +123,29 @@ func runFakeMPV(args []string) int {
 		}
 
 		switch name {
+		case "stop":
+			// Like mpv: the loaded file ends with reason stop, then idle.
+			if cur != "" {
+				send(`{"event":"end-file","reason":"stop"}`)
+				cur = ""
+				send(`{"event":"property-change","name":"core-idle","data":true}`)
+			}
 		case "loadfile":
 			url, _ := msg.Command[1].(string)
 			base := url[strings.LastIndex(url, "/")+1:]
+			// loadfile <url> replace -1 force-media-title=%n%<title>: the
+			// forced title replaces the ICY one, as mpv's media-title does.
+			forced := ""
+			if len(msg.Command) > 4 {
+				opt, _ := msg.Command[4].(string)
+				if v, ok := strings.CutPrefix(opt, "force-media-title=%"); ok {
+					if n, rest, ok := strings.Cut(v, "%"); ok {
+						if size, err := strconv.Atoi(n); err == nil && size <= len(rest) {
+							forced = rest[:size]
+						}
+					}
+				}
+			}
 			if cur != "" {
 				// Deliberately the worst case: the replaced file's end-file
 				// lands inside the new load's window. The client must
@@ -148,7 +171,12 @@ func runFakeMPV(args []string) int {
 			default:
 				send(`{"event":"start-file"}`)
 				send(`{"event":"property-change","name":"core-idle","data":false}`)
-				send(`{"event":"property-change","name":"metadata","data":{"icy-title":"Fake Artist - Fake Title"}}`)
+				if forced != "" {
+					title, _ := json.Marshal(forced)
+					send(`{"event":"property-change","name":"media-title","data":%s}`, title)
+				} else {
+					send(`{"event":"property-change","name":"metadata","data":{"icy-title":"Fake Artist - Fake Title"}}`)
+				}
 			}
 			cur = base
 		case "set_property":

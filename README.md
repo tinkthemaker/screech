@@ -89,7 +89,8 @@ directory says they're healthy again. Presets, loved stations, and anything
 you've listened to are never pruned.
 
 Something wrong? `screech doctor` checks each dependency in turn (config,
-database, mpv, the IPC handshake, the directory) and reports what it finds.
+database, mpv, the IPC handshake, yt-dlp if you set it up, the directory)
+and reports what it finds.
 Every run also writes a log next to the config file, and startup errors hold
 the window open instead of vanishing with the message.
 
@@ -127,8 +128,24 @@ missing name, a link that isn't http or https, a duplicate.
 back out. Its listening history stays, so adding the same link again picks
 up where it left off.
 
-A link has to be the stream itself: an Icecast or Shoutcast mount, an
+A link is normally the stream itself: an Icecast or Shoutcast mount, an
 `.mp3`, `.aac` or `.m3u8` URL, or a `.pls`/`.m3u` playlist.
+
+**Page links, with yt-dlp (optional).** A YouTube, SoundCloud, Vimeo,
+Mixcloud, Bandcamp or Twitch link is a web page, not a stream. Screech can
+play one if you install [yt-dlp](https://github.com/yt-dlp/yt-dlp) and point
+`ytdlp_path` at it in `config.toml`, above any `[[stations]]` table:
+
+```toml
+ytdlp_path = "yt-dlp"   # or its full path
+```
+
+Each time such a station is tuned, Screech asks yt-dlp for the audio
+stream, giving it at most 6 seconds; a page that won't resolve is skipped
+like a dead stream. The track line shows the artist and track yt-dlp
+reports, or the video's title. Leave `ytdlp_path` empty (the default) and
+yt-dlp is never run. `screech doctor` checks it when it's set. Screech
+plays one stream per page: a playlist link plays its first entry.
 
 ## Controls
 
@@ -378,7 +395,9 @@ Internet radio drops constantly, and none of it should need you.
 `~/.config/screech/config.toml` on Linux. First launch writes it with
 commented defaults covering the accent color, ASCII fallback, mpv path, data
 directory, ad hopping, directory cache size (`sync_limit`, at most
-50,000), and an example of [your own stations](#your-own-stations).
+50,000), the optional yt-dlp path for page links (`ytdlp_path`), and an
+example of [your own stations](#your-own-stations). Keep settings above
+the first `[[stations]]` table: in TOML, anything below one belongs to it.
 `data_dir` accepts `~` and paths relative to the config file.
 
 A typo never stops the radio: unknown keys, a malformed accent, an

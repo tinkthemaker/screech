@@ -7,6 +7,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -136,6 +137,16 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 		return nil, failStage(log, StageMpv, err)
 	}
 	log.Linef("mpv connected over IPC")
+	if cfg.YtdlpPath != "" {
+		pl.SetExtractor(player.YTDLP{Path: cfg.YtdlpPath})
+		if _, err := exec.LookPath(cfg.YtdlpPath); err != nil {
+			// Not fatal: only page links need it, and each one that can't
+			// resolve fails on its own like any dead stream.
+			log.Linef("yt-dlp not found (%v); page links will fail", err)
+		} else {
+			log.Linef("page links resolve through yt-dlp: %s", cfg.YtdlpPath)
+		}
+	}
 
 	// mpv boots at --volume=100; restore the persisted level now, on this
 	// thread, so the first Play can't beat the face's async volume command

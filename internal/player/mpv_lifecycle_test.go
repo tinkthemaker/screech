@@ -137,3 +137,45 @@ func TestMPVLifecycle(t *testing.T) {
 		t.Error("Restart on a closed MPV should fail")
 	}
 }
+
+// TestMPVForcedTitle checks against a real mpv that a resolved page's title
+// survives loadfile's option list: mpv's %n% quoting must carry commas,
+// quotes, '=' and '%' through untouched, or a page title becomes a broken
+// option or a mangled track. The extractor is faked, so no network.
+func TestMPVForcedTitle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real mpv process; skipping in -short mode")
+	}
+	mpvPath, err := exec.LookPath("mpv")
+	if err != nil {
+		t.Skipf("mpv not on PATH: %v", err)
+	}
+	testExtraArgs = []string{"--ao=null"}
+	t.Cleanup(func() { testExtraArgs = nil })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write(sineWAV(2500 * time.Millisecond))
+	}))
+	defer srv.Close()
+
+	m, err := NewMPV(mpvPath, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	title := `Ólafur Arnalds, "Saman" - live=1, 100% [édit]`
+	m.SetExtractor(&stubExtractor{r: Resolved{URL: srv.URL + "/videoplayback", Title: title}})
+	if err := m.Play("https://www.youtube.com/watch?v=lifecycle"); err != nil {
+		t.Fatal(err)
+	}
+	ev := waitForEvent(t, m.Events(), 10*time.Second, func(ev Event) bool {
+		if ev.Type == EventStreamError {
+			t.Fatalf("mpv refused the load: %v", ev.Err)
+		}
+		return ev.Type == EventTitle
+	})
+	if ev.Title != title {
+		t.Fatalf("media-title = %q, want %q", ev.Title, title)
+	}
+}

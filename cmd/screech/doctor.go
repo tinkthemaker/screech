@@ -23,6 +23,7 @@ const (
 	ecMpv                  // mpv not on PATH
 	ecIpc                  // mpv found but IPC handshake failed
 	ecNetwork              // radio-browser unreachable
+	ecYtdlp                // ytdlp_path set but yt-dlp won't run
 )
 
 // runDoctor checks every joint screech depends on and reports what it finds.
@@ -124,6 +125,8 @@ func runDoctor() int {
 		}
 	}
 
+	exitCode |= reportYtdlp(os.Stdout, cfg.YtdlpPath)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -146,6 +149,29 @@ func runDoctor() int {
 		holdConsoleOnExit()
 	}
 	return exitCode
+}
+
+// reportYtdlp checks the optional page-link resolver. Off is not a
+// failure: only page links (YouTube, SoundCloud…) need it.
+func reportYtdlp(w io.Writer, path string) int {
+	if path == "" {
+		fmt.Fprintf(w, "[ -- ] yt-dlp   off (ytdlp_path is empty; page links won't play)\n")
+		return 0
+	}
+	resolved, err := exec.LookPath(path)
+	var version []byte
+	if err == nil {
+		version, err = exec.Command(resolved, "--version").Output()
+	}
+	if err != nil {
+		// Shown cleaned, run as written: a path is the user's to get right.
+		fmt.Fprintf(w, "[FAIL] yt-dlp   %s\n", core.CleanText(path))
+		fmt.Fprintf(w, "        -> %v\n        -> install yt-dlp, or fix or empty ytdlp_path in config.toml\n", err)
+		return ecYtdlp
+	}
+	fmt.Fprintf(w, "[ ok ] yt-dlp   %s\n", resolved)
+	fmt.Fprintf(w, "        -> %s\n", strings.TrimSpace(string(version)))
+	return 0
 }
 
 // reportConfig is doctor's config check: the file, how many of the

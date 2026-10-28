@@ -2,9 +2,11 @@ package session
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
 )
 
 // tick runs the frame-clock watchdogs: a tune that never locks fails
@@ -66,10 +68,13 @@ func (s State) seeded(msg Seeded) (State, []Cmd) {
 
 // playFailed handles a Play() that refused the URL — that is the station's
 // fault, not the network's: strike it and move on, but never touch the
-// offline bookkeeping. A stale failure (the station already moved on) is
-// ignored.
+// offline bookkeeping. A page link that didn't resolve is the same case. A
+// stale failure (the station already moved on) is ignored, and so is a
+// superseded one: a newer Play took the player while this one was still
+// resolving, which says nothing about the station, even when the listener
+// has come straight back to it.
 func (s State) playFailed(msg PlayFailed) (State, []Cmd) {
-	if !s.HaveStation || msg.UUID != s.Station.UUID {
+	if !s.HaveStation || msg.UUID != s.Station.UUID || errors.Is(msg.Err, player.ErrSuperseded) {
 		return s, nil
 	}
 	s.core.MarkStationFailed(msg.UUID)

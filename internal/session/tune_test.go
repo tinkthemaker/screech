@@ -2,10 +2,12 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
 )
 
 func TestThreeFailuresGoOffline(t *testing.T) {
@@ -93,6 +95,51 @@ func TestPlayErrorStrikesWithoutTouchingOffline(t *testing.T) {
 	}
 	if s.retryN != 0 {
 		t.Fatalf("rejected URL must not touch offline state, retryN=%d", s.retryN)
+	}
+}
+
+// A page link yt-dlp can't resolve is a station that won't play: Play's
+// ErrResolve surfaces as PlayFailed, one strike, and on to the next pick,
+// never the offline path.
+func TestPageResolveFailureIsPlayFailed(t *testing.T) {
+	s, stub := testState(t)
+	stub.failPlay(fmt.Errorf("%w: yt-dlp: ERROR: Video unavailable", player.ErrResolve))
+	seeds := core.SeedStations()
+	s, cmds := s.Update(Tuned{Pick: pickSeed(seeds[0])})
+	var failed *PlayFailed
+	for _, msg := range run(t, cmds) {
+		if fm, ok := msg.(PlayFailed); ok {
+			failed = &fm
+		}
+	}
+	if failed == nil || !errors.Is(failed.Err, player.ErrResolve) {
+		t.Fatalf("a resolution failure must surface as PlayFailed, got %+v", failed)
+	}
+	s, cmds = s.Update(*failed)
+	if st, _ := s.core.StationByUUID(seeds[0].UUID); st.FailCount != 1 {
+		t.Fatalf("an unresolvable page should strike, FailCount=%d", st.FailCount)
+	}
+	if len(cmds) == 0 {
+		t.Fatal("a strike must move on to the next station")
+	}
+	if len(s.failStreak) != 0 || s.retryN != 0 {
+		t.Fatal("a page that won't resolve is not a network event")
+	}
+}
+
+// A Play overtaken while it resolved is nobody's failure, even when the
+// listener has come straight back to the same station.
+func TestSupersededPlayLeavesNoTrace(t *testing.T) {
+	s, _ := testState(t)
+	seeds := core.SeedStations()
+	s = drive(t, s, Tuned{Pick: pickSeed(seeds[0])})
+	before := s.PickSeq
+	s, cmds := s.Update(PlayFailed{UUID: seeds[0].UUID, Err: player.ErrSuperseded})
+	if len(cmds) != 0 || s.PickSeq != before || s.Station.UUID != seeds[0].UUID {
+		t.Fatal("a superseded Play must change nothing")
+	}
+	if st, _ := s.core.StationByUUID(seeds[0].UUID); st.FailCount != 0 {
+		t.Fatalf("a superseded Play must not strike, FailCount=%d", st.FailCount)
 	}
 }
 

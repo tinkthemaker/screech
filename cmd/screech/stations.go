@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/tinkthemaker/screech/internal/config"
+	"github.com/tinkthemaker/screech/internal/streamurl"
 )
 
 // runAdd writes link into config.toml as one of the listener's own
@@ -16,14 +17,17 @@ import (
 // editing TOML or SQL by hand. It takes no lock and works while screech
 // plays; that copy just doesn't see the link until it next starts.
 func runAdd(link, name, tags string) int {
-	return addStation(os.Stdout, os.Stderr, config.AddStation, link, name, tags)
+	cfg, _, _, _ := config.Read()
+	return addStation(os.Stdout, os.Stderr, config.AddStation, link, name, tags, cfg.YtdlpPath != "")
 }
 
 func runRemove(key string) int {
 	return removeStation(os.Stdout, os.Stderr, config.RemoveStation, key)
 }
 
-func addStation(stdout, stderr io.Writer, add func(config.Station) (string, config.Station, error), link, name, tags string) int {
+// addStation does the work behind runAdd. pagesOn says whether ytdlp_path
+// is set, which decides what a page link needs to hear about.
+func addStation(stdout, stderr io.Writer, add func(config.Station) (string, config.Station, error), link, name, tags string, pagesOn bool) int {
 	if strings.TrimSpace(name) == "" {
 		name = nameFromLink(link)
 	}
@@ -39,6 +43,13 @@ func addStation(stdout, stderr io.Writer, add func(config.Station) (string, conf
 	}
 	fmt.Fprintf(stdout, "  id    %s\n", st.ID())
 	fmt.Fprintln(stdout, "It joins the rotation the next time Screech starts; one that's already running keeps playing without it until then.")
+	if streamurl.IsPage(st.URL) {
+		if pagesOn {
+			fmt.Fprintln(stdout, "It's a page link, so each tune asks yt-dlp (ytdlp_path) for the stream first.")
+		} else {
+			fmt.Fprintln(stdout, "It's a page link, not a stream: it plays only once ytdlp_path in config.toml points at yt-dlp.")
+		}
+	}
 	return 0
 }
 

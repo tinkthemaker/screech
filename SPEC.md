@@ -223,9 +223,37 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   `error` → stream failed, `eof` → stream ended on its own.
 - `--stream-lavf-o=reconnect_streamed=1` lets ffmpeg ride out brief drops
   inside one connection; the app-level rules below are the backstop.
-  `--ytdl=no`: radio never needs yt-dlp, and mpv's hook would otherwise run
-  it on every URL that fails to load, delaying the failure everything below
-  keys on.
+  `--ytdl=no`: mpv's hook would otherwise run yt-dlp on every URL that
+  fails to load, delaying the failure everything below keys on. Page links
+  are resolved by screech itself instead (next item).
+- **Page links (optional, off by default).** A listener's own station may
+  be a page (YouTube, SoundCloud, Vimeo, Mixcloud, Bandcamp or Twitch,
+  matched by host in `streamurl.IsPage`). With `ytdlp_path` set, `Play`
+  runs `yt-dlp -f bestaudio/best --no-playlist --playlist-items 1 --get-url`
+  plus `--print` lines for artist, track and title before `loadfile`, under
+  a hard 6 s timeout: the tune watchdog allows 12 s from the pick, so mpv
+  keeps half. `/best` is there because YouTube live streams offer only muxed
+  HLS, which mpv plays audio-only under `--no-video`. The old station is
+  stopped first (that `stop`'s end-file falls inside `loadPending` and is
+  dropped) so its titles can't land on the new listen. A resolution that
+  fails or times out returns `player.ErrResolve`, which the session handles
+  as `PlayFailed`: one strike, on to the next station. A Play overtaken
+  while resolving returns `player.ErrSuperseded` and loads nothing; the
+  check and the `loadfile` share one lock hold, and the session ignores
+  that error, so a skip during yt-dlp leaves no strike and no stray listen.
+  The direct URL is cached in memory per page for an hour, well inside the
+  ~6 h its signature lasts, and dropped when its stream errors or ends, so
+  a reconnect or the next visit resolves afresh. It is never stored: the
+  station keeps its page link. The URL carries no ICY metadata and its
+  filename is junk, so the title goes in as a per-file option,
+  `loadfile <url> replace -1 force-media-title=%n%<title>` (mpv's
+  length-prefixed quoting, so commas, quotes and `=` survive; needs mpv
+  0.38+), and rides the media-title path like any other title. The title is
+  "artist - track" when yt-dlp knows both, else the page title, else none,
+  leaving the filename filter to keep the URL out of the heard list. The
+  extractor is an interface (`player.Extractor`), so unit tests run a
+  scripted yt-dlp and never the network. Without `ytdlp_path`, a page link
+  goes to mpv as-is and fails there, as before.
 - Personal `mpv.conf` still applies (audio device, exclusive mode — the
   parts worth keeping), but options that break live radio are pinned at
   spawn: `keep-open` and `loop-*` would swallow the eof that drop
@@ -759,7 +787,8 @@ and `NOW PLAYING` as the artist.
 
 One TOML at `os.UserConfigDir()/screech/config.toml`, created with commented
 defaults on first run: `accent`, `ascii`, `mpv_path`, `data_dir`, `auto_hop_ads`,
-`sync_limit`, and a commented example of `[[stations]]`. `data_dir` expands
+`sync_limit`, `ytdlp_path` (empty: page links off), and a commented example
+of `[[stations]]`. `data_dir` expands
 `~` and resolves relative paths against the config directory (a
 double-click launch has a different CWD than a shell).
 Bad values never stop the radio: unknown keys, a malformed accent, and an
@@ -775,8 +804,12 @@ and comma-joined; the url must pass the player's own rule (http or https,
 with a host). A table missing its name or url, with a link that fails the
 rule, or repeating an earlier table's link (by `custom:` id) is skipped, and
 an unknown key or a wrongly typed field is dropped, each with a warning that
-names the table. `screech doctor` reports how many stations the config
-carries.
+names the table. A top-level setting written below a `[[stations]]` header
+belongs to that table in TOML; its warning says so and where to move it,
+rather than calling it unknown. A page link while `ytdlp_path` is empty
+loads but is warned about, since it can't play. `screech doctor` reports
+how many stations the config carries, and checks yt-dlp when `ytdlp_path`
+is set (exit bit 32 when it won't run).
 
 ## Stack
 

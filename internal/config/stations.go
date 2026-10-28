@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -120,11 +121,31 @@ func parseStation(t map[string]any) (Station, []string) {
 			}
 			st.Bitrate = int(n)
 		default:
+			if topLevelKeys[k] {
+				// The TOML trap: a setting written below a [[stations]]
+				// header belongs to that table, not to the file.
+				warns = append(warns, fmt.Sprintf("%s here belongs to this station, not the file (ignored); move it above the first [[stations]]", k))
+				continue
+			}
 			warns = append(warns, fmt.Sprintf("unknown key %q (ignored)", k))
 		}
 	}
 	return st, warns
 }
+
+// topLevelKeys are Config's own TOML keys, read off its struct tags so a
+// new setting is covered without touching this list.
+var topLevelKeys = func() map[string]bool {
+	out := map[string]bool{}
+	t := reflect.TypeOf(Config{})
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("toml"), ",")
+		if name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
+}()
 
 // tagsValue accepts tags written either way TOML makes natural:
 // "jazz, blues" or ["jazz", "blues"].
