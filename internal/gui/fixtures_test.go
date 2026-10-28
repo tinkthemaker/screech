@@ -77,12 +77,12 @@ func playingSnapshot() session.Snapshot {
 
 func ptrLevel(l, r, p float64) *[3]float64 { return &[3]float64{l, r, p} }
 
-// exp builds a fixture's Expect map: the four button labels every strip
+// exp builds a fixture's Expect map: the five button labels every strip
 // render carries, plus per-fixture entries.
 func exp(extra map[string]string) map[string]string {
 	m := map[string]string{
 		"btn-next": "NEXT", "btn-love": "LOVE",
-		"btn-pause": "PAUSE", "btn-more": "MORE",
+		"btn-pause": "PAUSE", "btn-more": "MORE", "btn-exit": "EXIT",
 	}
 	for k, v := range extra {
 		m[k] = v

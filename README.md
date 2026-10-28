@@ -192,7 +192,7 @@ any other key closes it and still does its own job. The same goes for `i`.
 
 ## The window (Windows)
 
-![The Screech window folded to its strip: station, track, level meter, volume slider, and the NEXT, LOVE, PAUSE and MORE buttons](docs/screenshots/strip.png)
+![The Screech window folded to its strip: station, track, level meter, volume slider, and playback controls](docs/screenshots/strip.png)
 
 On Windows, Screech also comes as a small window in the LCARS style of a
 starship control panel: something to leave open beside other work, glance
@@ -219,13 +219,13 @@ already playing.
 The strip is 480 × 128: the station and a level meter, the track, then a
 status row (`LIVE`, `TUNING`, `RECONNECTING`, `BUFFERING`, `PAUSED`, the
 pick reason, feedback such as `LEARNED  Fast skip noted`) ending in the
-volume slider, and the NEXT, LOVE, PAUSE and MORE buttons. Offline turns the
+volume slider, and the PAUSE, NEXT, LOVE, MORE and EXIT buttons. Long station
+and track names scroll once so you can read them in full. Offline turns the
 whole frame red and NEXT reads RETRY NOW. **Volume is the slider, or `-`/`+`
 (`[`/`]`); the mouse wheel never changes it**, so a stray scroll over a
-window sitting behind a game or a web page can't. There is no close button:
-`q`, Alt+F4 or the taskbar's Close quits Screech and stops the radio, like
-`q` in the terminal. Drag the window by its frame (the top bar and the left
-block).
+window sitting behind a game or a web page can't. EXIT, `q`, Alt+F4 or the
+taskbar's Close quits Screech and stops the radio. The window's outer corners
+follow the LCARS curves. Drag it by its frame (the top bar and the left block).
 
 ![The unfolded window: the LOVED tab with its actions, and the presets row](docs/screenshots/window.png)
 

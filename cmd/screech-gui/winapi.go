@@ -9,6 +9,7 @@ package main
 // asymmetry that makes it useless for placement maths.
 
 import (
+	"math"
 	"os"
 	"unsafe"
 
@@ -31,6 +32,10 @@ var (
 	procMonitorFromPoint      = user32.NewProc("MonitorFromPoint")
 	procGetMonitorInfoW       = user32.NewProc("GetMonitorInfoW")
 	procGetDpiForWindow       = user32.NewProc("GetDpiForWindow")
+	procSetWindowRgn          = user32.NewProc("SetWindowRgn")
+	gdi32                     = windows.NewLazySystemDLL("gdi32.dll")
+	procCreatePolygonRgn      = gdi32.NewProc("CreatePolygonRgn")
+	procDeleteObject          = gdi32.NewProc("DeleteObject")
 )
 
 const (
@@ -42,6 +47,7 @@ const (
 )
 
 type w32Rect struct{ Left, Top, Right, Bottom int32 }
+type w32Point struct{ X, Y int32 }
 type w32MonitorInfo struct {
 	CbSize  uint32
 	Monitor w32Rect
@@ -164,4 +170,52 @@ func (o w32Ops) Scale() float64 {
 		return 1
 	}
 	return float64(dpi) / 96
+}
+
+// SetRegion clips the frameless HWND to the same outside silhouette as
+// the LCARS face: a broad left curve, a small top-right cap, and the
+// button or bottom-bar radius at the lower right. Win32 takes ownership
+// of the region only when SetWindowRgn succeeds.
+func (o w32Ops) SetRegion(w, h int, scale float64, unfolded bool) {
+	points := windowOutline(w, h, scale, unfolded)
+	if len(points) == 0 {
+		return
+	}
+	region, _, _ := procCreatePolygonRgn.Call(
+		uintptr(unsafe.Pointer(&points[0])), uintptr(len(points)), 2) // WINDING
+	if region == 0 {
+		return
+	}
+	if ok, _, _ := procSetWindowRgn.Call(uintptr(o), region, 1); ok == 0 {
+		procDeleteObject.Call(region)
+	}
+}
+
+func windowOutline(w, h int, scale float64, unfolded bool) []w32Point {
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	limit := min(w, h) / 2
+	left := min(round(48*scale), limit)
+	topRight := min(round(6*scale), limit)
+	bottomRight := topRight
+	if !unfolded {
+		bottomRight = min(round(14*scale), limit)
+	}
+	var points []w32Point
+	arc := func(cx, cy, radius int, start, end float64) {
+		const steps = 16
+		for i := 0; i <= steps; i++ {
+			a := start + (end-start)*float64(i)/steps
+			points = append(points, w32Point{
+				X: int32(cx + round(float64(radius)*math.Cos(a))),
+				Y: int32(cy + round(float64(radius)*math.Sin(a))),
+			})
+		}
+	}
+	arc(left, left, left, math.Pi, 3*math.Pi/2)
+	arc(w-topRight, topRight, topRight, 3*math.Pi/2, 2*math.Pi)
+	arc(w-bottomRight, h-bottomRight, bottomRight, 0, math.Pi/2)
+	arc(left, h-left, left, math.Pi/2, math.Pi)
+	return points
 }

@@ -13,8 +13,9 @@ import (
 )
 
 type fakeOps struct {
-	r     rect
-	scale float64
+	r       rect
+	scale   float64
+	regions []bool
 }
 
 func (f *fakeOps) Rect() (rect, bool) { return f.r, true }
@@ -22,6 +23,32 @@ func (f *fakeOps) SetRect(x, y, w, h int) {
 	f.r = rect{x, y, x + w, y + h}
 }
 func (f *fakeOps) Scale() float64 { return f.scale }
+func (f *fakeOps) SetRegion(w, h int, scale float64, unfolded bool) {
+	if w != f.r.width() || h != f.r.height() || scale != f.scale {
+		panic("region does not match resized window")
+	}
+	f.regions = append(f.regions, unfolded)
+}
+
+func TestWindowOutlineFollowsFaceCorners(t *testing.T) {
+	for _, tc := range []struct {
+		h        int
+		scale    float64
+		unfolded bool
+		corners  [4]w32Point
+	}{
+		{128, 1, false, [4]w32Point{{0, 48}, {480, 6}, {466, 128}, {0, 80}}},
+		{428, 1, true, [4]w32Point{{0, 48}, {480, 6}, {474, 428}, {0, 380}}},
+		{192, 1.5, false, [4]w32Point{{0, 72}, {720, 9}, {699, 192}, {0, 120}}},
+	} {
+		w := round(480 * tc.scale)
+		pts := windowOutline(w, tc.h, tc.scale, tc.unfolded)
+		got := [4]w32Point{pts[0], pts[33], pts[50], pts[67]}
+		if got != tc.corners {
+			t.Errorf("outline %dx%d unfolded=%v: corners %v, want %v", w, tc.h, tc.unfolded, got, tc.corners)
+		}
+	}
+}
 
 type fakeMons struct {
 	areas   []rect
@@ -84,6 +111,9 @@ func TestUnfoldNearBottomGrowsUp(t *testing.T) {
 	s.SetUnfolded(false)
 	if ops.r != (rect{100, 1000, 580, 1128}) {
 		t.Fatalf("folded rect %+v, want {100 1000 580 1128}", ops.r)
+	}
+	if len(ops.regions) != 2 || !ops.regions[0] || ops.regions[1] {
+		t.Fatalf("regions = %v, want unfolded then folded", ops.regions)
 	}
 	want := []core.WindowPlacement{
 		{X: 100, Y: 612, Unfolded: true, Saved: true},

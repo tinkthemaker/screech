@@ -13,7 +13,7 @@ covers everything since 0.6.1.
 
 - **The LCARS window.** `screech-gui.exe` opens a small window in the style
   of a starship panel: a 480 × 128 strip with the station, the track, a
-  level meter, a volume slider and the NEXT, LOVE, PAUSE and MORE buttons.
+  level meter, a volume slider and PAUSE, NEXT, LOVE, MORE and EXIT buttons.
   MORE unfolds it into a console with your library (RECENT, LOVED, STATIONS,
   TASTE), SEARCH, INFO, the sleep timer and the nine presets. It sits behind
   other windows like any other, remembers where you left it and whether it
@@ -37,9 +37,11 @@ covers everything since 0.6.1.
 - **One Screech at a time.** Opening the window a second time brings the
   first to the front. The terminal refuses to start while the window is
   open, and the window says so if a terminal is already playing.
-- **No close button.** Press `q`, press Alt+F4, or close it from the
-  taskbar; any of them quits Screech and stops the radio, as `q` does in
-  the terminal. Drag the window by its top bar or the block at the left.
+- **A familiar player strip.** Playback controls start at the left, EXIT is
+  always visible at the right, and long station and track names scroll once
+  to show their full text. The outer window corners follow the LCARS frame.
+  EXIT, `q`, Alt+F4 and the taskbar's Close all stop the radio. Drag the
+  window by its top bar or the block at the left.
 - **Needs WebView2**, Microsoft's web view, which is built into Windows 10
   and 11. If it's missing, the window offers to install it.
 - `--reduced-motion`, `SCREECH_REDUCED_MOTION` and Windows' own animation

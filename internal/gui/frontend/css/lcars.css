@@ -77,16 +77,18 @@ body[data-state="offline"] #volValue { color: var(--a3); }
   cursor: pointer;
 }
 .s > span { display: block; }
-#btnNext { left: 124px; width: 128px; background: var(--peach); }
-#btnLove { left: 256px; width: 80px; background: var(--coral); }
-#btnPause { left: 340px; width: 80px; background: var(--lav); }
-#btnMore { left: 424px; width: 56px; background: var(--blue); border-radius: 0 14px 14px 0; padding-right: 14px; }
+#btnPause { left: 124px; width: 96px; background: var(--lav); }
+#btnNext { left: 224px; width: 88px; background: var(--peach); }
+#btnLove { left: 316px; width: 64px; background: var(--coral); }
+#btnMore { left: 384px; width: 48px; background: var(--blue); }
+#btnExit { left: 436px; width: 44px; background: var(--a2); border-radius: 0 14px 14px 0; padding-right: 8px; }
 
 #btnLove.loved { background: #FF8A8A; }
 body[data-state="paused"] #btnPause { background: #F0D0F0; }
 body[data-state="offline"] #btnNext { background: var(--a2); }
 body[data-state="offline"] #btnPause,
 body[data-state="offline"] #btnMore { background: var(--a3); }
+body[data-state="offline"] #btnExit { background: var(--a1); color: #fff; }
 body[data-state="offline"] #btnLove { background: var(--dead); color: var(--dead-fg); }
 body[data-state="stopped"] #btnNext,
 body[data-state="stopped"] #btnLove,
@@ -133,6 +135,20 @@ body.reduced .flash { filter: none; }
 .qin:focus { box-shadow: inset 0 0 0 2px var(--ice); }
 
 .ellipsis { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 100%; }
+.scroll-viewport { width: 100%; }
+.scroll-text { display: inline-block; white-space: nowrap; vertical-align: top; }
+.scroll-text.scrolling {
+  animation: text-scroll var(--scroll-duration) linear 2s 1 both;
+}
+@keyframes text-scroll {
+  0%, 8% { transform: translateX(0); }
+  72%, 88% { transform: translateX(calc(-1 * var(--scroll-distance))); }
+  100% { transform: translateX(0); }
+}
+body.reduced .scroll-text.scrolling { animation: none; }
+@media (prefers-reduced-motion: reduce) { .scroll-text.scrolling { animation: none; } }
+body.reduced .scroll-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+@media (prefers-reduced-motion: reduce) { .scroll-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; } }
 
 #statusBox {
   position: absolute; left: 136px; top: 74px; width: 176px; height: 14px;

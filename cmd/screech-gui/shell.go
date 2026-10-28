@@ -55,6 +55,7 @@ type hwndOps interface {
 	Rect() (rect, bool)
 	SetRect(x, y, w, h int)
 	Scale() float64
+	SetRegion(w, h int, scale float64, unfolded bool)
 }
 
 // foundWindow is what the handoff wakes: restore from the tray, then
@@ -149,6 +150,7 @@ func (s *shell) SetUnfolded(unfolded bool) {
 		s.shift = r.top - top
 		s.unfoldTop = top
 		ops.SetRect(r.left, top, w, newH)
+		ops.SetRegion(w, newH, scale, true)
 	} else {
 		newH := round(128 * scale)
 		// Fold back down by the shift only when the user hasn't dragged
@@ -159,6 +161,7 @@ func (s *shell) SetUnfolded(unfolded bool) {
 		s.shift = 0
 		s.unfoldTop = sentinelY
 		ops.SetRect(r.left, top, w, newH)
+		ops.SetRegion(w, newH, scale, false)
 	}
 	s.unfolded = unfolded
 	s.persist(r.left, top, unfolded)
@@ -236,6 +239,7 @@ func (s *shell) restore() {
 	s.shift = 0
 	s.unfoldTop = sentinelY
 	ops.SetRect(x, y, w, h)
+	ops.SetRegion(w, h, scale, s.unfolded)
 }
 
 func (s *shell) persist(x, y int, unfolded bool) {

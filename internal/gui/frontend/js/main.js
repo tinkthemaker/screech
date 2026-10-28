@@ -11,7 +11,7 @@ const els = {
   volTrack: $('volTrack'), volFill: $('volFill'), volThumb: $('volThumb'),
   volValue: $('volValue'),
   btnNext: $('btnNext'), btnLove: $('btnLove'), btnPause: $('btnPause'),
-  btnMore: $('btnMore'),
+  btnMore: $('btnMore'), btnExit: $('btnExit'),
 };
 
 const BARS = 12;
@@ -153,6 +153,27 @@ const trackText = (s) => {
   return { text: '', cls: '' };
 };
 
+// Move a long name once, after a short reading pause, then return to its
+// beginning. Recompute only when the text or viewport changes: snapshots
+// arrive frequently and must not restart the scroll.
+const refreshScroll = (el) => {
+  const inner = el.firstElementChild;
+  inner.classList.remove('scrolling');
+  if (bridge.fixtureMode) return;
+  const distance = Math.ceil(inner.getBoundingClientRect().width - el.clientWidth);
+  if (distance <= 0) return;
+  inner.style.setProperty('--scroll-distance', distance + 'px');
+  inner.style.setProperty('--scroll-duration', Math.max(6, distance / 24 + 3) + 's');
+  void inner.offsetWidth;
+  inner.classList.add('scrolling');
+};
+const setScrollingText = (el, value) => {
+  if (el.firstElementChild.textContent === value) return;
+  el.firstElementChild.textContent = value;
+  el.title = value;
+  refreshScroll(el);
+};
+
 function render() {
   const s = snap;
   if (!s) return;
@@ -173,14 +194,14 @@ function render() {
       els.stationRow.classList.add('fadein');
     }
     lastUuid = s.station.uuid;
-    els.station.textContent = s.station.name;
+    setScrollingText(els.station, s.station.name);
   } else {
     lastUuid = null;
-    els.station.textContent = 'SCREECH';
+    setScrollingText(els.station, 'SCREECH');
   }
   const tr = trackText(s);
-  els.track.textContent = tr.text;
-  els.track.className = 't trk ellipsis' + (tr.cls ? ' ' + tr.cls : '');
+  setScrollingText(els.track, tr.text);
+  els.track.className = 't trk ellipsis scroll-viewport' + (tr.cls ? ' ' + tr.cls : '');
 
   const st = statusParts(s);
   els.statusWord.textContent = st.word;
@@ -216,6 +237,7 @@ els.btnNext.addEventListener('click', () => { if (bucket(snap || {}) !== 'stoppe
 els.btnLove.addEventListener('click', () => { const b = bucket(snap || {}); if (b !== 'offline' && b !== 'stopped') bridge.Love(); });
 els.btnPause.addEventListener('click', () => { if (bucket(snap || {}) !== 'stopped') bridge.TogglePause(); });
 els.btnMore.addEventListener('click', () => bridge.SetUnfolded(!unfolded()));
+els.btnExit.addEventListener('click', () => bridge.Quit());
 
 // The whole 14-px track row is the click/drag target; there is no range
 // input and no wheel listener on the slider. SetVolume persists to SQLite,
@@ -277,7 +299,15 @@ bridge.onLevel((l) => { level = l || level; if (bridge.fixtureMode) drawMeter();
 
 // SetUnfolded resizes the window without necessarily changing the
 // snapshot; the console needs a repaint on that edge too.
-window.addEventListener('resize', () => { if (snap) render(); });
+window.addEventListener('resize', () => {
+  if (snap) render();
+  refreshScroll(els.station);
+  refreshScroll(els.track);
+});
+document.fonts.ready.then(() => {
+  refreshScroll(els.station);
+  refreshScroll(els.track);
+});
 
 if (!bridge.fixtureMode && !bridge.missing) {
   // Live text (elapsed clock, retry countdown) and meter animation.

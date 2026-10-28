@@ -157,6 +157,14 @@ meter animates between them. The single-instance lock covers both
 programs, so only one of them plays at a time. The window's own design
 record is `docs/superpowers/specs/2026-10-18-lcars-gui-design.md`.
 
+The strip keeps familiar player controls in reading order: PAUSE/RESUME,
+NEXT/RETRY NOW, LOVE, MORE/LESS, then a permanent EXIT at the far right.
+EXIT calls the same bridge quit path as `q`. Station and track text that
+exceeds its row makes one measured pass after a reading pause, then returns
+to the start; reduced motion leaves it still. The frameless HWND gets a
+DPI-scaled window region on restore and each fold change, following the
+LCARS face's 48-px left curves and smaller right caps.
+
 **The bridge contract** (`internal/gui`, which imports neither Wails nor
 `x/sys/windows`, so its tests run on every OS). `gui.Bridge` is the one
 object bound to the page, and every bound method is exactly one of two
