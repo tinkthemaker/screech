@@ -22,6 +22,11 @@ type Config struct {
 	AutoHopAds bool   `toml:"auto_hop_ads"`
 	SyncLimit  int    `toml:"sync_limit"`
 
+	// Stations are the listener's own streams, the [[stations]] tables.
+	// They're decoded on their own (parseStations) so one bad entry is a
+	// warning rather than a failed load.
+	Stations []Station `toml:"-"`
+
 	// Warnings carries what Read repaired or ignored while loading. Every
 	// entry is advisory — nothing here ever fails the load.
 	Warnings []string `toml:"-"`
@@ -68,6 +73,16 @@ auto_hop_ads = false
 # How many stations to cache from the directory (top slice by votes).
 # The directory refreshes in the background weekly.
 sync_limit = 20000
+
+# Your own stations: any http or https stream link, one [[stations]] table
+# each. "screech add <link>" writes one for you. name and url are required;
+# tags, codec, bitrate, country and homepage are optional. They join the
+# rotation the next time Screech starts and survive every directory refresh.
+#
+# [[stations]]
+# name = "My station"
+# url = "https://example.com/stream.mp3"
+# tags = "jazz, late night"
 `
 
 // Read finds an existing config and returns it along with the resolved
@@ -94,16 +109,30 @@ func configDir() string {
 
 func readFrom(dir string) (Config, string, string, error) {
 	path := filepath.Join(dir, "config.toml")
-	cfg := defaults()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, filepath.Join(dir, "screech.db"), dir, err
+		return defaults(), filepath.Join(dir, "screech.db"), dir, err
 	}
-	md, err := toml.Decode(string(data), &cfg)
+	cfg, err := decode(data)
 	if err != nil {
 		return cfg, filepath.Join(dir, "screech.db"), dir, err
 	}
+	dataDir := resolveDataDir(cfg.DataDir, dir)
+	return cfg, filepath.Join(dataDir, "screech.db"), dataDir, nil
+}
+
+// decode parses config.toml's contents over the defaults and repairs what
+// it can, noting each repair in Warnings. Only invalid TOML is an error.
+func decode(data []byte) (Config, error) {
+	cfg := defaults()
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return cfg, err
+	}
 	for _, k := range md.Undecoded() {
+		if k[0] == "stations" {
+			continue // parseStations names its own problems
+		}
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("unknown key %q (ignored)", k.String()))
 	}
 	if !accentRe.MatchString(cfg.Accent) {
@@ -120,8 +149,18 @@ func readFrom(dir string) (Config, string, string, error) {
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("sync_limit %d exceeds %d; clamped", cfg.SyncLimit, maxSyncLimit))
 		cfg.SyncLimit = maxSyncLimit
 	}
-	dataDir := resolveDataDir(cfg.DataDir, dir)
-	return cfg, filepath.Join(dataDir, "screech.db"), dataDir, nil
+	// A second pass for the stations alone: decoded into Config, a wrong
+	// type in any one table would fail the whole file and stop the radio.
+	var raw struct {
+		Stations any `toml:"stations"`
+	}
+	if _, err := toml.Decode(string(data), &raw); err != nil {
+		return cfg, err
+	}
+	var warns []string
+	cfg.Stations, warns = parseStations(raw.Stations)
+	cfg.Warnings = append(cfg.Warnings, warns...)
+	return cfg, nil
 }
 
 func loadFrom(dir string) (Config, string, error) {

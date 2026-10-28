@@ -61,6 +61,8 @@ From a checkout, `go run ./cmd/screech` runs it without installing.
 ```
 screech                   start the radio (default)
 screech doctor            read-only checkup of config, database, mpv, IPC, network
+screech add <link>        add your own station: any http or https stream link
+screech remove <link|id>  take one of your own stations back out
 screech --version         print the version
 screech --help            usage
 screech --reduced-motion  calm the animations (or set SCREECH_REDUCED_MOTION=1)
@@ -90,6 +92,43 @@ Something wrong? `screech doctor` checks each dependency in turn (config,
 database, mpv, the IPC handshake, the directory) and reports what it finds.
 Every run also writes a log next to the config file, and startup errors hold
 the window open instead of vanishing with the message.
+
+## Your own stations
+
+Got a stream the directory doesn't list? Add the link:
+
+```
+screech add https://example.com/stream.mp3 --name "Late Night Jazz" --tags "jazz, late night"
+```
+
+`--name` and `--tags` are optional; without a name the station is called
+after its host. Screech writes the link into `config.toml` as a
+`[[stations]]` table, and that file is the only place it lives. The database
+just caches it, so a fresh database, or a fresh install with your old config
+file, still has every link. You can write the table yourself, too:
+
+```toml
+[[stations]]
+name = "Late Night Jazz"
+url = "https://example.com/stream.mp3"
+tags = "jazz, late night"   # optional, like codec, bitrate, country, homepage
+```
+
+Your stations join the rotation the next time Screech starts; a copy that's
+already running carries on without them until then. They survive every
+directory refresh, and a few of them are in the running on every pick, so
+they come round now and then even without tags. Stay on one and the model
+keeps it coming back; skip it and it fades like any other station. When one
+is picked for being yours, the status line says `added by you`.
+`screech doctor` counts them and warns about any entry it had to skip: a
+missing name, a link that isn't http or https, a duplicate.
+
+`screech remove <link>` (or the `custom:` id that `add` printed) takes one
+back out. Its listening history stays, so adding the same link again picks
+up where it left off.
+
+A link has to be the stream itself: an Icecast or Shoutcast mount, an
+`.mp3`, `.aac` or `.m3u8` URL, or a `.pls`/`.m3u` playlist.
 
 ## Controls
 
@@ -279,9 +318,10 @@ can't swamp anything. Fast skips bump β. Streams that fail never touch the
 taste model — a dead stream isn't a bad station, it just gets a strike, and
 three strikes benches it. When you press next, a Thompson sample from each
 candidate picks the winner: uncertainty does the explore/exploit balancing
-and there are no knobs to tune. Candidates come from four places: your tag
+and there are no knobs to tune. Candidates come from five places: your tag
 affinities, stations that play artists you love, stations your own
-listening rates well, and a random slice for serendipity. A
+listening rates well, a few of the stations you added yourself, and a
+random slice for serendipity. A
 simulated-listener test (`go test -tags eval ./internal/core`) checks that
 the picks actually get better as it learns.
 
@@ -292,7 +332,7 @@ rarity-weighted overlap: sharing an obscure artist means far more than
 sharing a chart-topper. All counts decay with a roughly three-week
 half-life, so your taste can drift and the model follows. The status line
 always explains the pick: `plays 3 artists you love`, `tag: ambient`,
-`seeded: jungle`, `wildcard`.
+`seeded: jungle`, `added by you`, `wildcard`.
 
 Ad avoidance is mostly curation. Commercial simulcast networks get downranked
 before you ever hear them; college, community, and listener-supported streams
@@ -337,13 +377,15 @@ Internet radio drops constantly, and none of it should need you.
 `~/Library/Application Support/screech/config.toml` on macOS, and
 `~/.config/screech/config.toml` on Linux. First launch writes it with
 commented defaults covering the accent color, ASCII fallback, mpv path, data
-directory, ad hopping, and directory cache size (`sync_limit`, at most
-50,000). `data_dir` accepts `~` and paths relative to the config file.
+directory, ad hopping, directory cache size (`sync_limit`, at most
+50,000), and an example of [your own stations](#your-own-stations).
+`data_dir` accepts `~` and paths relative to the config file.
 
-A typo never stops the radio: unknown keys, a malformed accent, or an
-out-of-range `sync_limit` are repaired or ignored, and each one is listed
-in the log and by `screech doctor`. A config that isn't valid TOML is the
-one thing that does stop startup, with the line number.
+A typo never stops the radio: unknown keys, a malformed accent, an
+out-of-range `sync_limit`, or a `[[stations]]` entry that can't be played
+are repaired or ignored, and each one is listed in the log and by
+`screech doctor`. A config that isn't valid TOML is the one thing that does
+stop startup, with the line number.
 
 The theme picker and volume are remembered in the local SQLite file.
 Everything Screech learns lives there too.

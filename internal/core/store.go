@@ -725,11 +725,14 @@ func (s *Store) StationCount() (int, error) {
 
 // PruneStale deletes stations the directory no longer vouches for: fetched
 // before the given cutoff, absent from the fresh slice, and carrying no user
-// history. Seeds, presets, anything listened to, loved on, or scored by the
-// bandit, and the resume station all survive regardless.
+// history. Seeds, the listener's own (custom:) stations, presets, anything
+// listened to, loved on, or scored by the bandit, and the resume station
+// all survive regardless. The directory never lists a custom: station, so
+// without its exemption every sync would delete it.
 func (s *Store) PruneStale(before time.Time, keepUUID string) (int64, error) {
 	res, err := s.q.Exec(`DELETE FROM stations WHERE fetched_at < ?
 		AND uuid NOT LIKE 'seed:%'
+		AND uuid NOT LIKE 'custom:%'
 		AND uuid != ?
 		AND uuid NOT IN (SELECT DISTINCT station_uuid FROM bandit)
 		AND uuid NOT IN (SELECT DISTINCT station_uuid FROM listens)
@@ -740,6 +743,42 @@ func (s *Store) PruneStale(before time.Time, keepUUID string) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// DeleteCustomExcept drops the listener-added station rows whose uuid is
+// not in keep: links taken out of config.toml. Their preset slots go too,
+// since a slot for a station that isn't there recalls nothing. Listens,
+// loves, heard tracks and bandit counts stay under the uuid, so adding the
+// same link back picks its history up again.
+func (s *Store) DeleteCustomExcept(keep map[string]bool) (int64, error) {
+	rows, err := s.q.Query(`SELECT uuid FROM stations WHERE uuid LIKE 'custom:%'`)
+	if err != nil {
+		return 0, err
+	}
+	var gone []string
+	for rows.Next() {
+		var uuid string
+		if err := rows.Scan(&uuid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !keep[uuid] {
+			gone = append(gone, uuid)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, uuid := range gone {
+		if _, err := s.q.Exec(`DELETE FROM presets WHERE station_uuid=?`, uuid); err != nil {
+			return 0, err
+		}
+		if _, err := s.q.Exec(`DELETE FROM stations WHERE uuid=?`, uuid); err != nil {
+			return 0, err
+		}
+	}
+	return int64(len(gone)), nil
 }
 
 func (s *Store) BumpFailCount(uuid string, delta int) error {

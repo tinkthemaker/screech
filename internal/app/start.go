@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/tinkthemaker/screech/internal/config"
 	"github.com/tinkthemaker/screech/internal/core"
@@ -112,6 +113,14 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 		release()
 		return nil, failStage(log, StageDatabase, err)
 	}
+	// The listener's own stations come from config.toml on every launch:
+	// the file is their record, the database only a cache of it. A failure
+	// here costs those stations, never the radio.
+	if err := c.SetCustomStations(customStations(cfg.Stations), time.Now()); err != nil {
+		log.Linef("custom stations: %v", err)
+	} else if n := len(cfg.Stations); n > 0 {
+		log.Linef("custom stations from config: %d", n)
+	}
 	log.Linef("database open; %d stations cached", c.StationCount())
 
 	var notice string
@@ -136,6 +145,17 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 	}
 
 	return &Runtime{Config: cfg, DBPath: dbPath, Core: c, Player: pl, Notice: notice, Log: log, release: release}, nil
+}
+
+// customStations hands config's [[stations]] to core, which fills in the
+// uuid, resolved URL and ad risk itself.
+func customStations(in []config.Station) []core.Station {
+	out := make([]core.Station, 0, len(in))
+	for _, s := range in {
+		out = append(out, core.Station{Name: s.Name, URL: s.URL, Tags: s.Tags,
+			Codec: s.Codec, Bitrate: s.Bitrate, Country: s.Country, Homepage: s.Homepage})
+	}
+	return out
 }
 
 // failStage reports a startup failure that isn't "already running": the

@@ -11,6 +11,7 @@ const (
 	poolTagSlice     = 40
 	poolOverlapSlice = 20
 	poolHeardSlice   = 12
+	poolCustomSlice  = 4
 	poolRandomSlice  = 12
 	maxFailCount     = MaxFailCount
 )
@@ -48,8 +49,9 @@ func (c *Core) tagScore(st *Station, now time.Time) float64 {
 }
 
 // buildPool assembles tune candidates: top tag-affinity stations, loved-artist
-// overlap neighbors, and a pure-random serendipity slice. Never the current or
-// previous station; never stations that keep failing.
+// overlap neighbors, heard favourites, a few of the listener's own stations,
+// and a pure-random serendipity slice. Never the current or previous
+// station; never stations that keep failing.
 func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 	var eligible []*Station
 	for i := range c.stations {
@@ -119,6 +121,27 @@ func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 	}
 	sort.Slice(heard, func(i, j int) bool { return means[heard[i].st.UUID] > means[heard[j].st.UUID] })
 	take(heard, poolHeardSlice, func(cd candidate) bool { return means[cd.st.UUID] > 0.5 })
+
+	// The listener's own stations: links pasted into config.toml. Until
+	// they're heard they carry no directory tags and no fingerprint, so
+	// neither slice above can find them, and the random slice draws a
+	// dozen from twenty thousand. A few seats per pick let Thompson
+	// sampling try them now and then; the bandit keeps a liked one coming
+	// back and lets a dull one fade, as with any station. In the
+	// simulated-listener harness (genre+links), three liked links went
+	// from 0% of picks to 7% for a listener who never presses love, a
+	// dull fourth was gone by the late picks, and late E[like] held
+	// (0.604 -> 0.609). More links than seats rotate through at random.
+	var custom []candidate
+	for _, cd := range cands {
+		if IsCustom(cd.st.UUID) {
+			custom = append(custom, cd)
+		}
+	}
+	if len(custom) > poolCustomSlice {
+		rng.Shuffle(len(custom), func(i, j int) { custom[i], custom[j] = custom[j], custom[i] })
+	}
+	take(custom, poolCustomSlice, func(candidate) bool { return true })
 
 	// Serendipity slice: pure random, weighted nothing. The bandit's prior
 	// (which folds in ad-risk) still gets a say at sampling time.
@@ -279,6 +302,9 @@ func (c *Core) reason(cd candidate, daypart string, now time.Time) string {
 		return fmt.Sprintf("plays %d artists you love", cd.matches)
 	case c.isFavorite(cd, daypart, now):
 		return fmt.Sprintf("a %s favorite", daypart)
+	case IsCustom(cd.st.UUID):
+		// "wildcard" would be wrong: the listener chose this one.
+		return "added by you"
 	case cd.tagScore > 0.1:
 		if t := c.bestTag(cd.st); t != "" {
 			return "tag: " + t

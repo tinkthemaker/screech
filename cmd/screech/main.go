@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strings"
 
 	"github.com/tinkthemaker/screech/internal/app"
 	"github.com/tinkthemaker/screech/internal/session"
@@ -26,6 +27,11 @@ var usage = "screech " + version + " - terminal internet radio\n\n" +
 	"  screech export heard    write the heard-track history as CSV to stdout\n" +
 	"  screech export backup <path>\n" +
 	"                          write a consistent SQLite backup to <path>\n" +
+	"  screech add <link> [--name N] [--tags T]\n" +
+	"                          add your own station (any http/https stream) to\n" +
+	"                          config.toml; a running screech sees it on its next launch\n" +
+	"  screech remove <link|id>\n" +
+	"                          take one of your own stations back out of config.toml\n" +
 	"  screech --help          show this message\n" +
 	"  screech --version       show the version\n\n" +
 	"Flags:\n" +
@@ -42,6 +48,8 @@ const (
 	cmdRun command = iota
 	cmdDoctor
 	cmdExport
+	cmdAdd
+	cmdRemove
 	cmdHelp
 	cmdVersion
 )
@@ -52,14 +60,17 @@ type invocation struct {
 	cmd           command
 	exportKind    string // loved, heard or backup — only set for cmdExport
 	exportPath    string // the backup destination; empty for the CSV forms
+	link          string // cmdAdd's link, or cmdRemove's link or custom: id
+	name, tags    string // cmdAdd's --name and --tags
 	reducedMotion bool
 }
 
 // parseArgs maps argv onto an invocation. One command at most, and
 // --reduced-motion is accepted anywhere so `screech doctor --reduced-motion`
 // and `screech --reduced-motion` both parse rather than silently falling
-// into the TUI. export is the only command with operands: a kind, and for
-// backup exactly one path.
+// into the TUI. export, add and remove take operands: export a kind (and
+// for backup exactly one path), add a link and its optional --name and
+// --tags, remove one link or id.
 func parseArgs(args []string) (invocation, error) {
 	var inv invocation
 	var seen string
@@ -69,7 +80,7 @@ func parseArgs(args []string) (invocation, error) {
 			inv.reducedMotion = true
 			continue
 		}
-		if seen == "export" {
+		if seen == "export" || seen == "add" || seen == "remove" {
 			operands = append(operands, a)
 			continue
 		}
@@ -79,6 +90,10 @@ func parseArgs(args []string) (invocation, error) {
 			cmd = cmdDoctor
 		case "export":
 			cmd = cmdExport
+		case "add":
+			cmd = cmdAdd
+		case "remove":
+			cmd = cmdRemove
 		case "help", "-h", "--help":
 			cmd = cmdHelp
 		case "version", "-v", "--version":
@@ -111,7 +126,52 @@ func parseArgs(args []string) (invocation, error) {
 			return inv, fmt.Errorf("unknown export kind %q", operands[0])
 		}
 	}
+	switch inv.cmd {
+	case cmdAdd:
+		if err := parseAdd(&inv, operands); err != nil {
+			return inv, err
+		}
+	case cmdRemove:
+		if len(operands) != 1 {
+			return inv, fmt.Errorf("remove takes one station: its link, or the custom: id screech add printed")
+		}
+		inv.link = operands[0]
+	}
 	return inv, nil
+}
+
+// parseAdd reads `add <link> [--name N] [--tags T]`, with either flag also
+// accepted as --name=N.
+func parseAdd(inv *invocation, operands []string) error {
+	for i := 0; i < len(operands); i++ {
+		a := operands[i]
+		switch {
+		case a == "--name" || a == "--tags":
+			if i+1 == len(operands) {
+				return fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			if a == "--name" {
+				inv.name = operands[i]
+			} else {
+				inv.tags = operands[i]
+			}
+		case strings.HasPrefix(a, "--name="):
+			inv.name = strings.TrimPrefix(a, "--name=")
+		case strings.HasPrefix(a, "--tags="):
+			inv.tags = strings.TrimPrefix(a, "--tags=")
+		case strings.HasPrefix(a, "-"):
+			return fmt.Errorf("add: unknown flag %q", a)
+		case inv.link == "":
+			inv.link = a
+		default:
+			return fmt.Errorf("add takes one link; got %q after %q (quote a name with spaces)", a, inv.link)
+		}
+	}
+	if inv.link == "" {
+		return fmt.Errorf("add needs a link: screech add <link> [--name N] [--tags T]")
+	}
+	return nil
 }
 
 func main() {
@@ -130,6 +190,10 @@ func main() {
 		os.Exit(runDoctor())
 	case cmdExport:
 		os.Exit(runExport(inv.exportKind, inv.exportPath))
+	case cmdAdd:
+		os.Exit(runAdd(inv.link, inv.name, inv.tags))
+	case cmdRemove:
+		os.Exit(runRemove(inv.link))
 	default:
 		os.Exit(run())
 	}

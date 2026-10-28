@@ -74,6 +74,14 @@ covers everything since 0.6.1.
 - **Taste view**, the fourth library tab (`H`, then `tab`): listening time,
   time of day, the artists you actually hear, the tags the model leans on,
   your stations of the month, and your loved-track count.
+- **Your own stations.** `screech add <link>` adds any http or https stream
+  to `config.toml`, with `--name` and `--tags` if you like, and
+  `screech remove` takes it back out; you can also write a `[[stations]]`
+  table by hand. They join the rotation the next time Screech starts,
+  survive every directory refresh, come round now and then even without
+  tags, and say `added by you` when picked for being yours.
+  `screech doctor` counts them. The config file is all you need to keep: a
+  fresh database rebuilds them from it.
 - **Export**: `screech export loved` and `screech export heard` write CSV to
   stdout; `screech export backup <path>` writes a consistent copy of the
   database. All three work while the radio is playing.

@@ -278,13 +278,35 @@ signal only.
 (staleness = last_sync older than 7 days, or cache under half the limit after
 the knob grows). On each sync: stations absent from the fresh slice with no user
 history (no listens, no bandit counts, no loves, not preset, not the resume
-station, not a seed) are pruned; re-vouched stations heal one local `fail_count`
+station, not a seed, not one of the listener's own) are pruned; re-vouched stations heal one local `fail_count`
 strike, so temporary outages rehabilitate. Locally, three consecutive play
 failures still bench a station immediately — `lastcheckok` alone was never
 enough.
 
 A small embedded seed list (SomaFM, Radio Paradise, WFMU, KEXP, NTS, WWOZ…) covers
 first-run when the API is unreachable and gives cold start a decent floor.
+
+**The listener's own stations (`custom:`).** Any http/https stream link is a
+station: a `[[stations]]` table in config.toml, written by hand or by
+`screech add <link> [--name N] [--tags T]`. The config file is their record
+and the database only a cache of it, so the database stays disposable. Each
+launch (`internal/app`, so both faces) hands the list to
+`Core.SetCustomStations`, which upserts every entry under `custom:` plus the
+first 16 hex digits of the SHA-256 of its link (scheme and host case-folded),
+then deletes the custom rows whose link has left the config, with their
+preset slots. Hashing the link means reordering or renaming entries never
+re-identifies a station, and listens, loves, heard tracks and bandit counts
+stay under the uuid, so adding a removed link back finds its history. The
+link is played as given (there is no directory to resolve it) and gets the
+same ad-risk curation as directory stations; a launch heals one strike, as
+it does for seeds. The directory sync can't touch these rows: its uuids
+never collide with `custom:` ones, `PruneStale` spares `custom:%` beside
+`seed:%`, and the click report skips both namespaces. `NeedsSync` counts
+directory rows only (seeds included), so links in a fresh config never pass
+for a synced cache. `screech add`/`remove` edit config.toml as text, so
+comments, order and spacing survive; each edit is re-read and checked before
+it replaces the file, and neither command opens the database. A running
+instance picks the change up on its next launch.
 
 ## The algorithm
 
@@ -346,6 +368,13 @@ Thin data backs off to all-time automatically.
   sampler draws from) is above 0.5. Without them a station could only come
   back through its tags, a loved artist, or the random slice, which lost
   tagless favourites for listeners who rarely press love
+- the listener's own stations: up to 4 `custom:` stations per pick, drawn at
+  random when there are more. Unheard and often untagged, they can't win tag
+  affinity or overlap, and the random slice draws a dozen from twenty
+  thousand. In the harness's genre+links scenario, three liked links went
+  from 0% of picks to 7% for a listener who never loves (8% with loves), a
+  dull fourth was gone from the late picks, and late E[like] held
+  (0.604 → 0.609; 0.595 → 0.630 with loves)
 - a small pure-random slice (serendipity)
 - never the current or previous station; never stations with fail_count ≥ 3
 
@@ -353,15 +382,18 @@ The pool is handed to the sampler in a fixed order, so a seeded rng is
 reproducible. `go test -tags eval -run TestEval -v ./internal/core` runs the
 simulated-listener harness: synthetic catalogs, a listener with hidden taste
 who stays or skips, and E[like] of the picks over time against a random
-pick. Its scenarios cover genre taste, station-specific taste, and genre
-plus per-station quality, each with and without loves. Change the picker
-or the rewards, then check this table.
+pick. Its scenarios cover genre taste, station-specific taste, genre plus
+per-station quality, and genre taste plus four pasted links (three liked,
+one dull), each with and without loves. Change the picker or the rewards,
+then check this table.
 
 Never-heard stations get priors seeded from tag affinity × loved-artist overlap ×
 ad-risk penalty.
 
 **Explainability:** every pick carries a reason string, shown dim under the band
-line: "plays 3 artists you love" / "tag: ambient" / "wildcard".
+line: "plays 3 artists you love" / "tag: ambient" / "added by you" /
+"wildcard". A listener-added station that wins without artist or favourite
+evidence says "added by you", never "wildcard".
 
 ## Ad minimization
 
@@ -727,11 +759,24 @@ and `NOW PLAYING` as the artist.
 
 One TOML at `os.UserConfigDir()/screech/config.toml`, created with commented
 defaults on first run: `accent`, `ascii`, `mpv_path`, `data_dir`, `auto_hop_ads`,
-`sync_limit`. `data_dir` expands `~` and resolves relative paths against the
-config directory (a double-click launch has a different CWD than a shell).
+`sync_limit`, and a commented example of `[[stations]]`. `data_dir` expands
+`~` and resolves relative paths against the config directory (a
+double-click launch has a different CWD than a shell).
 Bad values never stop the radio: unknown keys, a malformed accent, and an
 out-of-range `sync_limit` (1–50,000) are repaired with a warning in the log
 and in `screech doctor`; only invalid TOML is fatal.
+
+`[[stations]]` tables (see Station data) take `name` and `url` (required)
+and `tags` (a string or a list), `codec`, `bitrate`, `country`, `homepage`.
+They are decoded in a second pass of their own, field by field, because
+decoding them into the config struct would turn one wrong type into a fatal
+load. Every text field goes through `core.CleanText`; tags are lowercased
+and comma-joined; the url must pass the player's own rule (http or https,
+with a host). A table missing its name or url, with a link that fails the
+rule, or repeating an earlier table's link (by `custom:` id) is skipped, and
+an unknown key or a wrongly typed field is dropped, each with a warning that
+names the table. `screech doctor` reports how many stations the config
+carries.
 
 ## Stack
 

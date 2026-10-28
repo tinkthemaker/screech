@@ -48,6 +48,7 @@ type evalWorld struct {
 	catalog  []Station
 	liked    map[int]bool    // genres the listener likes
 	gems     map[string]bool // stations the listener likes regardless of genre
+	custom   map[string]bool // listener-added stations -> whether they like it
 	songSeq  int
 	genreTag []string
 }
@@ -55,10 +56,12 @@ type evalWorld struct {
 // newEvalWorld builds the catalog. Genre popularity is Zipf-like, a fifth of
 // stations carry no tags at all, tagged ones usually list their real genre
 // plus some noise, and a few are mislabelled outright — roughly the shape
-// of the real directory.
-func newEvalWorld(seed int64) *evalWorld {
+// of the real directory. custom adds that many listener-added stations
+// after everything else is drawn, so the other scenarios' worlds are
+// unchanged by it.
+func newEvalWorld(seed int64, custom int) *evalWorld {
 	rng := rand.New(rand.NewSource(seed))
-	w := &evalWorld{st: map[string]*evalStation{}, liked: map[int]bool{}, gems: map[string]bool{}}
+	w := &evalWorld{st: map[string]*evalStation{}, liked: map[int]bool{}, gems: map[string]bool{}, custom: map[string]bool{}}
 	for g := 0; g < evalGenres; g++ {
 		w.genreTag = append(w.genreTag, fmt.Sprintf("genre%02d", g))
 	}
@@ -123,6 +126,24 @@ func newEvalWorld(seed int64) *evalWorld {
 	for _, i := range rng.Perm(evalStations)[:evalStations/20] {
 		w.gems[fmt.Sprintf("eval-%04d", i)] = true
 	}
+	// Links the listener pasted in: untagged, so tag affinity and the
+	// directory's metadata know nothing about them. All but the last are
+	// stations the listener likes; one is a link that turned out dull.
+	for i := 0; i < custom; i++ {
+		uuid := fmt.Sprintf("custom:eval-%d", i)
+		primary := rng.Intn(evalGenres)
+		es := &evalStation{primary: primary, quality: rng.Float64()}
+		for _, j := range rng.Perm(evalArtistsPerGenre)[:12] {
+			es.artists = append(es.artists, artist(primary, j))
+		}
+		w.st[uuid] = es
+		w.custom[uuid] = i < custom-1
+		w.catalog = append(w.catalog, Station{
+			UUID: uuid, Name: fmt.Sprintf("My Link %d", i),
+			URL: "http://eval.test/" + uuid, URLResolved: "http://eval.test/" + uuid,
+			Codec: "MP3", Bitrate: 128, LastCheckOK: true,
+		})
+	}
 	return w
 }
 
@@ -140,25 +161,29 @@ func (w *evalWorld) title(uuid string, rng *rand.Rand) string {
 
 type evalScenario struct {
 	name string
+	// custom is how many listener-added stations the world carries.
+	custom int
 	// like is the probability the listener stays on a station. It judges
 	// the music, never the tags.
 	like func(w *evalWorld, uuid string) float64
 }
 
+func likeGenre(w *evalWorld, uuid string) float64 {
+	if es := w.st[uuid]; es != nil && w.liked[es.primary] {
+		return 0.8
+	}
+	return 0.04
+}
+
 var evalScenarios = []evalScenario{
-	{"genre", func(w *evalWorld, uuid string) float64 {
-		if es := w.st[uuid]; es != nil && w.liked[es.primary] {
-			return 0.8
-		}
-		return 0.04
-	}},
-	{"station", func(w *evalWorld, uuid string) float64 {
+	{"genre", 0, likeGenre},
+	{"station", 0, func(w *evalWorld, uuid string) float64 {
 		if w.gems[uuid] {
 			return 0.85
 		}
 		return 0.04
 	}},
-	{"genre+quality", func(w *evalWorld, uuid string) float64 {
+	{"genre+quality", 0, func(w *evalWorld, uuid string) float64 {
 		es := w.st[uuid]
 		switch {
 		case es == nil || !w.liked[es.primary]:
@@ -168,6 +193,18 @@ var evalScenarios = []evalScenario{
 		default:
 			return 0.2
 		}
+	}},
+	// Genre taste plus four pasted links, three of them liked: whether a
+	// link the listener added ever comes round, and whether a dull one
+	// fades instead of being forced on them.
+	{"genre+links", 4, func(w *evalWorld, uuid string) float64 {
+		if liked, ok := w.custom[uuid]; ok {
+			if liked {
+				return 0.85
+			}
+			return 0.04
+		}
+		return likeGenre(w, uuid)
 	}},
 }
 
@@ -185,6 +222,7 @@ type evalPick struct {
 	repeat bool // the listener had already stayed on this station before
 	reason string
 	uuid   string
+	link   string // "liked" or "dull" for a listener-added station
 }
 
 func reasonClass(r string) string {
@@ -197,6 +235,8 @@ func reasonClass(r string) string {
 		return "tag"
 	case r == "wildcard":
 		return "wildcard"
+	case r == "added by you":
+		return "link"
 	}
 	return "other"
 }
@@ -206,7 +246,7 @@ func runEval(t *testing.T, sc evalScenario, seed int64, loveP float64) ([]evalPi
 	t.Helper()
 	c := openTestCore(t)
 	c.rng = rand.New(rand.NewSource(seed))
-	w := newEvalWorld(seed)
+	w := newEvalWorld(seed, sc.custom)
 	start := time.Date(2026, 1, 5, 8, 0, 0, 0, time.Local)
 	if err := c.store.UpsertStations(w.catalog, start); err != nil {
 		t.Fatal(err)
@@ -231,7 +271,14 @@ func runEval(t *testing.T, sc evalScenario, seed int64, loveP float64) ([]evalPi
 		c.StartListen(uuid, now)
 		like := sc.like(w, uuid)
 		stayed := rng.Float64() < like
-		out = append(out, evalPick{like: like, stayed: stayed, repeat: stayedOn[uuid], reason: reasonClass(p.Reason), uuid: uuid})
+		link := ""
+		if liked, ok := w.custom[uuid]; ok {
+			link = "dull"
+			if liked {
+				link = "liked"
+			}
+		}
+		out = append(out, evalPick{like: like, stayed: stayed, repeat: stayedOn[uuid], reason: reasonClass(p.Reason), uuid: uuid, link: link})
 		if !stayed {
 			c.NoteTitle(w.title(uuid, rng), now.Add(5*time.Second))
 			now = now.Add(time.Duration(10+rng.Intn(50)) * time.Second)
@@ -285,11 +332,19 @@ func TestEval(t *testing.T) {
 					reasons[i] = map[string]int{}
 				}
 				base := 0.0
+				links := map[string]float64{}     // link kind -> picks, whole run
+				lateLinks := map[string]float64{} // the same, last window only
 				for s := evalSeedBase(); s < evalSeedBase()+evalSeeds; s++ {
 					picks, b := runEval(t, sc, s, loveP)
 					base += b / evalSeeds
 					seen := map[int]map[string]bool{}
 					for i, p := range picks {
+						if p.link != "" {
+							links[p.link]++
+							if i/evalWindow == windows-1 {
+								lateLinks[p.link]++
+							}
+						}
 						if seen[i/evalWindow] == nil {
 							seen[i/evalWindow] = map[string]bool{}
 						}
@@ -324,6 +379,11 @@ func TestEval(t *testing.T) {
 					}
 					fmt.Fprintf(&b, "  %3d-%-3d    %.3f   %4.1fx   %.2f    %.2f    %.2f      %s\n",
 						wi*evalWindow+1, (wi+1)*evalWindow, like[wi]/n, like[wi]/n/base, hits[wi]/n, repeats[wi]/n, distinct[wi]/n, strings.Join(rs, ", "))
+				}
+				if sc.custom > 0 {
+					all := float64(evalPicks * evalSeeds)
+					fmt.Fprintf(&b, "  links: liked %.1f%% of all picks (%.1f%% late), dull %.1f%% (%.1f%% late)\n",
+						100*links["liked"]/all, 100*lateLinks["liked"]/n, 100*links["dull"]/all, 100*lateLinks["dull"]/n)
 				}
 				t.Log(b.String())
 				if late := like[windows-1] / n; late < 2*base {

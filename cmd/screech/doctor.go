@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -49,21 +50,7 @@ func runDoctor() int {
 		cfgFile = filepath.Join(base, "screech", "config.toml")
 	}
 	cfg, dbPath, _, cfgErr := config.Read()
-	exitCode := 0
-	switch {
-	case cfgErr == nil:
-		fmt.Printf("[ ok ] config   %s\n", cfgFile)
-		for _, w := range cfg.Warnings {
-			fmt.Printf("        -> warning: %s\n", w)
-		}
-	case os.IsNotExist(cfgErr):
-		fmt.Printf("[ -- ] config   %s\n", cfgFile)
-		fmt.Printf("        -> not created yet; first launch writes it\n")
-	default:
-		fmt.Printf("[FAIL] config   %s\n", cfgFile)
-		fmt.Printf("        -> %v\n", cfgErr)
-		exitCode |= ecConfig
-	}
+	exitCode := reportConfig(os.Stdout, cfgFile, cfg, cfgErr)
 
 	store, dbErr := core.OpenStoreReadOnly(dbPath)
 	switch {
@@ -159,4 +146,34 @@ func runDoctor() int {
 		holdConsoleOnExit()
 	}
 	return exitCode
+}
+
+// reportConfig is doctor's config check: the file, how many of the
+// listener's own stations it carries, and every repair the loader made.
+// A [[stations]] entry it had to skip shows up here as a warning, so the
+// count and the warnings together say what the next launch will play.
+func reportConfig(w io.Writer, cfgFile string, cfg config.Config, cfgErr error) int {
+	switch {
+	case cfgErr == nil:
+		fmt.Fprintf(w, "[ ok ] config   %s\n", cfgFile)
+		switch n := len(cfg.Stations); n {
+		case 0:
+			fmt.Fprintf(w, "        -> no custom stations (screech add <link> adds one)\n")
+		case 1:
+			fmt.Fprintf(w, "        -> 1 custom station\n")
+		default:
+			fmt.Fprintf(w, "        -> %d custom stations\n", n)
+		}
+		for _, warn := range cfg.Warnings {
+			fmt.Fprintf(w, "        -> warning: %s\n", warn)
+		}
+	case os.IsNotExist(cfgErr):
+		fmt.Fprintf(w, "[ -- ] config   %s\n", cfgFile)
+		fmt.Fprintf(w, "        -> not created yet; first launch writes it\n")
+	default:
+		fmt.Fprintf(w, "[FAIL] config   %s\n", cfgFile)
+		fmt.Fprintf(w, "        -> %v\n", cfgErr)
+		return ecConfig
+	}
+	return 0
 }
