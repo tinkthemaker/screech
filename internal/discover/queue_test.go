@@ -1259,7 +1259,6 @@ func TestVideoID(t *testing.T) {
 		{"https://music.youtube.com/watch?v=abcdefghijk", "abcdefghijk", true},
 		{"https://www.youtube.com/shorts/abcdefghijk", "abcdefghijk", true},
 		{"https://m.youtube.com/watch?feature=share&v=abcdefghijk", "abcdefghijk", true},
-		{"https://www.youtube.com/embed/abcdefghijk", "abcdefghijk", true},
 		{"  https://youtu.be/abcdefghijk  ", "abcdefghijk", true},
 		{"youtu.be/abcdefghijk", "abcdefghijk", true},
 		{"https://www.youtube.com/watch?v=A-b_1234567", "A-b_1234567", true},
@@ -1267,6 +1266,10 @@ func TestVideoID(t *testing.T) {
 		{"https://example.com", "", false},
 		{"https://example.com/watch?v=abcdefghijk", "", false},
 		{"https://www.youtube.com/playlist?list=PL1", "", false},
+		// An embed page is not a link the rest of Screech reads as a video
+		// (config, `screech add` and the station's identity all go by
+		// streamurl.YouTubeID), so it is not a seed either: one parser, not two.
+		{"https://www.youtube.com/embed/abcdefghijk", "", false},
 		{"https://www.youtube.com/watch?v=tooshort", "", false},
 		{"https://www.youtube.com/watch?v=abcdefghijklmnop", "", false},
 		{"https://notyoutube.com/watch?v=abcdefghijk", "", false},

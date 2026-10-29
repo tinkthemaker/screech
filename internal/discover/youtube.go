@@ -2,13 +2,12 @@ package discover
 
 import (
 	"context"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/streamurl"
 )
 
 // YTHit is one row of a flat YouTube search or Mix: an id and a title, and
@@ -70,45 +69,16 @@ var ytVariants = []string{"underground", "demo", "new"}
 // adapter never has to decide which of youtube.com's spellings it was handed.
 func watchURL(id string) string { return "https://www.youtube.com/watch?v=" + id }
 
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
-
 // VideoID returns the video id inside a YouTube link, whether it is a watch
-// page, a youtu.be short link, a music.youtube.com page, a Short or an embed,
-// and ignoring everything else in the link (&list=…, ?t=…). Anything that is
-// not such a link, including a bare phrase, reports false.
-func VideoID(link string) (string, bool) {
-	s := strings.TrimSpace(link)
-	if s == "" || strings.ContainsAny(s, " \t\r\n") {
-		return "", false
-	}
-	if !strings.Contains(s, "://") {
-		s = "https://" + s
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return "", false
-	}
-	host := strings.ToLower(u.Hostname())
-	var id string
-	switch {
-	case host == "youtu.be":
-		id, _, _ = strings.Cut(strings.Trim(u.Path, "/"), "/")
-	case host == "youtube.com" || strings.HasSuffix(host, ".youtube.com"):
-		seg := strings.Split(strings.Trim(u.Path, "/"), "/")
-		switch seg[0] {
-		case "watch":
-			id = u.Query().Get("v")
-		case "shorts", "embed", "live", "v":
-			if len(seg) > 1 {
-				id = seg[1]
-			}
-		}
-	}
-	if !idPattern.MatchString(id) {
-		return "", false
-	}
-	return id, true
-}
+// page, a youtu.be short link, a music.youtube.com page or a Short, and
+// ignoring everything else in the link (&list=…, ?t=…). Anything that is not
+// such a link, including a bare phrase, reports false.
+//
+// It is streamurl.YouTubeID and nothing else: config, `screech add` and the
+// station's identity (core.DiscoveryKey) all decide "is this a video link"
+// by that one parser, and a second reading here would let a link make a
+// station the rest of Screech took for a phrase.
+func VideoID(link string) (string, bool) { return streamurl.YouTubeID(link) }
 
 type ytEntry struct {
 	hits []YTHit

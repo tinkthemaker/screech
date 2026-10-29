@@ -123,7 +123,7 @@ func TestAddPageLinkHints(t *testing.T) {
 		on   bool
 		want string
 	}{
-		{false, "plays only once ytdlp_path"},
+		{false, "plays only with yt-dlp, which wasn't found"},
 		{true, "asks yt-dlp"},
 	} {
 		var out, errOut bytes.Buffer
@@ -138,16 +138,5 @@ func TestAddPageLinkHints(t *testing.T) {
 	addStation(&out, &errOut, add, "https://ice1.somafm.com/x", "", "", false)
 	if strings.Contains(out.String(), "page link") {
 		t.Errorf("a stream link needs no page hint:\n%s", out.String())
-	}
-}
-
-func TestDoctorYtdlp(t *testing.T) {
-	var out bytes.Buffer
-	if code := reportYtdlp(&out, ""); code != 0 || !strings.Contains(out.String(), "[ -- ] yt-dlp   off") {
-		t.Fatalf("off: exit %d\n%s", code, out.String())
-	}
-	out.Reset()
-	if code := reportYtdlp(&out, "no-such-yt-dlp-anywhere"); code != ecYtdlp || !strings.Contains(out.String(), "[FAIL] yt-dlp") {
-		t.Fatalf("missing: exit %d\n%s", code, out.String())
 	}
 }

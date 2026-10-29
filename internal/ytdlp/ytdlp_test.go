@@ -76,7 +76,20 @@ func runFakeYTDLP(mode string, args []string) int {
 			hold = ms
 		}
 		logLine("START " + page)
-		time.Sleep(time.Duration(hold) * time.Millisecond)
+		if release := os.Getenv("SCREECH_FAKE_YTDLP_RELEASE"); release != "" {
+			// A test that needs the holder to stay put until it says so
+			// names a file: the process waits for it to appear (capped, so a
+			// broken test cannot leave this running), instead of guessing
+			// a sleep long enough for a slow machine.
+			for i := 0; i < 1000; i++ {
+				if _, err := os.Stat(release); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		} else {
+			time.Sleep(time.Duration(hold) * time.Millisecond)
+		}
 		logLine("END " + page)
 		fmt.Println(`{"entries":[]}`)
 	case "fail":
@@ -85,6 +98,10 @@ func runFakeYTDLP(mode string, args []string) int {
 		return 1
 	case "hang":
 		time.Sleep(30 * time.Second)
+	case "offline":
+		fmt.Fprintln(os.Stderr, "WARNING: retrying")
+		fmt.Fprintln(os.Stderr, "ERROR: [youtube:search] x: Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed>")
+		return 1
 	case "nourl":
 		fmt.Println("screech-title:no stream here")
 	case "version":
@@ -445,7 +462,10 @@ func waitWaiters(t *testing.T, l *prioLock, n int) {
 
 func TestForegroundJumpsQueue(t *testing.T) {
 	r, logPath := fake(t, "sleep")
-	t.Setenv("SCREECH_FAKE_YTDLP_HOLD_MS", "500")
+	// The holder keeps its turn until this file exists, so the test queues
+	// the other two behind it however slow the machine is.
+	releaseFile := filepath.Join(t.TempDir(), "release")
+	t.Setenv("SCREECH_FAKE_YTDLP_RELEASE", releaseFile)
 	var wg sync.WaitGroup
 	call := func(ctx context.Context, q string) {
 		wg.Add(1)
@@ -470,6 +490,9 @@ func TestForegroundJumpsQueue(t *testing.T) {
 	waitWaiters(t, &lock, 1)
 	call(Foreground(context.Background()), "foreground")
 	waitWaiters(t, &lock, 2)
+	if err := os.WriteFile(releaseFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	wg.Wait()
 
 	var order []string

@@ -25,6 +25,11 @@ func isForeground(ctx context.Context) bool {
 	return fg
 }
 
+// IsForeground reports whether ctx was marked by Foreground, for a caller
+// that hands its context on and wants to know (or show in a test) which line
+// the lookup will stand in.
+func IsForeground(ctx context.Context) bool { return isForeground(ctx) }
+
 // prioLock is a mutex with two lines of waiters. When the holder lets go the
 // turn goes to the head of the foreground line, else the head of the
 // background line: first come, first served inside each.

@@ -5,10 +5,12 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/tinkthemaker/screech/internal/config"
 	"github.com/tinkthemaker/screech/internal/streamurl"
+	"github.com/tinkthemaker/screech/internal/ytdlp"
 )
 
 // runAdd writes link (or, with --discover, a discovery phrase) into
@@ -21,8 +23,15 @@ func runAdd(link, discover, name, tags string) int {
 	if discover != "" {
 		return addDiscovery(os.Stdout, os.Stderr, config.AddStation, discover, name, tags)
 	}
-	cfg, _, _, _ := config.Read()
-	return addStation(os.Stdout, os.Stderr, config.AddStation, link, name, tags, cfg.YtdlpPath != "")
+	// pagesOn is "would a page link resolve": ytdlp_path "" finds yt-dlp and
+	// "off" doesn't, so the setting alone no longer says.
+	cfg, _, dataDir, _ := config.Read()
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	_, pagesOn := ytdlp.Find(cfg.YtdlpPath, exeDir, dataDir)
+	return addStation(os.Stdout, os.Stderr, config.AddStation, link, name, tags, pagesOn)
 }
 
 func runRemove(key string) int {
@@ -31,13 +40,13 @@ func runRemove(key string) int {
 
 // addDiscovery adds a discovery station: songs found from seed, a phrase
 // or a YouTube link, instead of one stream. Without --name it is named for
-// the phrase itself, or for the link's host.
+// the phrase or the link itself. A link is a poor name, and that is the
+// point: core.RenameDiscovery swaps a name that is still the link for the
+// title of the first song it plays, and leaves any name the listener chose.
+// The host ("youtu.be") would say nothing and never be replaced.
 func addDiscovery(stdout, stderr io.Writer, add func(config.Station) (string, config.Station, error), seed, name, tags string) int {
 	if strings.TrimSpace(name) == "" {
-		name = seed
-		if _, isLink := streamurl.YouTubeID(seed); isLink {
-			name = nameFromLink(strings.TrimSpace(seed))
-		}
+		name = strings.TrimSpace(seed)
 	}
 	path, st, err := add(config.Station{Name: name, Discover: seed, Tags: tags})
 	if err != nil {
@@ -54,8 +63,8 @@ func addDiscovery(stdout, stderr io.Writer, add func(config.Station) (string, co
 	return 0
 }
 
-// addStation does the work behind runAdd. pagesOn says whether ytdlp_path
-// is set, which decides what a page link needs to hear about. A YouTube
+// addStation does the work behind runAdd. pagesOn says whether yt-dlp is
+// there to resolve a page link, which decides what one needs to hear about. A YouTube
 // video link is not a stream mpv can open: it seeds a discovery station.
 func addStation(stdout, stderr io.Writer, add func(config.Station) (string, config.Station, error), link, name, tags string, pagesOn bool) int {
 	if _, isVideo := streamurl.YouTubeID(link); isVideo {
@@ -78,9 +87,9 @@ func addStation(stdout, stderr io.Writer, add func(config.Station) (string, conf
 	fmt.Fprintln(stdout, "It joins the rotation the next time Screech starts; one that's already running keeps playing without it until then.")
 	if streamurl.IsPage(st.URL) {
 		if pagesOn {
-			fmt.Fprintln(stdout, "It's a page link, so each tune asks yt-dlp (ytdlp_path) for the stream first.")
+			fmt.Fprintln(stdout, "It's a page link, so each tune asks yt-dlp for the stream first.")
 		} else {
-			fmt.Fprintln(stdout, "It's a page link, not a stream: it plays only once ytdlp_path in config.toml points at yt-dlp.")
+			fmt.Fprintln(stdout, "It's a page link, not a stream: it plays only with yt-dlp, which wasn't found (put it on PATH, beside screech or in the data folder, or set ytdlp_path; \"off\" turns it off).")
 		}
 	}
 	return 0
