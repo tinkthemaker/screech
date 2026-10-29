@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,6 +32,22 @@ type Runner struct {
 	// lands somewhere Screech owns and not wherever the listener happened
 	// to launch from.
 	Dir string
+
+	// Protect and Adopt are how the app lends yt-dlp the player's
+	// child-process protection without this package importing the player
+	// (the player imports this one). Both are optional.
+	//
+	// Protect runs on the command before it starts, for what has to be set
+	// up front (a parent-death signal, a hidden console).
+	Protect func(cmd *exec.Cmd)
+	// Adopt runs the moment the process has started and returns the release
+	// to run when the run is over, or the context ends first: it is called
+	// exactly once, before the app-wide turn is handed on. It exists
+	// because a standalone yt-dlp is a launcher with a child: killing the
+	// launcher when the context ends leaves the child running, still
+	// holding the turn's worth of YouTube's patience. Adopt puts both in
+	// one group (a Windows job object) and the release closes it.
+	Adopt func(cmd *exec.Cmd) (release func())
 }
 
 // Hit is one entry of a flat search or mix: a video id and its title, which
@@ -200,6 +217,13 @@ func (r Runner) run(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("yt-dlp gave up waiting its turn: %w", err)
 	}
 	defer lock.release()
+	// The grant and the context's end can land together, and acquire then
+	// returns with the turn and a dead context. A process started for a
+	// caller that has already given up is pure waste, and it would hold up
+	// the lookups queued behind it.
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("yt-dlp gave up waiting its turn: %w", err)
+	}
 
 	cmd := exec.CommandContext(ctx, r.Path, argv...)
 	cmd.Dir = r.Dir
@@ -210,10 +234,28 @@ func (r Runner) run(ctx context.Context, args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	noWindow(cmd)
+	if r.Protect != nil {
+		r.Protect(cmd)
+	}
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("starting yt-dlp (%s): %w", r.Path, err)
 	}
+	var once sync.Once
+	closeGroup := func() {}
+	if r.Adopt != nil {
+		if release := r.Adopt(cmd); release != nil {
+			closeGroup = func() { once.Do(release) }
+		}
+	}
+	// Close the group the moment the context ends, not after Wait: with the
+	// launcher dead and its child alive, Wait sits out the pipe delay, and
+	// the turn must not pass to the next lookup while the child still runs.
+	// The close after Wait covers a normal exit and is a no-op if this one
+	// already ran; the turn is released after both, by the defer above.
+	stop := context.AfterFunc(ctx, closeGroup)
 	err := cmd.Wait()
+	stop()
+	closeGroup()
 	if err != nil && ctx.Err() != nil {
 		return "", fmt.Errorf("yt-dlp gave up: %w", ctx.Err())
 	}

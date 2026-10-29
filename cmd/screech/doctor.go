@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,8 +14,10 @@ import (
 
 	"github.com/tinkthemaker/screech/internal/config"
 	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/discover"
 	"github.com/tinkthemaker/screech/internal/player"
 	versionpkg "github.com/tinkthemaker/screech/internal/version"
+	"github.com/tinkthemaker/screech/internal/ytdlp"
 )
 
 const (
@@ -23,7 +26,8 @@ const (
 	ecMpv                  // mpv not on PATH
 	ecIpc                  // mpv found but IPC handshake failed
 	ecNetwork              // radio-browser unreachable
-	ecYtdlp                // ytdlp_path set but yt-dlp won't run
+	ecYtdlp                // a yt-dlp was found or named but won't run
+	ecBandcamp             // Bandcamp's discover feed didn't answer with tracks
 )
 
 // runDoctor checks every joint screech depends on and reports what it finds.
@@ -50,7 +54,7 @@ func runDoctor() int {
 	if base, err := os.UserConfigDir(); err == nil {
 		cfgFile = filepath.Join(base, "screech", "config.toml")
 	}
-	cfg, dbPath, _, cfgErr := config.Read()
+	cfg, dbPath, dataDir, cfgErr := config.Read()
 	exitCode := reportConfig(os.Stdout, cfgFile, cfg, cfgErr)
 
 	store, dbErr := core.OpenStoreReadOnly(dbPath)
@@ -125,7 +129,15 @@ func runDoctor() int {
 		}
 	}
 
-	exitCode |= reportYtdlp(os.Stdout, cfg.YtdlpPath)
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	exitCode |= reportYtdlp(os.Stdout, cfg.YtdlpPath, exeDir, dataDir, time.Now())
+	exitCode |= reportBandcamp(os.Stdout, discover.BandcampClient{
+		HTTP:      &http.Client{Timeout: 8 * time.Second},
+		UserAgent: versionpkg.UserAgent(),
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -151,26 +163,86 @@ func runDoctor() int {
 	return exitCode
 }
 
-// reportYtdlp checks the optional page-link resolver. Off is not a
-// failure: only page links (YouTube, SoundCloud…) need it.
-func reportYtdlp(w io.Writer, path string) int {
-	if path == "" {
-		fmt.Fprintf(w, "[ -- ] yt-dlp   off (ytdlp_path is empty; page links won't play)\n")
+// staleAfter is how old a yt-dlp release may be before doctor suggests
+// updating it. YouTube changes under yt-dlp every few weeks, and an old
+// release is the usual reason it stops finding songs.
+const staleAfter = 60 * 24 * time.Hour
+
+// reportYtdlp checks the optional yt-dlp, which finds YouTube songs for
+// discovery stations and resolves page links. Off, and none found, are not
+// failures: discovery still plays from Bandcamp. A yt-dlp that is found or
+// named but won't run is. configured is the ytdlp_path setting; it is looked
+// for the way startup looks.
+func reportYtdlp(w io.Writer, configured, exeDir, dataDir string, now time.Time) int {
+	path, found := ytdlp.Find(configured, exeDir, dataDir)
+	switch {
+	case !found && strings.EqualFold(strings.TrimSpace(configured), "off"):
+		fmt.Fprintf(w, "[ -- ] yt-dlp   off (ytdlp_path = \"off\")\n")
+		fmt.Fprintf(w, "        -> discovery stations play from Bandcamp alone; page links won't play\n")
+		return 0
+	case !found:
+		fmt.Fprintf(w, "[ -- ] yt-dlp   not found\n")
+		fmt.Fprintf(w, "        -> discovery stations play from Bandcamp alone; YouTube songs and page links need yt-dlp\n")
+		fmt.Fprintf(w, "        -> put yt-dlp on PATH, beside screech, or in %s, or set ytdlp_path in config.toml\n", core.CleanText(dataDir))
 		return 0
 	}
+
 	resolved, err := exec.LookPath(path)
-	var version []byte
+	var version string
 	if err == nil {
-		version, err = exec.Command(resolved, "--version").Output()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		version, err = ytdlp.Version(ctx, resolved)
 	}
 	if err != nil {
 		// Shown cleaned, run as written: a path is the user's to get right.
 		fmt.Fprintf(w, "[FAIL] yt-dlp   %s\n", core.CleanText(path))
-		fmt.Fprintf(w, "        -> %v\n        -> install yt-dlp, or fix or empty ytdlp_path in config.toml\n", err)
+		fmt.Fprintf(w, "        -> %v\n        -> install yt-dlp, or fix ytdlp_path in config.toml (\"\" finds it, \"off\" turns it off)\n", err)
 		return ecYtdlp
 	}
 	fmt.Fprintf(w, "[ ok ] yt-dlp   %s\n", resolved)
-	fmt.Fprintf(w, "        -> %s\n", strings.TrimSpace(string(version)))
+	fmt.Fprintf(w, "        -> %s\n", core.CleanText(version))
+	if released, ok := releaseDate(version); ok && now.Sub(released) > staleAfter {
+		fmt.Fprintf(w, "        -> released %s, over 60 days ago; run `yt-dlp -U` (YouTube changes often)\n", released.Format("2006-01-02"))
+	}
+	runtimeName := ytdlp.JSRuntimeName()
+	fmt.Fprintf(w, "        -> js runtime: %s\n", runtimeName)
+	if runtimeName == "none" {
+		fmt.Fprintf(w, "        -> YouTube needs one: install deno, node or bun and put it on PATH\n")
+	}
+	return 0
+}
+
+// releaseDate reads the date out of a yt-dlp version, which is its release
+// date: 2026.10.26, or 2026.10.26.232927 for a nightly. Anything else has no
+// date to judge by.
+func releaseDate(version string) (time.Time, bool) {
+	parts := strings.SplitN(strings.TrimSpace(version), ".", 4)
+	if len(parts) < 3 {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("2006.1.2", strings.Join(parts[:3], "."))
+	return t, err == nil
+}
+
+// reportBandcamp asks Bandcamp's discover feed once for a tag it should
+// always have. The feed is undocumented and can change without notice, and
+// discovery stations quietly lean on YouTube alone when it does, so this is
+// where that gets said out loud.
+func reportBandcamp(w io.Writer, c discover.BandcampClient) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	items, err := c.Tag(ctx, "ambient", "top")
+	if err == nil && len(items) == 0 {
+		err = errors.New("answered, but with no tracks; the feed may have changed shape")
+	}
+	if err != nil {
+		fmt.Fprintf(w, "[FAIL] bandcamp discover feed\n")
+		fmt.Fprintf(w, "        -> %v (discovery stations lean on YouTube alone until it answers)\n", err)
+		return ecBandcamp
+	}
+	fmt.Fprintf(w, "[ ok ] bandcamp discover feed\n")
+	fmt.Fprintf(w, "        -> %d tracks for \"ambient\"\n", len(items))
 	return 0
 }
 
@@ -182,7 +254,15 @@ func reportConfig(w io.Writer, cfgFile string, cfg config.Config, cfgErr error) 
 	switch {
 	case cfgErr == nil:
 		fmt.Fprintf(w, "[ ok ] config   %s\n", cfgFile)
-		switch n := len(cfg.Stations); n {
+		// Two kinds of the listener's own stations, counted apart: a
+		// stream or page link they play, and a discovery that finds songs.
+		discoveries := 0
+		for _, st := range cfg.Stations {
+			if st.Discover != "" {
+				discoveries++
+			}
+		}
+		switch n := len(cfg.Stations) - discoveries; n {
 		case 0:
 			fmt.Fprintf(w, "        -> no custom stations (screech add <link> adds one)\n")
 		case 1:
@@ -190,6 +270,7 @@ func reportConfig(w io.Writer, cfgFile string, cfg config.Config, cfgErr error) 
 		default:
 			fmt.Fprintf(w, "        -> %d custom stations\n", n)
 		}
+		fmt.Fprintf(w, "        -> discovery stations: %d (in config.toml; the ones started from FIND are kept in the database)\n", discoveries)
 		for _, warn := range cfg.Warnings {
 			fmt.Fprintf(w, "        -> warning: %s\n", warn)
 		}

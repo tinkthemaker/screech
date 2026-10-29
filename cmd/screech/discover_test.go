@@ -99,8 +99,11 @@ func TestAddYouTubeLinkWritesDiscover(t *testing.T) {
 		if code := addStation(&out, &errOut, add, link, "", "", false); code != 0 {
 			t.Fatalf("%s: exit %d: %s", link, code, errOut.String())
 		}
-		if got.Discover != link || got.URL != "" || got.Name == "" {
-			t.Errorf("%s: add passed %+v, want discover = the link, no url, and a name", link, got)
+		// Named for the link itself, not its host ("youtu.be" names
+		// nothing): core.RenameDiscovery replaces a name equal to the seed
+		// with the first song's title, and only such a name.
+		if got.Discover != link || got.URL != "" || got.Name != link {
+			t.Errorf("%s: add passed %+v, want discover = the link, no url, and the link as its name", link, got)
 		}
 		if strings.Contains(out.String(), "page link") {
 			t.Errorf("%s: a discovery needs no page-link hint:\n%s", link, out.String())

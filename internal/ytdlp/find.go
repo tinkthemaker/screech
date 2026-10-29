@@ -54,13 +54,31 @@ func Find(configured, exeDir, dataDir string) (path string, ok bool) {
 // form --js-runtimes takes. No runtime at all is also "": yt-dlp still runs,
 // and doctor warns.
 func DetectJSRuntime() string {
-	if _, err := exec.LookPath("deno"); err == nil {
+	name, flag := jsRuntime()
+	if name == "deno" || name == "none" {
 		return ""
 	}
-	for _, name := range []string{"node", "bun"} {
-		if p, err := exec.LookPath(name); err == nil {
-			return name + ":" + p
+	return flag
+}
+
+// JSRuntimeName names the runtime yt-dlp will have for its challenges, for
+// doctor and the log: "deno", "node", "bun" or "none". It tells deno from
+// nothing, which DetectJSRuntime can't: both need no flag.
+func JSRuntimeName() string {
+	name, _ := jsRuntime()
+	return name
+}
+
+// jsRuntime is the one lookup behind both: the runtime's name and the
+// --js-runtimes value that selects it.
+func jsRuntime() (name, flag string) {
+	if _, err := exec.LookPath("deno"); err == nil {
+		return "deno", ""
+	}
+	for _, n := range []string{"node", "bun"} {
+		if p, err := exec.LookPath(n); err == nil {
+			return n, n + ":" + p
 		}
 	}
-	return ""
+	return "none", ""
 }

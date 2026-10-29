@@ -211,7 +211,7 @@ func (s Station) clean() (Station, error) {
 	case s.Discover != "":
 		// Nothing to check: any phrase will do.
 	case s.URL == "":
-		return s, errors.New("needs a url")
+		return s, errors.New("needs a url or discover")
 	default:
 		if err := checkLink(s.URL); err != nil {
 			return s, err

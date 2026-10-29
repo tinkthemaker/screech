@@ -63,9 +63,9 @@ discover = 7
 		`[[stations]] #3 "Both": url and discover are both set; use one; skipped`,
 		`[[stations]] #4 "Same Phrase Again": same discover as #1; skipped`,
 		`[[stations]] #5: needs a name; skipped`,
-		`[[stations]] #6 "Blank": needs a url; skipped`,
+		`[[stations]] #6 "Blank": needs a url or discover; skipped`,
 		`[[stations]] #7 "Typed": discover must be a string; ignored`,
-		`[[stations]] #7 "Typed": needs a url; skipped`,
+		`[[stations]] #7 "Typed": needs a url or discover; skipped`,
 	} {
 		if !contains(cfg.Warnings, w) {
 			t.Errorf("missing warning %q\nhave %q", w, cfg.Warnings)

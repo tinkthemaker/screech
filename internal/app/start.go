@@ -7,7 +7,7 @@ package app
 import (
 	"errors"
 	"fmt"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -145,16 +145,7 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 		return nil, failStage(log, StageMpv, err)
 	}
 	log.Linef("mpv connected over IPC")
-	if cfg.YtdlpPath != "" {
-		pl.SetExtractor(player.YTDLP{Path: cfg.YtdlpPath})
-		if _, err := exec.LookPath(cfg.YtdlpPath); err != nil {
-			// Not fatal: only page links need it, and each one that can't
-			// resolve fails on its own like any dead stream.
-			log.Linef("yt-dlp not found (%v); page links will fail", err)
-		} else {
-			log.Linef("page links resolve through yt-dlp: %s", cfg.YtdlpPath)
-		}
-	}
+	wireDiscovery(pl, discoveryDeps{Config: cfg, ExeDir: executableDir(), Known: c.KnownArtist, Log: log})
 
 	// mpv boots at --volume=100; restore the persisted level now, on this
 	// thread, so the first Play can't beat the face's async volume command
@@ -164,6 +155,16 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 	}
 
 	return &Runtime{Config: cfg, DBPath: dbPath, Core: c, Player: pl, Notice: notice, Log: log, release: release}, nil
+}
+
+// executableDir is the folder holding the running screech, one of the places
+// yt-dlp is looked for; "" when the OS won't say.
+func executableDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Dir(exe)
 }
 
 // customStations splits config's [[stations]] into the two kinds core

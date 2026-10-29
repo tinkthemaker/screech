@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tinkthemaker/screech/internal/ytdlp"
 )
 
 // runFakeYTDLP is the test binary standing in for yt-dlp (TestMain routes
@@ -89,11 +92,25 @@ func TestYTDLPTimeout(t *testing.T) {
 	}
 }
 
-func TestParseYTDLPNeedsAStream(t *testing.T) {
-	for _, out := range []string{"", "screech-title:x\n", "file:///etc/passwd\nscreech-title:x\n", "rtmp://live.example/x\n"} {
-		if _, err := parseYTDLP(out); err == nil {
-			t.Errorf("parseYTDLP(%q) found a stream", out)
-		}
+// The extractor is a thin reading of ytdlp.Runner.Resolve, so the app's
+// Runner (its folder, JS runtime and child protection) is the one that runs.
+func TestYTDLPUsesItsRunner(t *testing.T) {
+	t.Setenv("SCREECH_FAKE_YTDLP", "track")
+	var protected, adopted, released int
+	y := YTDLP{Runner: ytdlp.Runner{
+		Path:    os.Args[0],
+		Protect: func(*exec.Cmd) { protected++ },
+		Adopt: func(*exec.Cmd) func() {
+			adopted++
+			return func() { released++ }
+		},
+	}}
+	r, err := y.Extract(context.Background(), "https://www.youtube.com/watch?v=a")
+	if err != nil || r.URL != "http://stream.test/resolved" || r.Title != "Nils Frahm - Says" {
+		t.Fatalf("Extract = %+v, %v", r, err)
+	}
+	if protected != 1 || adopted != 1 || released != 1 {
+		t.Errorf("hooks ran protect=%d adopt=%d release=%d, want once each", protected, adopted, released)
 	}
 }
 
