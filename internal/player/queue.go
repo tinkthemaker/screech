@@ -79,6 +79,10 @@ const (
 	// maxSongFails is how many songs in a row may fail before the station
 	// does. The session strikes it and moves on, as for a dead radio stream.
 	maxSongFails = 3
+	// oldNetworkError is how stale a prefetch's network failure may be and
+	// still end the walk. The prefetch starts when a song loads and is read
+	// when it ends, minutes later; an outage verdict that old is asked again.
+	oldNetworkError = 5 * time.Second
 )
 
 var (
@@ -268,8 +272,12 @@ func (m *MPV) prefetchLocked(q *songQueue) *prefetch {
 // advance loads the next song: the prefetched one when it is fresh, else a
 // new lookup. A song that won't resolve or won't open is skipped; the third
 // in a row, or a lookup that failed for want of a network, ends the station
-// with one EventStreamError. One advance runs at a time (q.advancing).
+// with one EventStreamError. A network failure that is more than a few
+// seconds old is asked about once more first: the song that just ended may
+// have played for minutes since the network went. One advance runs at a time
+// (q.advancing).
 func (m *MPV) advance(q *songQueue) {
+	askedAgain := false
 	for {
 		m.mu.Lock()
 		if m.queue != q || q.dead {
@@ -305,6 +313,11 @@ func (m *MPV) advance(q *songQueue) {
 			continue
 		}
 		if err != nil {
+			if !askedAgain && errors.Is(err, ErrSourceNetwork) && time.Since(p.at) > oldNetworkError {
+				askedAgain = true
+				m.mu.Unlock()
+				continue
+			}
 			goOn := m.lookupFailedLocked(q, err)
 			m.mu.Unlock()
 			if goOn {

@@ -829,3 +829,98 @@ func TestQueueSurvivesBackendDeath(t *testing.T) {
 		t.Error("a restarted player has no queue until Play opens one")
 	}
 }
+
+// A prefetch that failed on the network long ago says nothing about the
+// network now: it started when its song loaded, and a song can play for
+// minutes. When the song ends, the player asks once more before it reports
+// the outage that ended the walk.
+func TestQueueOldPrefetchNetworkErrorIsAskedAgain(t *testing.T) {
+	oldNetworkError := func(t *testing.T, m *MPV) {
+		t.Helper()
+		m.mu.Lock()
+		p := m.queue.next
+		m.mu.Unlock()
+		select {
+		case <-p.done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the prefetch never finished")
+		}
+		m.mu.Lock()
+		p.at = time.Now().Add(-time.Minute)
+		m.mu.Unlock()
+	}
+
+	t.Run("the network is back", func(t *testing.T) {
+		songs := []Song{song("one", "ok"), song("unused", "ok"), song("two", "ok"), song("three", "ok")}
+		src := &scriptSource{songs: songs, errs: map[int]error{1: fmt.Errorf("youtube: %w", ErrSourceNetwork)}}
+		m, logPath, _ := startQueueMPV(t, src)
+		rec := record(m)
+		if err := m.Play("discover:x"); err != nil {
+			t.Fatal(err)
+		}
+		rec.waitTitle(t, titleOf(songs[0]))
+		oldNetworkError(t, m)
+
+		endFile(t, m, "end-eof")
+		waitForLog(t, logPath, loadLine(songs[2]))
+		settle()
+		if n := rec.count(EventStreamError); n != 0 {
+			t.Fatalf("%d EventStreamError for an outage that was over, want none", n)
+		}
+	})
+
+	t.Run("it is still down", func(t *testing.T) {
+		// Asked once more, not forever: a fresh failure ends the walk.
+		songs := []Song{song("one", "ok")}
+		src := &scriptSource{songs: songs, errs: map[int]error{
+			1: fmt.Errorf("youtube: %w", ErrSourceNetwork),
+			2: fmt.Errorf("youtube: %w", ErrSourceNetwork),
+			3: fmt.Errorf("youtube: %w", ErrSourceNetwork),
+		}}
+		m, logPath, _ := startQueueMPV(t, src)
+		rec := record(m)
+		if err := m.Play("discover:x"); err != nil {
+			t.Fatal(err)
+		}
+		rec.waitTitle(t, titleOf(songs[0]))
+		oldNetworkError(t, m)
+
+		endFile(t, m, "end-eof")
+		ev := rec.waitFor(t, "EventStreamError", func(ev Event) bool { return ev.Type == EventStreamError })
+		if !errors.Is(ev.Err, ErrSourceNetwork) {
+			t.Fatalf("EventStreamError.Err = %v, want it to wrap ErrSourceNetwork", ev.Err)
+		}
+		settle()
+		if n := src.nextCalls(); n != 3 {
+			t.Errorf("the source was asked %d times, want the first song, the prefetch and one more", n)
+		}
+		if n := countLoads(t, logPath); n != 1 {
+			t.Errorf("%d loadfiles, want only the first song", n)
+		}
+	})
+
+	t.Run("a fresh failure is believed at once", func(t *testing.T) {
+		// The existing mid-station behavior: the song ended right after the
+		// lookup failed, so the failure is current.
+		src := &scriptSource{
+			songs: []Song{song("one", "ok")},
+			errs:  map[int]error{1: fmt.Errorf("youtube: %w", ErrSourceNetwork)},
+		}
+		m, _, _ := startQueueMPV(t, src)
+		rec := record(m)
+		if err := m.Play("discover:x"); err != nil {
+			t.Fatal(err)
+		}
+		rec.waitTitle(t, titleOf(src.songs[0]))
+		m.mu.Lock()
+		p := m.queue.next
+		m.mu.Unlock()
+		<-p.done
+		endFile(t, m, "end-eof")
+		rec.waitFor(t, "EventStreamError", func(ev Event) bool { return ev.Type == EventStreamError })
+		settle()
+		if n := src.nextCalls(); n != 2 {
+			t.Errorf("the source was asked %d times, want 2: a fresh failure is not asked again", n)
+		}
+	})
+}
