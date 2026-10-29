@@ -1,27 +1,24 @@
 package tui
 
 import (
-	"context"
-	"fmt"
+	"errors"
 	"hash/fnv"
-	"sort"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"screech/internal/core"
-	"screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 const (
-	fps         = 20
-	frameDur    = time.Second / fps
-	bootDur     = 600 * time.Millisecond
-	idleAfter   = 3 * time.Minute
-	tuneStall   = 12 * time.Second
-	maxQuery    = 40
-	feedbackDur = 2400 * time.Millisecond
+	fps          = 20
+	frameDur     = time.Second / fps
+	bootDur      = 600 * time.Millisecond
+	idleAfter    = 3 * time.Minute
+	maxQuery     = 40
+	libraryLimit = 500
 
 	// settleAfter/settleFade drive the idle settle: five untouched minutes
 	// and the chrome eases to an ember floor over half a minute. The signal
@@ -30,13 +27,15 @@ const (
 	settleAfter = 5 * time.Minute
 	settleFade  = 30 * time.Second
 
-	defaultSyncLimit = 20000
-	libraryLimit     = 500
-
 	// staticDur is the wave bay's static collapse at the start of a retune:
 	// long enough to read as a tuner between stations, short enough that
 	// the happy path resolves well under a second.
 	staticDur = 400 * time.Millisecond
+
+	// volumeLinger keeps the volume strip up past the last adjustment:
+	// long enough to glance at the number, short enough that a stale
+	// overlay doesn't park on screen forever.
+	volumeLinger = 4 * time.Second
 )
 
 type historyView int
@@ -45,27 +44,26 @@ const (
 	historyRecent historyView = iota
 	historyLoved
 	historyStations
-)
-
-type phase int
-
-const (
-	phIdleStart phase = iota // nothing tuned yet
-	phTune                   // waiting for the stream to lock
-	phPlay
-	phBuffer
-	phDead
+	historyTaste
 )
 
 type Options struct {
-	Accent    string
-	ASCII     bool
-	SyncLimit int
+	Accent        string
+	ASCII         bool
+	ReducedMotion bool
+	// Session carries the listening engine's own options — auto-hop,
+	// sync limit, the startup notice. New fills in its Dot from the
+	// resolved theme, so ASCII mode never leaks a multi-byte glyph.
+	Session session.Options
 }
 
 type Model struct {
+	// s is the shared listening engine: phase, station, connectivity,
+	// sleep, presets, notice/note/feedback. The face reads it to draw and
+	// feeds it intents; it never writes a second state machine here.
+	s session.State
+
 	core *core.Core
-	pl   player.Player
 	th   Theme
 
 	themeName     string
@@ -82,15 +80,6 @@ type Model struct {
 	lastAct time.Time // any sign of life: keys, overlays, tunes, player state
 	daypart string    // core daypart the current theme is tempered for
 
-	ph        phase
-	syncing   bool
-	virgin    bool
-	syncLimit int
-
-	st     core.Station
-	haveSt bool
-	reason string
-
 	decrypt   Decrypt
 	stDecrypt Decrypt // receiver BROADCAST row resolves with the lock
 	tw        Typewriter
@@ -98,13 +87,12 @@ type Model struct {
 	dial      *Spring
 	dialTgt   float64
 
-	track      string
-	haveTrack  bool
-	trackAt    time.Time
-	lovedTrack bool
-	loveAt     time.Time
-	suspect    bool
-	stereo     bool // the backend is metering two distinct channels
+	track        string
+	trackArtist  string // m.track is artist+title joined; the receiver needs them apart
+	trackAt      time.Time
+	loveAt       time.Time
+	reduceMotion bool
+	stereo       bool // the backend is metering two distinct channels
 
 	// Panel readouts. Both are fetched off the UI thread on change and
 	// cached here; a faceplate that blocked its own render on a SQL count
@@ -120,13 +108,12 @@ type Model struct {
 	listenTotals map[string]time.Duration
 	density      []float64
 
-	presets      map[int]string
 	prompt       bool
 	buf          []rune
-	seeking      bool
 	history      bool
 	hist         []core.HistEntry
 	recent       []core.RecentTrack
+	recentTop    int // scroll offset — RECENT has no cursor, the window moves
 	historyView  historyView
 	library      []core.LovedTrack
 	libraryQuery []rune
@@ -136,38 +123,24 @@ type Model struct {
 	savedQuery   []rune
 	savedFind    bool
 	savedPos     int
+	taste        core.Taste
 	forgetKey    string
 	forgetAt     time.Time
 	volumeOpen   bool
-	volume       int
-
-	tuneAt     time.Time
-	playStart  time.Time
-	note       string
-	feedback   string
-	feedbackAt time.Time
-	fatal      string
+	volumeAt     time.Time // last volume touch; the overlay lingers briefly
+	helpOpen     bool
+	infoOpen     bool
+	info         core.StationInfo
+	infoFor      string // uuid the info sheet belongs to; it follows the radio
+	infoErr      error  // last StationInfo failure — personal rows read unavailable
 }
 
 type (
-	tickMsg     time.Time
-	evMsg       player.Event
-	evClosedMsg struct{}
-	tunedMsg    struct {
-		pick core.Pick
-		err  error
-	}
-	syncedMsg struct {
-		n          int
-		pruned     int
-		err        error
-		background bool
-	}
-	seededMsg struct {
-		res core.SeedResult
-		ok  bool
-	}
-	volumeMsg struct{ err error }
+	tickMsg time.Time
+	// sessMsg carries a session message back into Update: every command
+	// the engine returns produces one, and they re-enter through step.
+	sessMsg   struct{ m session.Msg }
+	hangupMsg struct{}
 	// Panel readouts arrive asynchronously and are matched against what's
 	// playing now: a slow query returning after the user has already
 	// skipped must not stamp the previous station's figures on the new one.
@@ -179,129 +152,76 @@ type (
 		key, title string
 		plays      int
 	}
+	stationInfoMsg struct {
+		uuid string
+		info core.StationInfo
+		err  error
+	}
 	dialDensityMsg struct{ totals map[string]time.Duration }
 )
 
 func New(c *core.Core, pl player.Player, opts Options) Model {
 	now := time.Now()
-	syncing := c.NeedsSync()
-	virgin := c.IsVirgin()
-	sl := opts.SyncLimit
-	if sl <= 0 {
-		sl = defaultSyncLimit
-	}
 	themeName := normalizeThemeName(c.Theme())
 	dp := core.DaypartFor(now)
+	th := NewDaypartTheme(themeName, opts.Accent, opts.ASCII, dp)
+	// The engine writes its own notes and feedback; hand it the theme's
+	// separator so the strings match the face's glyph set.
+	opts.Session.Dot = th.G.Dot
 	return Model{
-		syncLimit:   sl,
-		core:        c,
-		pl:          pl,
-		th:          NewDaypartTheme(themeName, opts.Accent, opts.ASCII, dp),
-		themeName:   themeName,
-		themeAccent: opts.Accent,
-		themeASCII:  opts.ASCII,
-		start:       now,
-		now:         now,
-		lastKey:     now,
-		lastAct:     now,
-		daypart:     dp,
-		wave:        NewWave(32),
-		dial:        NewSpring(0.5),
-		dialTgt:     0.5,
-		syncing:     syncing,
-		virgin:      virgin,
-		prompt:      false,
-		presets:     c.Presets(),
-		volume:      c.Volume(),
+		s:            session.New(c, pl, opts.Session),
+		core:         c,
+		th:           th,
+		themeName:    themeName,
+		themeAccent:  opts.Accent,
+		themeASCII:   opts.ASCII,
+		start:        now,
+		now:          now,
+		lastKey:      now,
+		lastAct:      now,
+		daypart:      dp,
+		reduceMotion: opts.ReducedMotion,
+		wave:         NewWave(32),
+		dial:         NewSpring(0.5),
+		dialTgt:      0.5,
 	}
 }
 
 func Run(c *core.Core, pl player.Player, opts Options) error {
-	_, err := tea.NewProgram(New(c, pl, opts), tea.WithAltScreen()).Run()
+	p := tea.NewProgram(New(c, pl, opts), tea.WithAltScreen())
+	stop := notifyHangup(p)
+	_, err := p.Run()
+	stop()
+	// An external SIGINT is a clean exit, not a UI failure to report as
+	// "screech: ui: program was interrupted".
+	if errors.Is(err, tea.ErrInterrupted) {
+		return nil
+	}
 	return err
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.tick(), m.listen(), m.volumeCmd(), m.dialDensityCmd()}
-	cmds = append(cmds, m.resumeCmd())
-	if m.syncing || m.core.SyncStale(m.syncLimit) {
-		// Weekly directory refresh, in the background. Playback never waits.
-		cmds = append(cmds, m.syncCmd(true))
+	cmds := []tea.Cmd{m.tick()}
+	for _, c := range m.s.Init() {
+		cmds = append(cmds, sessCmd(c))
 	}
+	cmds = append(cmds, m.dialDensityCmd())
 	return tea.Batch(cmds...)
 }
 
-func (m Model) volumeCmd() tea.Cmd {
-	pl, volume := m.pl, m.volume
+// sessCmd adapts a session command to a Bubble Tea command: whatever the
+// engine produces rides back in as a sessMsg and re-enters through step.
+func sessCmd(c session.Cmd) tea.Cmd {
 	return func() tea.Msg {
-		return volumeMsg{err: pl.SetVolume(volume)}
+		if msg := c(); msg != nil {
+			return sessMsg{m: msg}
+		}
+		return nil
 	}
 }
 
 func (m Model) tick() tea.Cmd {
 	return tea.Tick(frameDur, func(t time.Time) tea.Msg { return tickMsg(t) })
-}
-
-func (m Model) listen() tea.Cmd {
-	return func() tea.Msg {
-		ev, ok := <-m.pl.Events()
-		if !ok {
-			return evClosedMsg{}
-		}
-		return evMsg(ev)
-	}
-}
-
-func (m Model) syncCmd(background bool) tea.Cmd {
-	c := m.core
-	limit := m.syncLimit
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer cancel()
-		n, pruned, err := c.Sync(ctx, limit)
-		return syncedMsg{n: n, pruned: pruned, err: err, background: background}
-	}
-}
-
-func (m Model) resumeCmd() tea.Cmd {
-	c := m.core
-	return func() tea.Msg {
-		if uuid := c.ResumeUUID(); uuid != "" {
-			if st, ok := c.StationByUUID(uuid); ok && st.FailCount == 0 {
-				return tunedMsg{pick: core.Pick{Station: st, Reason: "where you left off"}}
-			}
-		}
-		pick, err := c.Tune(time.Now())
-		return tunedMsg{pick: pick, err: err}
-	}
-}
-
-func (m Model) tuneCmd() tea.Cmd {
-	c := m.core
-	return func() tea.Msg {
-		pick, err := c.Tune(time.Now())
-		return tunedMsg{pick: pick, err: err}
-	}
-}
-
-// tuneDeadCmd moves on after a stream failure: no skip semantics, no taste
-// signal. The failure already cost the station a strike.
-func (m Model) tuneDeadCmd() tea.Cmd {
-	c := m.core
-	return func() tea.Msg {
-		pick, err := c.TuneDead(time.Now())
-		return tunedMsg{pick: pick, err: err}
-	}
-}
-
-func (m Model) seedCmd(q string) tea.Cmd {
-	c := m.core
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		res, ok := c.Seed(ctx, q, time.Now())
-		return seededMsg{res: res, ok: ok}
-	}
 }
 
 func (m Model) stationStatsCmd(uuid string) tea.Cmd {
@@ -312,6 +232,16 @@ func (m Model) stationStatsCmd(uuid string) tea.Cmd {
 			return nil
 		}
 		return stationStatsMsg{uuid: uuid, total: total}
+	}
+}
+
+// stationInfoCmd reads the station sheet's numbers off the UI goroutine;
+// the msg is dropped if the radio has since moved on.
+func (m Model) stationInfoCmd(uuid string) tea.Cmd {
+	c := m.core
+	return func() tea.Msg {
+		info, err := c.StationInfo(uuid, time.Now())
+		return stationInfoMsg{uuid: uuid, info: info, err: err}
 	}
 }
 
@@ -342,46 +272,114 @@ func (m Model) trackStatsCmd(key, title string) tea.Cmd {
 	}
 }
 
-func (m Model) playCmd() tea.Cmd {
-	pl, c := m.pl, m.core
-	st := m.st
-	return func() tea.Msg {
-		if err := pl.Play(st.StreamURL()); err != nil {
-			return evMsg(player.Event{Type: player.EventStreamError, Err: err})
-		}
-		c.StartListen(st.UUID, time.Now())
-		return nil
+// step feeds one message through the shared listening engine, then does
+// the face work the engine knows nothing about: the landing ceremony,
+// wave energy, and the track readouts.
+func (m Model) step(msg session.Msg) (Model, tea.Cmd) {
+	before := m.s
+	s, scmds := m.s.Update(msg)
+	m.s = s
+	var cmds []tea.Cmd
+	for _, c := range scmds {
+		cmds = append(cmds, sessCmd(c))
 	}
+
+	// Wave energy follows the engine's transitions, not just its phase:
+	// a lock is a surge, buffering sags, anything else settles to embers.
+	pev, isPev := msg.(session.PlayerEvent)
+	switch {
+	case isPev && player.Event(pev).Type == player.EventPlaying && before.Phase != session.Paused:
+		m.wave.SetEnergy(1)
+	case isPev && player.Event(pev).Type == player.EventBuffering && before.Phase != session.Paused:
+		m.wave.SetEnergy(0.2)
+	case m.s.PickSeq != before.PickSeq ||
+		(m.s.Phase != before.Phase &&
+			(m.s.Phase == session.Tuning || m.s.Phase == session.Paused || m.s.Phase == session.Stopped)):
+		m.wave.SetEnergy(0.05)
+	}
+
+	if isPev {
+		if player.Event(pev).Type == player.EventLevel {
+			l := m.s.Level
+			m.wave.SetStereoLevels(l.L, l.R, l.Peak, m.now.Sub(m.start).Seconds())
+			m.stereo = l.Stereo
+		} else {
+			// Player state changes are signs of life and restore a
+			// settled room; the per-frame audio level is not.
+			m.lastAct = m.now
+		}
+	}
+
+	// The landing ceremony replays on every pick, re-picks included:
+	// decrypt, dial sweep, typewriter reason, fresh readouts.
+	if m.s.PickSeq != before.PickSeq {
+		m.history = false
+		m.lastAct = m.now
+		if m.motion() {
+			// Decrypts hold only the clock; the views pass the settled
+			// text at render time so the ceremony resolves into exactly
+			// what's drawn.
+			m.decrypt = NewDecrypt(m.now)
+			m.stDecrypt = NewDecrypt(m.now)
+		}
+		m.tw = NewTypewriter(m.s.Reason, m.now.Add(300*time.Millisecond))
+		m.track, m.trackArtist = "", ""
+		m.dialTgt = stationDialPos(m.s.Station.UUID)
+		// Readouts belong to the outgoing station; clear them so the new
+		// one never briefly wears the old one's numbers.
+		m.stTotal = 0
+		m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
+		// Tags differ per station, which can flip the receiver's GENRE
+		// block and its row accounting; relayout before the density cmd
+		// lands.
+		m.relayout()
+		// The outgoing listen has just been banked, so the distribution
+		// moved.
+		cmds = append(cmds, m.stationStatsCmd(m.s.Station.UUID), m.dialDensityCmd())
+		if m.infoOpen {
+			// The info sheet follows the radio: re-request for the new
+			// station and show it loading in the meantime.
+			m.infoFor = m.s.Station.UUID
+			m.infoErr = nil
+			m.info = core.StationInfo{}
+			cmds = append(cmds, m.stationInfoCmd(m.s.Station.UUID))
+		}
+	}
+
+	// Track display: the parsed parts live in the session; the joined
+	// readout string and the play-count cache are the face's.
+	if m.s.HaveTrack && (m.s.Artist != before.Artist || m.s.Title != before.Title) {
+		m.setTrack(m.s.Artist, m.s.Title)
+		m.trackAt = m.now
+		// A new title invalidates the play count. Zero it now and let
+		// the query land, rather than showing the last track's.
+		m.trackKey, m.trackTitle, m.trackPlays = m.s.TrackKey, m.s.Title, 0
+		cmds = append(cmds, m.trackStatsCmd(m.trackKey, m.trackTitle))
+	}
+	if before.HaveTrack && !m.s.HaveTrack {
+		m.track, m.trackArtist = "", ""
+		m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
+	}
+	return m, tea.Batch(cmds...)
 }
 
-// applyPick is the shared transition into a new station: decrypt, dial sweep,
-// typewriter reason, then play.
-func (m Model) applyPick(pick core.Pick) (Model, tea.Cmd) {
-	m.st = pick.Station
-	m.haveSt = true
-	m.virgin = false
-	m.history = false
-	m.note = ""
-	m.reason = pick.Reason
-	m.ph = phTune
-	m.tuneAt = m.now
-	m.lastAct = m.now
-	m.decrypt = NewDecrypt(heroText(cleanStationName(m.st.Name), 72, m.th.G.Ellipsis), m.now)
-	m.stDecrypt = NewDecrypt(strings.ToUpper(cleanStationName(m.st.Name)), m.now)
-	m.tw = NewTypewriter(m.reason, m.now.Add(300*time.Millisecond))
-	m.track = ""
-	m.haveTrack = false
-	m.lovedTrack = false
-	m.suspect = false
-	m.playStart = time.Time{}
-	m.dialTgt = stationDialPos(m.st.UUID)
-	m.wave.SetEnergy(0.05)
-	// Readouts belong to the outgoing station; clear them so the new one
-	// never briefly wears the old one's numbers.
-	m.stTotal = 0
-	m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
-	// The outgoing listen has just been banked, so the distribution moved.
-	return m, tea.Batch(m.playCmd(), m.stationStatsCmd(m.st.UUID), m.dialDensityCmd())
+// intent sends listener intents through the engine in order; the face's
+// own side effects (love pulse, overlay state) stay in the key handlers.
+func (m Model) intent(msgs ...session.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	for _, msg := range msgs {
+		nm, c := m.step(msg)
+		m = nm
+		cmds = append(cmds, c)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// quit ends the session — the engine banks the listen and closes the
+// backend — then leaves the program.
+func (m Model) quit() (tea.Model, tea.Cmd) {
+	m, cmd := m.step(session.Quit{})
+	return m, tea.Batch(cmd, tea.Quit)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -389,18 +387,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		m.wave.Resize(m.waveRenderWidth())
-		m.wave.SetRows(m.waveRenderRows())
-		m.rebuildDensity()
+		m.relayout()
 		return m, nil
 
 	case tea.KeyMsg:
 		m.lastKey = m.now
 		m.lastAct = m.now
+		// The startup notice shows until the room proves it's alive —
+		// the first keypress acknowledges it.
+		m, _ = m.step(session.Touch{})
 		// Boot is a heartbeat, not a gate: any key ends it early and still
 		// lands — the interface never swallows input.
 		if m.now.Sub(m.start) < bootDur {
 			m.start = m.now.Add(-bootDur)
+		}
+		// The help and info sheets take keys first: their own keys close
+		// them, anything else closes and falls through to whatever is
+		// underneath — the same pass-through contract as the volume strip.
+		if m.helpOpen {
+			m.helpOpen = false
+			switch key := msg.String(); key {
+			case "?", "esc", "enter":
+				return m, nil
+			case "q", "ctrl+c":
+				return m.quit()
+			}
+			if m.history {
+				return m.handleHistoryKey(msg)
+			}
+			return m.handleKey(msg)
+		}
+		if m.infoOpen {
+			m.infoOpen = false
+			switch key := msg.String(); key {
+			case "i", "I", "esc", "enter":
+				return m, nil
+			case "q", "ctrl+c":
+				return m.quit()
+			}
+			if m.history {
+				return m.handleHistoryKey(msg)
+			}
+			return m.handleKey(msg)
 		}
 		if m.themeOpen {
 			return m.handleThemeKey(msg)
@@ -425,75 +453,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		t := m.now.Sub(m.start).Seconds()
 		m.wave.Step(t, dt)
-		m.dial.Step(m.dialTgt, dt)
+		if m.reduceMotion {
+			// No springing under reduced motion: the needle snaps to
+			// its station like a mechanical dial finding the mark.
+			m.dial.Pos, m.dial.Vel = m.dialTgt, 0
+		} else {
+			m.dial.Step(m.dialTgt, dt)
+		}
+		// The volume strip isn't modal: it lingers a few seconds after
+		// the last touch, then folds itself away.
+		if m.volumeOpen && m.now.Sub(m.volumeAt) > volumeLinger {
+			m.volumeOpen = false
+		}
 		// Daypart turns retemper the theme (brighter midday, ember night).
 		// Never while the picker is open: a preview in progress owns th.
 		if dp := core.DaypartFor(m.now); dp != m.daypart && !m.themeOpen {
 			m.daypart = dp
 			m.previewTheme(m.themeName)
 		}
-		// A station that never locks is a corpse: mark it and move on. The
-		// dead listen closes without skip semantics — a stream that never
-		// played teaches nothing about taste.
-		if m.ph == phTune && m.haveSt && m.now.Sub(m.tuneAt) > tuneStall {
-			m.core.MarkStationFailed(m.st.UUID)
-			m.note = "no signal " + m.th.G.Dot + " moving on"
-			m.tuneAt = m.now
-			return m, tea.Batch(m.tick(), m.tuneDeadCmd())
-		}
-		return m, m.tick()
+		// The frame clock also drives the engine: tune stalls, stream
+		// drops, offline retries and the sleep countdown live in session.
+		m, cmd := m.step(session.Tick{Now: m.now})
+		return m, tea.Batch(m.tick(), cmd)
 
-	case syncedMsg:
-		m.syncing = false
-		if msg.background {
-			// Refresh landed while playing; absorb quietly.
-			m.presets = m.core.Presets()
-			if msg.err != nil {
-				m.setFeedback("DIRECTORY  Refresh failed; using cache")
-			} else {
-				m.setFeedback(fmt.Sprintf("DIRECTORY  %d stations refreshed", msg.n))
-			}
-			return m, nil
-		}
-		if msg.err != nil {
-			m.note = "directory unreachable " + m.th.G.Dot + " running on seed stations"
-		}
-		if m.virgin {
-			m.prompt = true
-			return m, nil
-		}
-		return m, m.resumeCmd()
+	case sessMsg:
+		return m.step(msg.m)
 
-	case tunedMsg:
-		if msg.err != nil {
-			if !m.haveSt {
-				m.fatal = msg.err.Error()
-				m.ph = phDead
-			} else {
-				m.note = msg.err.Error()
-			}
-			return m, nil
-		}
-		return m.applyPick(msg.pick)
-
-	case seededMsg:
-		m.seeking = false
-		if !msg.ok {
-			m.note = "no matches for " + msg.res.Label
-			return m, nil
-		}
-		return m.applyPick(msg.res.Pick)
-
-	case volumeMsg:
-		if msg.err != nil {
-			m.note = "volume control failed " + m.th.G.Dot + " " + msg.err.Error()
+	case stationStatsMsg:
+		if m.s.HaveStation && msg.uuid == m.s.Station.UUID {
+			m.stTotal = msg.total
 		}
 		return m, nil
 
-	case stationStatsMsg:
-		if m.haveSt && msg.uuid == m.st.UUID {
-			m.stTotal = msg.total
+	case stationInfoMsg:
+		if !m.infoOpen || msg.uuid != m.infoFor {
+			return m, nil
 		}
+		m.info, m.infoErr = msg.info, msg.err
 		return m, nil
 
 	case trackStatsMsg:
@@ -504,845 +500,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dialDensityMsg:
 		m.listenTotals = msg.totals
-		m.rebuildDensity()
+		m.relayout()
 		return m, nil
 
-	case evMsg:
-		return m.handlePlayerEvent(player.Event(msg))
-
-	case evClosedMsg:
-		if m.ph != phDead {
-			m.ph = phDead
-			m.fatal = "player backend closed"
-		}
-		return m, nil
+	case hangupMsg:
+		return m.quit()
 	}
 	return m, nil
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	key := msg.String()
-	switch key {
-	case "q", "ctrl+c":
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
-
-	case " ", "n":
-		if m.ph == phDead {
-			return m, nil
-		}
-		m.ph = phTune
-		m.tuneAt = m.now
-		m.note = ""
-		switch {
-		case m.suspect:
-			m.setFeedback("LEARNED  Break skip protected")
-		case !m.playStart.IsZero() && m.now.Sub(m.playStart) >= core.FastSkipWindow:
-			m.setFeedback("LEARNED  Long listen saved")
-		case !m.playStart.IsZero():
-			m.setFeedback("LEARNED  Fast skip noted")
-		default:
-			m.setFeedback("NEXT  Finding another station")
-		}
-		m.wave.SetEnergy(0.05)
-		return m, m.tuneCmd()
-
-	case "l":
-		if !m.haveSt || m.ph == phDead {
-			return m, nil
-		}
-		_, track, lovedNow := m.core.Love(time.Now())
-		m.lovedTrack = lovedNow
-		if lovedNow {
-			m.loveAt = m.now
-			if track {
-				m.setFeedback("LOVED  Track and station")
-			} else {
-				m.setFeedback("LOVED  Station")
-			}
-		} else {
-			m.setFeedback("UNLOVED  Love returned")
-		}
-		return m, nil
-
-	case "f":
-		if !m.haveSt || m.ph == phDead {
-			return m, nil
-		}
-		slot, saved, full := m.core.TogglePreset(time.Now())
-		m.presets = m.core.Presets()
-		switch {
-		case full:
-			m.reason = "presets full " + m.th.G.Dot + " f on a saved station frees a slot"
-			m.setFeedback("PRESETS  All nine slots are full")
-		case saved:
-			m.reason = fmt.Sprintf("saved "+m.th.G.Dot+" press %d to return", slot)
-			m.setFeedback(fmt.Sprintf("SAVED  Preset %d", slot))
-		case slot > 0:
-			m.reason = fmt.Sprintf("preset %d cleared", slot)
-			m.setFeedback(fmt.Sprintf("CLEARED  Preset %d", slot))
-		}
-		m.tw = NewTypewriter(m.reason, m.now)
-		return m, nil
-
-	case "/":
-		if m.ph == phDead {
-			return m, nil
-		}
-		m.prompt = true
-		m.buf = nil
-		return m, nil
-
-	case "v":
-		m.volumeOpen = true
-		return m, nil
-
-	case "-", "[":
-		m.volumeOpen = true
-		return m.adjustVolume(-5)
-
-	case "+", "=", "]":
-		m.volumeOpen = true
-		return m.adjustVolume(5)
-
-	case "h":
-		if !m.loadHistory(historyRecent) {
-			m.note = "could not open history"
-		}
-		return m, nil
-
-	case "H":
-		if !m.loadHistory(historyLoved) {
-			m.note = "could not open library"
-		}
-		return m, nil
-
-	case "t", "T":
-		m.themeOpen = true
-		m.themeOriginal = m.themeName
-		m.themePos = themeChoiceIndex(m.themeName)
-		return m, nil
+// setTrack records a heard track: the joined display string for the
+// stacked layout, the split parts for the receiver's title/artist rows.
+func (m *Model) setTrack(artist, title string) {
+	m.track = title
+	if artist != "" {
+		m.track = artist + " " + m.th.G.Dot + " " + title
 	}
-
-	// Digits 1-9: preset recall, deterministic.
-	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-		slot := int(key[0] - '0')
-		uuid, ok := m.presets[slot]
-		if !ok {
-			m.note = fmt.Sprintf("preset %d is empty "+m.th.G.Dot+" f saves", slot)
-			return m, nil
-		}
-		if m.haveSt && uuid == m.st.UUID {
-			return m, nil // already playing it
-		}
-		pick, err := m.core.TuneTo(uuid, time.Now())
-		if err != nil {
-			m.note = err.Error()
-			return m, nil
-		}
-		pick.Reason = fmt.Sprintf("preset %d", slot)
-		return m.applyPick(pick)
-	}
-	return m, nil
+	m.trackArtist = artist
+	m.trackTitle = title
 }
 
-func themeChoiceIndex(name string) int {
-	name = normalizeThemeName(name)
-	for i, choice := range themeChoices {
-		if choice.ID == name {
-			return i
-		}
-	}
-	return 0
+// relayout resizes the instruments that depend on terminal size and panel
+// shape: wave width and depth, then the density strip re-bucketed to fit.
+func (m *Model) relayout() {
+	m.wave.Resize(m.waveRenderWidth())
+	m.wave.SetRows(m.waveRenderRows())
+	m.rebuildDensity()
 }
 
-func (m *Model) previewTheme(name string) {
-	m.themeName = normalizeThemeName(name)
-	// Previews render under the current daypart: what you see in the picker
-	// is what the theme looks like right now, not an abstract noon version.
-	m.th = NewDaypartTheme(m.themeName, m.themeAccent, m.themeASCII, m.daypart)
-	m.wave.ResetPalette()
-}
-
-func (m Model) handleThemeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	key := msg.String()
-	choices := ThemeChoices()
-	switch key {
-	case "ctrl+c", "q":
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
-	case "esc", "t", "T":
-		m.previewTheme(m.themeOriginal)
-		m.themeOpen = false
-		return m, nil
-	case "up", "k", "shift+tab":
-		m.themePos = (m.themePos - 1 + len(choices)) % len(choices)
-		m.previewTheme(choices[m.themePos].ID)
-		return m, nil
-	case "down", "j", "tab":
-		m.themePos = (m.themePos + 1) % len(choices)
-		m.previewTheme(choices[m.themePos].ID)
-		return m, nil
-	case "enter":
-		m.previewTheme(choices[m.themePos].ID)
-		if err := m.core.SetTheme(m.themeName); err != nil {
-			m.note = "could not save theme " + m.th.G.Dot + " " + err.Error()
-			return m, nil
-		}
-		m.themeOpen = false
-		m.setFeedback("THEME  " + choices[m.themePos].Label + " applied")
-		return m, nil
-	}
-	if len(key) == 1 && key[0] >= '1' && int(key[0]-'1') < len(choices) {
-		m.themePos = int(key[0] - '1')
-		m.previewTheme(choices[m.themePos].ID)
-	}
-	return m, nil
-}
-
-func (m Model) handleVolumeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "ctrl+c":
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
-	case "esc", "enter", "v":
-		m.volumeOpen = false
-		return m, nil
-	case "left", "down", "-", "[":
-		return m.adjustVolume(-5)
-	case "right", "up", "+", "=", "]":
-		return m.adjustVolume(5)
-	}
-	return m, nil
-}
-
-func (m Model) adjustVolume(delta int) (tea.Model, tea.Cmd) {
-	m.volume += delta
-	if m.volume < 0 {
-		m.volume = 0
-	}
-	if m.volume > 100 {
-		m.volume = 100
-	}
-	if err := m.core.SetVolume(m.volume); err != nil {
-		m.note = "could not save volume " + m.th.G.Dot + " " + err.Error()
-	}
-	return m, m.volumeCmd()
-}
-
-func (m *Model) loadHistory(view historyView) bool {
-	switch view {
-	case historyRecent:
-		entries, err := m.core.RecentlyHeard(100)
-		if err != nil {
-			return false
-		}
-		m.recent = entries
-	case historyLoved:
-		entries, err := m.core.LovedTracks(libraryLimit)
-		if err != nil {
-			return false
-		}
-		m.library = entries
-		m.clampLibraryPos()
-	case historyStations:
-		entries, err := m.core.SavedStations()
-		if err != nil {
-			return false
-		}
-		m.saved = entries
-		m.clampSavedPos()
-		// The leaderboard still loads for the view's secondary section.
-		if hist, err := m.core.TopListened(9); err == nil {
-			m.hist = hist
-		}
-	}
-	if view != historyLoved {
-		entries, err := m.core.LovedTracks(libraryLimit)
-		if err == nil {
-			m.library = entries
-			m.clampLibraryPos()
-		}
-	}
-	m.historyView = view
-	m.history = true
-	m.libraryFind = false
-	m.forgetKey = ""
-	return true
-}
-
-// handleHistoryKey drives the unified recent/loved/stations library.
-func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	key := msg.String()
-	if m.historyView == historyLoved && m.libraryFind {
-		return m.handleLibraryFindKey(msg)
-	}
-	if m.historyView == historyStations && m.savedFind {
-		return m.handleSavedFindKey(msg)
-	}
-	switch key {
-	case "q", "ctrl+c":
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
-	case "esc":
-		if m.historyView == historyLoved && len(m.libraryQuery) > 0 {
-			m.libraryQuery = nil
-			m.libraryPos = 0
-			m.forgetKey = ""
-			return m, nil
-		}
-		m.history = false
-		return m, nil
-	case "h":
-		m.loadHistory(historyRecent)
-		return m, nil
-	case "H":
-		m.loadHistory(historyLoved)
-		return m, nil
-	case "tab":
-		m.loadHistory((m.historyView + 1) % 3)
-		return m, nil
-	case "shift+tab":
-		m.loadHistory((m.historyView + 2) % 3)
-		return m, nil
-	}
-
-	if m.historyView == historyLoved {
-		switch key {
-		case "/":
-			m.libraryFind = true
-			m.forgetKey = ""
-			return m, nil
-		case "up", "k":
-			m.moveLibrary(-1)
-			return m, nil
-		case "down", "j":
-			m.moveLibrary(1)
-			return m, nil
-		case "pgup":
-			m.moveLibrary(-5)
-			return m, nil
-		case "pgdown":
-			m.moveLibrary(5)
-			return m, nil
-		case "home":
-			m.libraryPos = 0
-			m.forgetKey = ""
-			return m, nil
-		case "end":
-			m.libraryPos = maxI(0, len(m.filteredLibrary())-1)
-			m.forgetKey = ""
-			return m, nil
-		case "enter":
-			entry, ok := m.selectedLovedTrack()
-			if !ok {
-				return m, nil
-			}
-			query := strings.TrimSpace(entry.Artist)
-			if query == "" {
-				query = strings.TrimSpace(entry.Title)
-			}
-			if query == "" {
-				return m, nil
-			}
-			m.history = false
-			m.seeking = true
-			m.note = ""
-			return m, m.seedCmd(query)
-		case "r":
-			entry, ok := m.selectedLovedTrack()
-			if !ok || entry.StationUUID == "" {
-				return m, nil
-			}
-			pick, err := m.core.TuneTo(entry.StationUUID, time.Now())
-			if err != nil {
-				m.note = err.Error()
-				m.history = false
-				return m, nil
-			}
-			pick.Reason = "from a loved track"
-			return m.applyPick(pick)
-		case "x":
-			entry, ok := m.selectedLovedTrack()
-			if !ok {
-				return m, nil
-			}
-			entryKey := lovedTrackKey(entry)
-			if m.forgetKey != entryKey || m.now.Sub(m.forgetAt) > 3*time.Second {
-				m.forgetKey = entryKey
-				m.forgetAt = m.now
-				return m, nil
-			}
-			removed, err := m.core.ForgetLovedTrack(entry.ArtistKey, entry.Title)
-			if err != nil {
-				m.note = "could not remove loved track"
-				return m, nil
-			}
-			if removed {
-				m.loadHistory(historyLoved)
-				m.setFeedback("LIBRARY  Track removed")
-			}
-			return m, nil
-		}
-	}
-
-	if m.historyView == historyStations {
-		switch key {
-		case "/":
-			m.savedFind = true
-			m.forgetKey = ""
-			return m, nil
-		case "up", "k":
-			m.moveSaved(-1)
-			return m, nil
-		case "down", "j":
-			m.moveSaved(1)
-			return m, nil
-		case "pgup":
-			m.moveSaved(-5)
-			return m, nil
-		case "pgdown":
-			m.moveSaved(5)
-			return m, nil
-		case "home":
-			m.savedPos = 0
-			m.forgetKey = ""
-			return m, nil
-		case "end":
-			m.savedPos = maxI(0, len(m.filteredSaved())-1)
-			m.forgetKey = ""
-			return m, nil
-		case "enter":
-			entry, ok := m.selectedSaved()
-			if !ok {
-				return m, nil
-			}
-			m.history = false
-			if m.haveSt && entry.UUID == m.st.UUID {
-				return m, nil // already playing it
-			}
-			pick, err := m.core.TuneTo(entry.UUID, time.Now())
-			if err != nil {
-				m.note = err.Error()
-				return m, nil
-			}
-			pick.Reason = "from saved stations"
-			return m.applyPick(pick)
-		case "x":
-			entry, ok := m.selectedSaved()
-			if !ok {
-				return m, nil
-			}
-			if m.forgetKey != entry.UUID || m.now.Sub(m.forgetAt) > 3*time.Second {
-				m.forgetKey = entry.UUID
-				m.forgetAt = m.now
-				return m, nil
-			}
-			if err := m.core.RemoveStation(entry.UUID); err != nil {
-				m.note = "could not remove station"
-				return m, nil
-			}
-			m.presets = m.core.Presets()
-			m.loadHistory(historyStations)
-			m.setFeedback("STATIONS  Removed")
-			return m, nil
-		}
-		// Digits still tune from the saved list when a preset holds that slot.
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-			slot := int(key[0] - '0')
-			uuid, ok := m.presets[slot]
-			if !ok {
-				return m, nil
-			}
-			if m.haveSt && uuid == m.st.UUID {
-				m.history = false
-				return m, nil
-			}
-			pick, err := m.core.TuneTo(uuid, time.Now())
-			if err != nil {
-				m.note = err.Error()
-				m.history = false
-				return m, nil
-			}
-			pick.Reason = fmt.Sprintf("preset %d", slot)
-			return m.applyPick(pick)
-		}
-		return m, nil
-	}
-	return m, nil
-}
-
-// handleSavedFindKey drives the STATIONS view's incremental search.
-func (m Model) handleSavedFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
-	case tea.KeyEsc, tea.KeyEnter:
-		m.savedFind = false
-		return m, nil
-	case tea.KeyBackspace:
-		if len(m.savedQuery) > 0 {
-			m.savedQuery = m.savedQuery[:len(m.savedQuery)-1]
-			m.savedPos = 0
-		}
-		return m, nil
-	case tea.KeyUp:
-		m.moveSaved(-1)
-		return m, nil
-	case tea.KeyDown:
-		m.moveSaved(1)
-		return m, nil
-	case tea.KeySpace:
-		if len(m.savedQuery) < maxQuery {
-			m.savedQuery = append(m.savedQuery, ' ')
-			m.savedPos = 0
-		}
-		return m, nil
-	case tea.KeyRunes:
-		for _, r := range msg.Runes {
-			if len(m.savedQuery) >= maxQuery {
-				break
-			}
-			m.savedQuery = append(m.savedQuery, r)
-		}
-		m.savedPos = 0
-		m.forgetKey = ""
-		return m, nil
-	}
-	return m, nil
-}
-
-func (m Model) handleLibraryFindKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
-	case tea.KeyEsc, tea.KeyEnter:
-		m.libraryFind = false
-		return m, nil
-	case tea.KeyBackspace:
-		if len(m.libraryQuery) > 0 {
-			m.libraryQuery = m.libraryQuery[:len(m.libraryQuery)-1]
-			m.libraryPos = 0
-		}
-		return m, nil
-	case tea.KeyUp:
-		m.moveLibrary(-1)
-		return m, nil
-	case tea.KeyDown:
-		m.moveLibrary(1)
-		return m, nil
-	case tea.KeySpace:
-		if len(m.libraryQuery) < maxQuery {
-			m.libraryQuery = append(m.libraryQuery, ' ')
-			m.libraryPos = 0
-		}
-		return m, nil
-	case tea.KeyRunes:
-		for _, r := range msg.Runes {
-			if len(m.libraryQuery) >= maxQuery {
-				break
-			}
-			m.libraryQuery = append(m.libraryQuery, r)
-		}
-		m.libraryPos = 0
-		m.forgetKey = ""
-		return m, nil
-	}
-	return m, nil
-}
-
-func (m *Model) moveLibrary(delta int) {
-	count := len(m.filteredLibrary())
-	if count == 0 {
-		m.libraryPos = 0
-		return
-	}
-	m.libraryPos += delta
-	if m.libraryPos < 0 {
-		m.libraryPos = 0
-	}
-	if m.libraryPos >= count {
-		m.libraryPos = count - 1
-	}
-	m.forgetKey = ""
-}
-
-func (m *Model) clampLibraryPos() {
-	count := len(m.filteredLibrary())
-	if count == 0 {
-		m.libraryPos = 0
-	} else if m.libraryPos >= count {
-		m.libraryPos = count - 1
-	}
-}
-
-// --- saved-stations list (STATIONS view) ---
-
-func (m *Model) moveSaved(delta int) {
-	count := len(m.filteredSaved())
-	if count == 0 {
-		m.savedPos = 0
-		return
-	}
-	m.savedPos += delta
-	if m.savedPos < 0 {
-		m.savedPos = 0
-	}
-	if m.savedPos >= count {
-		m.savedPos = count - 1
-	}
-	m.forgetKey = ""
-}
-
-func (m *Model) clampSavedPos() {
-	count := len(m.filteredSaved())
-	if count == 0 {
-		m.savedPos = 0
-	} else if m.savedPos >= count {
-		m.savedPos = count - 1
-	}
-}
-
-func (m Model) filteredSaved() []core.SavedStation {
-	query := strings.ToLower(strings.TrimSpace(string(m.savedQuery)))
-	if query == "" {
-		return m.saved
-	}
-	var out []core.SavedStation
-	for _, e := range m.saved {
-		name := strings.ToLower(e.Name)
-		ok := true
-		for _, term := range strings.Fields(query) {
-			if !strings.Contains(name, term) {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-func (m Model) selectedSaved() (core.SavedStation, bool) {
-	entries := m.filteredSaved()
-	if m.savedPos < 0 || m.savedPos >= len(entries) {
-		return core.SavedStation{}, false
-	}
-	return entries[m.savedPos], true
-}
-
-func (m Model) selectedLovedTrack() (core.LovedTrack, bool) {
-	entries := m.filteredLibrary()
-	if m.libraryPos < 0 || m.libraryPos >= len(entries) {
-		return core.LovedTrack{}, false
-	}
-	return entries[m.libraryPos], true
-}
-
-func (m Model) filteredLibrary() []core.LovedTrack {
-	query := strings.ToLower(strings.TrimSpace(string(m.libraryQuery)))
-	if query == "" {
-		return m.library
-	}
-	type match struct {
-		entry core.LovedTrack
-		score int
-	}
-	var matches []match
-	for _, entry := range m.library {
-		score, ok := lovedMatchScore(entry, query)
-		if ok {
-			matches = append(matches, match{entry: entry, score: score})
-		}
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		if matches[i].score == matches[j].score {
-			return matches[i].entry.LovedAt.After(matches[j].entry.LovedAt)
-		}
-		return matches[i].score > matches[j].score
-	})
-	out := make([]core.LovedTrack, len(matches))
-	for i := range matches {
-		out[i] = matches[i].entry
-	}
-	return out
-}
-
-func lovedMatchScore(entry core.LovedTrack, query string) (int, bool) {
-	artist := strings.ToLower(entry.Artist)
-	title := strings.ToLower(entry.Title)
-	station := strings.ToLower(entry.StationName)
-	all := artist + " " + title + " " + station
-	score := 0
-	for _, term := range strings.Fields(query) {
-		if !strings.Contains(all, term) {
-			return 0, false
-		}
-		switch {
-		case strings.HasPrefix(title, term):
-			score += 80
-		case strings.HasPrefix(artist, term):
-			score += 70
-		case strings.Contains(title, term):
-			score += 50
-		case strings.Contains(artist, term):
-			score += 40
-		default:
-			score += 10
-		}
-	}
-	return score, true
-}
-
-func lovedTrackKey(entry core.LovedTrack) string {
-	return entry.ArtistKey + "\x00" + strings.ToLower(strings.TrimSpace(entry.Title))
-}
-
-func (m *Model) setFeedback(text string) {
-	m.feedback = text
-	m.feedbackAt = m.now
-}
-
-func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		m.core.EndListen(time.Now())
-		_ = m.pl.Close()
-		return m, tea.Quit
-
-	case tea.KeyEsc:
-		m.prompt = false
-		m.buf = nil
-		return m, nil
-
-	case tea.KeyEnter:
-		q := strings.TrimSpace(string(m.buf))
-		m.prompt = false
-		m.buf = nil
-		if q == "" {
-			return m, nil
-		}
-		m.seeking = true
-		m.note = ""
-		return m, m.seedCmd(q)
-
-	case tea.KeyBackspace:
-		if len(m.buf) > 0 {
-			m.buf = m.buf[:len(m.buf)-1]
-		}
-		return m, nil
-
-	case tea.KeySpace:
-		// Virgin shortcut: empty prompt + space = wildcard tune.
-		if m.virgin && !m.haveSt && len(m.buf) == 0 {
-			m.prompt = false
-			m.ph = phTune
-			m.tuneAt = m.now
-			return m, m.tuneCmd()
-		}
-		if len(m.buf) < maxQuery {
-			m.buf = append(m.buf, ' ')
-		}
-		return m, nil
-
-	case tea.KeyRunes:
-		for _, r := range msg.Runes {
-			if len(m.buf) >= maxQuery {
-				break
-			}
-			m.buf = append(m.buf, r)
-		}
-		return m, nil
-	}
-	return m, nil
-}
-
-func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
-	// Player state changes are signs of life and restore a settled room;
-	// the per-frame audio level is not — it would keep the room lit forever.
-	if ev.Type != player.EventLevel {
-		m.lastAct = m.now
-	}
-	// extra carries any work a branch wants done alongside the next listen.
-	var extra tea.Cmd
-	switch ev.Type {
-	case player.EventTitle:
-		tr, ok, suspect, lovedNow := m.core.NoteTitle(ev.Title, time.Now())
-		m.suspect = suspect
-		if ok {
-			text := tr.Title
-			if tr.Artist != "" {
-				text = tr.Artist + " " + m.th.G.Dot + " " + tr.Title
-			}
-			if text != m.track {
-				m.track = text
-				m.trackAt = m.now
-				// A new title invalidates the play count. Zero it now and
-				// let the query land, rather than showing the last track's.
-				m.trackKey, m.trackTitle, m.trackPlays = tr.ArtistKey, tr.Title, 0
-				extra = m.trackStatsCmd(tr.ArtistKey, tr.Title)
-			}
-			m.haveTrack = true
-			m.lovedTrack = lovedNow
-		} else {
-			m.haveTrack = false
-			m.track = ""
-			m.lovedTrack = false
-			m.trackKey, m.trackTitle, m.trackPlays = "", "", 0
-		}
-
-	case player.EventPlaying:
-		if m.ph == phTune {
-			m.core.MarkStationHealthy(m.st.UUID)
-			m.playStart = m.now
-		}
-		if m.ph != phDead {
-			m.ph = phPlay
-		}
-		m.wave.SetEnergy(1)
-
-	case player.EventBuffering:
-		if m.ph == phPlay {
-			m.ph = phBuffer
-		}
-		m.wave.SetEnergy(0.2)
-
-	case player.EventLevel:
-		l, r := ev.LevelL, ev.LevelR
-		if l == 0 && r == 0 && ev.Level > 0 {
-			// A backend that only measures a mono mixdown.
-			l, r = ev.Level, ev.Level
-		}
-		m.stereo = ev.Stereo
-		m.wave.SetStereoLevels(l, r, ev.Peak, m.now.Sub(m.start).Seconds())
-
-	case player.EventStreamError:
-		if m.haveSt {
-			m.core.MarkStationFailed(m.st.UUID)
-		}
-		m.note = "stream failed " + m.th.G.Dot + " moving on"
-		return m, tea.Batch(m.listen(), m.tuneDeadCmd())
-
-	case player.EventDied:
-		m.ph = phDead
-		m.fatal = "mpv exited " + m.th.G.Dot + " restart screech"
-		m.wave.SetEnergy(0.05) // the meter fizzles to its ember baseline
-		return m, nil
-	}
-	if extra != nil {
-		return m, tea.Batch(m.listen(), extra)
-	}
-	return m, m.listen()
+func (m Model) idle() bool {
+	return m.s.Phase == session.Playing && !m.prompt && m.now.Sub(m.lastKey) > idleAfter
 }
 
 // staticActive reports whether the tuning ceremony's static collapse is
@@ -1350,78 +537,10 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 // start that always ends at stream lock (or when the window elapses, so
 // the failure path fizzles into the baseline instead of freezing).
 func (m Model) staticActive() bool {
-	if m.ph != phTune && m.ph != phBuffer {
+	if m.reduceMotion || (m.s.Phase != session.Tuning && m.s.Phase != session.Buffering) {
 		return false
 	}
-	return m.now.Sub(m.tuneAt) < staticDur
-}
-
-func (m Model) innerWidth() int {
-	iw := m.w - 4
-	if iw > 92 {
-		iw = 92
-	}
-	if iw < 16 {
-		iw = maxI(m.w-2, 10)
-	}
-	return iw
-}
-
-// waveRenderWidth follows the active responsive composition. Wide terminals
-// give the signal its own instrument bay; compact terminals retain the full
-// stacked width.
-func (m Model) waveRenderWidth() int {
-	iw := m.innerWidth()
-	if iw >= 78 && m.h >= 14 {
-		_, _, right := receiverColumns(iw)
-		return right
-	}
-	return iw
-}
-
-// waveRenderRows mirrors waveRenderWidth for the vertical axis: the signal
-// bay only stretches inside the wide faceplate. The compact stacked layout
-// keeps a two-row meter, where it sits directly under the track and has no
-// room to grow.
-func (m Model) waveRenderRows() int {
-	iw := m.innerWidth()
-	contentH := m.contentHeight()
-	if iw >= 78 && m.h >= 14 && contentH >= 11 {
-		perChannel, _ := receiverLayout(contentH)
-		return perChannel
-	}
-	if iw >= 28 && m.h >= 14 && contentH >= 8 {
-		return stackedWaveRows(contentH)
-	}
-	return 1
-}
-
-// contentHeight is the room between the pinned header and the pinned key
-// strip. View computes the same number; both must agree or the wave will be
-// sized for a layout the renderer isn't using.
-func (m Model) contentHeight() int {
-	top := 2 // header bar + rule
-	if m.h < 8 {
-		top = 0
-	}
-	return m.h - top - 1
-}
-
-func (m Model) idle() bool {
-	return m.ph == phPlay && !m.prompt && m.now.Sub(m.lastKey) > idleAfter
-}
-
-// currentSlot returns the preset slot of the playing station, 0 if unsaved.
-func (m Model) currentSlot() int {
-	if !m.haveSt {
-		return 0
-	}
-	for s, u := range m.presets {
-		if u == m.st.UUID {
-			return s
-		}
-	}
-	return 0
+	return m.now.Sub(m.s.TuneAt) < staticDur
 }
 
 // stationDialPos maps a station identity to a stable position on the band

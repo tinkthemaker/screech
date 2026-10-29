@@ -26,21 +26,35 @@ jobs:
             gofmt -d .
             exit 1
           fi
+      - name: Module tidy
+        run: go mod tidy -diff
       - name: Vet
         run: go vet ./...
+      # Pinned, not latest: the tool must understand the go.mod language
+      # version, and a release that predates it fails opaque.
       - name: Staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
           staticcheck ./...
+      # The GUI shell and Win32 layer only compile under GOOS=windows; the
+      # same gates run against that view of the tree.
+      - name: Staticcheck (windows)
+        run: GOOS=windows staticcheck ./...
       - name: Test
         run: go test -race ./...
+      - name: Vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck ./...
+      - name: Vulnerability check (windows)
+        run: GOOS=windows govulncheck ./...
       # Windows and macOS are the platforms screech actually ships to, and
       # the IPC layer is build-tagged per OS. Compiling them here catches a
       # broken named-pipe path without waiting for a release.
       - name: Cross-compile check
         run: |
           set -euo pipefail
-          for target in windows/amd64 darwin/arm64 linux/arm64; do
+          for target in windows/amd64 windows/arm64 darwin/arm64 linux/arm64 freebsd/amd64; do
             GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 go build ./...
           done
 
@@ -63,3 +77,20 @@ jobs:
           cache: true
       - name: Test
         run: go test ./...
+      # Windows-only GUI gates: the production Wails build, and the headless
+      # Edge layout/keyboard guard whose screenshots are kept as artifacts.
+      - name: Build GUI
+        if: runner.os == 'Windows'
+        run: go build -tags desktop,production -trimpath -ldflags "-H windowsgui -s -w" -o screech-gui.exe ./cmd/screech-gui
+        env:
+          CGO_ENABLED: "0"
+      - name: GUI layout guard
+        if: runner.os == 'Windows'
+        run: go test -tags layout -run "Layout|KeyboardMap" -v ./internal/gui
+      - name: Layout screenshots
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-layout-${{ matrix.os }}
+          path: .review/gui/*.png
+          if-no-files-found: warn

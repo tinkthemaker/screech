@@ -1,33 +1,81 @@
 package tui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
-	"screech/internal/core"
-	"screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 type stubPlayer struct {
-	ch     chan player.Event
-	volume int
+	mu       sync.Mutex // like MPV's: the event channel swaps under it
+	ch       chan player.Event
+	volume   int
+	playURLs []string
+	playErr  error // injected Play failure
+	paused   bool
+	calls    []string // ordered log across Play/SetVolume/SetPaused/Restart
+	restarts int
+	closed   bool
 }
 
-func newStubPlayer() *stubPlayer            { return &stubPlayer{ch: make(chan player.Event, 8)} }
-func (s *stubPlayer) Play(url string) error { return nil }
+func newStubPlayer() *stubPlayer { return &stubPlayer{ch: make(chan player.Event, 8)} }
+func (s *stubPlayer) Play(url string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.playURLs = append(s.playURLs, url)
+	s.calls = append(s.calls, "play "+url)
+	return s.playErr
+}
 func (s *stubPlayer) SetVolume(percent int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.volume = percent
+	s.calls = append(s.calls, fmt.Sprintf("vol %d", percent))
+	return nil
+}
+func (s *stubPlayer) SetPaused(paused bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = paused
+	s.calls = append(s.calls, fmt.Sprintf("pause %t", paused))
 	return nil
 }
 func (s *stubPlayer) Events() <-chan player.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.ch
 }
-func (s *stubPlayer) Close() error { close(s.ch); return nil }
+
+// Restart swaps in a fresh event channel like a real backend respawn; the
+// old channel is left open — nobody should be listening to it anymore.
+func (s *stubPlayer) Restart() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restarts++
+	s.calls = append(s.calls, "restart")
+	s.ch = make(chan player.Event, 8)
+	return nil
+}
+func (s *stubPlayer) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+	return nil
+}
 
 func testModel(t *testing.T) Model {
 	t.Helper()
@@ -71,23 +119,23 @@ func TestViewNeverOverflows(t *testing.T) {
 		m.start = m.now.Add(-time.Minute)
 		st := core.SeedStations()[1]
 		st.Name = "The Interminable Frequencies Of The Outer Aetheric Reaches International"
-		m.st = st
-		m.haveSt = true
-		m.ph = phPlay
-		m.playStart = m.now.Add(-90 * time.Minute)
-		m.track = "An Artist With A Very Long Name " + "· A Title That Goes On And On Forever And Then Some More"
-		m.haveTrack = true
+		m.s.Station = st
+		m.s.HaveStation = true
+		m.s.Phase = session.Playing
+		m.s.PlayStart = m.now.Add(-90 * time.Minute)
+		m.setTrack("An Artist With A Very Long Name", "A Title That Goes On And On Forever And Then Some More")
+		m.s.HaveTrack = true
 		m.trackAt = m.now.Add(-10 * time.Second)
-		m.reason = "plays 3 artists you love and also this reason is extremely long"
-		m.tw = NewTypewriter(m.reason, m.now.Add(-time.Minute))
+		m.s.Reason = "plays 3 artists you love and also this reason is extremely long"
+		m.tw = NewTypewriter(m.s.Reason, m.now.Add(-time.Minute))
 		assertFits(t, m.View(), sz.w, sz.h)
 
 		// Decrypt mid-flight.
-		m.decrypt = NewDecrypt(strings.ToUpper(st.Name), m.now.Add(-200*time.Millisecond))
+		m.decrypt = NewDecrypt(m.now.Add(-200 * time.Millisecond))
 		assertFits(t, m.View(), sz.w, sz.h)
 
 		// Loved flash frame.
-		m.lovedTrack = true
+		m.s.LovedTrack = true
 		m.loveAt = m.now.Add(-50 * time.Millisecond)
 		assertFits(t, m.View(), sz.w, sz.h)
 
@@ -115,6 +163,26 @@ func TestMarqueeContract(t *testing.T) {
 	head := marquee(long, 10, anchor.Add(500*time.Millisecond), anchor, "…")
 	if !strings.HasPrefix(head, "0123") {
 		t.Errorf("expected head during pre-pause, got %q", head)
+	}
+	// One pass, then it rests: well past a full cycle the title sits on its
+	// ellipsis-truncated head — and stays identical forever after.
+	rest := marquee(long, 10, anchor.Add(20*time.Second), anchor, "…")
+	if rest != runewidth.Truncate(long, 10, "…") {
+		t.Fatalf("after the pass the title should rest truncated, got %q", rest)
+	}
+	if marquee(long, 10, anchor.Add(60*time.Second), anchor, "…") != rest {
+		t.Fatal("the rest state must be permanent, not a loop")
+	}
+	// During the closing pause the offset clamps at overflow — the tail
+	// holds full-width instead of shrinking off the left edge.
+	overflow := runewidth.StringWidth(long) - 10
+	holdAt := 2*time.Second + time.Duration(overflow)*140*time.Millisecond + time.Second
+	tail := marquee(long, 10, anchor.Add(holdAt), anchor, "…")
+	if tail != sliceCols(long, overflow, 10) {
+		t.Fatalf("end pause should hold the tail, got %q", tail)
+	}
+	if w := lipgloss.Width(tail); w != 10 {
+		t.Fatalf("clamped tail must fill the width: %q is %d cols", tail, w)
 	}
 }
 
@@ -157,10 +225,10 @@ func TestFaceplateClaimsTheTerminal(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 110, 32
 	m.start = m.now.Add(-time.Minute)
-	m.st = core.SeedStations()[0]
-	m.haveSt = true
-	m.ph = phPlay
-	m.reason = "wildcard"
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
+	m.s.Reason = "wildcard"
 	lines := strings.Split(m.View(), "\n")
 	if len(lines) != m.h {
 		t.Fatalf("view must fill the terminal exactly: %d lines for height %d", len(lines), m.h)
@@ -190,13 +258,13 @@ func TestWideReceiverComposition(t *testing.T) {
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: 110, Height: 32})
 	m = mm.(Model)
 	m.start = m.now.Add(-time.Minute)
-	m.st = core.SeedStations()[0]
-	m.haveSt = true
-	m.ph = phPlay
-	m.track = "Tycho · A Walk"
-	m.haveTrack = true
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
+	m.setTrack("Tycho", "A Walk")
+	m.s.HaveTrack = true
 	m.trackAt = m.now.Add(-time.Minute)
-	m.reason = "plays 3 artists you love"
+	m.s.Reason = "plays 3 artists you love"
 
 	view := m.View()
 	for _, want := range []string{

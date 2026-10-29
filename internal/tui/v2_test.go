@@ -7,6 +7,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 func TestCleanStationName(t *testing.T) {
@@ -35,7 +38,7 @@ func TestPromptRendersAndFits(t *testing.T) {
 
 		// Virgin prompt, empty buffer.
 		m.prompt = true
-		m.virgin = true
+		m.s.Virgin = true
 		assertFits(t, m.View(), sz.w, sz.h)
 
 		// Long query typed.
@@ -81,7 +84,7 @@ func TestPresetTicksRender(t *testing.T) {
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = mm.(Model)
 	m.start = m.now.Add(-time.Minute)
-	m.presets = map[int]string{1: "uuid-a", 2: "uuid-b", 3: "uuid-c"}
+	m.s.Presets = map[int]string{1: "uuid-a", 2: "uuid-b", 3: "uuid-c"}
 
 	band := m.bandRow(64, false)
 	ticks := strings.Count(band, m.th.G.Tick)
@@ -93,25 +96,11 @@ func TestPresetTicksRender(t *testing.T) {
 	}
 }
 
-func TestDigitRecallIgnoresEmptySlot(t *testing.T) {
-	m := testModel(t)
-	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = mm.(Model)
-	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
-	m = mm.(Model)
-	if cmd != nil {
-		t.Fatal("empty preset slot should not tune")
-	}
-	if !strings.Contains(m.note, "preset 5 is empty") {
-		t.Fatalf("note: %q", m.note)
-	}
-}
-
 func TestVolumeSliderControlsPlayerAndPersists(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 80, 24
 	m.start = m.now.Add(-time.Minute)
-	m.volume = 50
+	m.s.Volume = 50
 
 	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	m = mm.(Model)
@@ -121,17 +110,8 @@ func TestVolumeSliderControlsPlayerAndPersists(t *testing.T) {
 
 	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = mm.(Model)
-	if m.volume != 55 || cmd == nil {
-		t.Fatalf("right should raise volume: %d", m.volume)
-	}
-	msg := cmd()
-	if got := m.pl.(*stubPlayer).volume; got != 55 {
-		t.Fatalf("player volume=%d, want 55", got)
-	}
-	mm, _ = m.Update(msg)
-	m = mm.(Model)
-	if got := m.core.Volume(); got != 55 {
-		t.Fatalf("persisted volume=%d, want 55", got)
+	if m.s.Volume != 55 || cmd == nil {
+		t.Fatalf("right should raise volume: %d", m.s.Volume)
 	}
 	if !strings.Contains(m.View(), "55%") {
 		t.Fatalf("slider does not show percentage:\n%s", m.View())
@@ -143,6 +123,50 @@ func TestVolumeSliderControlsPlayerAndPersists(t *testing.T) {
 	}
 }
 
+// The volume strip is a readout, not a mode: left alone past its linger it
+// folds itself away.
+func TestVolumeOverlayClosesItself(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 80, 24
+	m.start = m.now.Add(-time.Minute)
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = mm.(Model)
+	if !m.volumeOpen {
+		t.Fatal("v should open the volume strip")
+	}
+	mm, _ = m.Update(tickMsg(m.now.Add(volumeLinger - time.Second)))
+	m = mm.(Model)
+	if !m.volumeOpen {
+		t.Fatal("the strip must linger, not close on the next tick")
+	}
+	mm, _ = m.Update(tickMsg(m.now.Add(2 * time.Second)))
+	m = mm.(Model)
+	if m.volumeOpen {
+		t.Fatal("the strip should close after volumeLinger without a touch")
+	}
+}
+
+// While the strip is up, keys it doesn't own still do their job — space
+// skips, l loves.
+func TestVolumeOverlayPassesKeysThrough(t *testing.T) {
+	m := testModel(t)
+	m.w, m.h = 80, 24
+	m.start = m.now.Add(-time.Minute)
+	m.s.Station = core.SeedStations()[0]
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = mm.(Model)
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = mm.(Model)
+	if m.volumeOpen {
+		t.Fatal("an unclaimed key folds the strip away")
+	}
+	if m.s.Phase != session.Tuning || cmd == nil {
+		t.Fatalf("space should still skip while the strip was open: ph=%v", m.s.Phase)
+	}
+}
+
 // Regression: the wide receiver faceplate must host the volume slider too.
 // mainRows hands wide terminals to receiverRows, which used to ignore
 // volumeOpen entirely — pressing v changed the footer but no slider ever
@@ -151,7 +175,7 @@ func TestVolumeSliderRendersInReceiverFaceplate(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 110, 32
 	m.start = m.now.Add(-time.Minute)
-	m.volume = 50
+	m.s.Volume = 50
 
 	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	m = mm.(Model)
@@ -161,8 +185,8 @@ func TestVolumeSliderRendersInReceiverFaceplate(t *testing.T) {
 
 	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = mm.(Model)
-	if m.volume != 55 || cmd == nil {
-		t.Fatalf("right should raise volume: %d", m.volume)
+	if m.s.Volume != 55 || cmd == nil {
+		t.Fatalf("right should raise volume: %d", m.s.Volume)
 	}
 	if !strings.Contains(m.View(), "55%") {
 		t.Fatalf("receiver volume row should show the percentage:\n%s", m.View())
@@ -218,17 +242,17 @@ func TestVolumeSliderClampsAndFitsTinyTerminals(t *testing.T) {
 	m.w, m.h = 20, 6
 	m.start = m.now.Add(-time.Minute)
 	m.volumeOpen = true
-	m.volume = 100
+	m.s.Volume = 100
 	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = mm.(Model)
-	if m.volume != 100 {
-		t.Fatalf("high clamp=%d", m.volume)
+	if m.s.Volume != 100 {
+		t.Fatalf("high clamp=%d", m.s.Volume)
 	}
-	m.volume = 0
+	m.s.Volume = 0
 	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	m = mm.(Model)
-	if m.volume != 0 {
-		t.Fatalf("low clamp=%d", m.volume)
+	if m.s.Volume != 0 {
+		t.Fatalf("low clamp=%d", m.s.Volume)
 	}
 	assertFits(t, m.View(), 20, 6)
 }

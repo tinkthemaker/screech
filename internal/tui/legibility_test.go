@@ -10,7 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // Screech is an ambient object: on screen for hours, read from across the
@@ -319,14 +320,15 @@ func playingAt(t *testing.T, w, h int) Model {
 	m.lastKey, m.lastAct = m.now, m.now
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	m = mm.(Model)
-	m.ph, m.syncing = phPlay, false
-	m.haveSt, m.haveTrack, m.stereo = true, true, true
-	m.st = core.Station{UUID: "u1", Name: "BADROCK HARD & HEAVY", Codec: "MP3",
+	m.s.Phase, m.s.Syncing = session.Playing, false
+	m.s.HaveStation, m.s.HaveTrack, m.stereo = true, true, true
+	m.s.Station = core.Station{UUID: "u1", Name: "BADROCK HARD & HEAVY", Codec: "MP3",
 		Bitrate: 320, Tags: "heavy metal, hard rock, thrash"}
-	m.playStart = m.now.Add(-56 * time.Second)
-	m.track = "Cradle Of Filth · Right Wing of the Garden Triptych"
-	m.reason = "preset 4"
-	m.tw = NewTypewriter(m.reason, m.now.Add(-5*time.Second))
+	m.s.PlayStart = m.now.Add(-56 * time.Second)
+	m.setTrack("Cradle Of Filth", "Right Wing of the Garden Triptych")
+	m.s.HaveTrack = true
+	m.s.Reason = "preset 4"
+	m.tw = NewTypewriter(m.s.Reason, m.now.Add(-5*time.Second))
 	return m
 }
 
@@ -396,7 +398,7 @@ func TestFaceplateShowsStationTags(t *testing.T) {
 		t.Errorf("the faceplate should carry the station's tags:\n%s", view)
 	}
 	// A station with no tags drops the block rather than showing an orphan label.
-	m.st.Tags = ""
+	m.s.Station.Tags = ""
 	view = stripANSI(strings.Join(m.receiverRows(m.innerWidth(), m.contentHeight()), "\n"))
 	if strings.Contains(view, "GENRE") {
 		t.Error("an untagged station should not render an empty GENRE label")
@@ -408,7 +410,7 @@ func TestFaceplateShowsStationTags(t *testing.T) {
 // strip, the band, and the slot digits now.
 func TestDialIsAMultiRowInstrument(t *testing.T) {
 	m := playingAt(t, 120, 40)
-	m.presets = map[int]string{1: "aa", 4: "u1", 7: "cc"}
+	m.s.Presets = map[int]string{1: "aa", 4: "u1", 7: "cc"}
 
 	// With no listening history there is no distribution, so the strip is
 	// absent rather than blank.
@@ -476,9 +478,9 @@ func TestDialDensityTracksListening(t *testing.T) {
 func TestDialDigitsNeverAbut(t *testing.T) {
 	m := playingAt(t, 120, 40)
 	// Nine presets on a narrow scale is the worst case for collisions.
-	m.presets = map[int]string{}
+	m.s.Presets = map[int]string{}
 	for i := 1; i <= 9; i++ {
-		m.presets[i] = fmt.Sprintf("station-%d", i)
+		m.s.Presets[i] = fmt.Sprintf("station-%d", i)
 	}
 	for _, width := range []int{24, 32, 48, 64} {
 		row := stripANSI(m.dialDigits(width, m.th))
@@ -516,20 +518,20 @@ func TestBaysAreSeparatedByASeam(t *testing.T) {
 // receiver the track is what's playing and the station is where it's from.
 func TestOnlyTheTrackTitleIsTheHero(t *testing.T) {
 	m := playingAt(t, 120, 40)
-	m.st.Name = "BADROCK"
+	m.s.Station.Name = "BADROCK"
 	view := stripANSI(strings.Join(m.receiverRows(m.innerWidth(), m.contentHeight()), "\n"))
 	if !strings.Contains(view, "B A D R O C K") {
 		t.Errorf("a short station name should read as a letterspaced source plate:\n%s", view)
 	}
 	// Past the gate it stays plain uppercase: letterspacing a long directory
 	// name is legible in principle and unreadable in practice.
-	m.st.Name = "BADROCK HARD & HEAVY"
+	m.s.Station.Name = "BADROCK HARD & HEAVY"
 	view = stripANSI(strings.Join(m.receiverRows(m.innerWidth(), m.contentHeight()), "\n"))
 	if !strings.Contains(view, "BADROCK HARD & HEAVY") {
 		t.Errorf("a long station name should fall back to plain caps:\n%s", view)
 	}
 	// And a name too long for the bay truncates rather than overflowing.
-	m.st.Name = "A Very Long Station Name That Cannot Possibly Fit In The Left Bay"
+	m.s.Station.Name = "A Very Long Station Name That Cannot Possibly Fit In The Left Bay"
 	assertFits(t, m.View(), 120, 40)
 }
 
@@ -539,7 +541,7 @@ func TestPanelCarriesItsFigures(t *testing.T) {
 	m := playingAt(t, 120, 40)
 	m.stTotal = 4*time.Hour + 12*time.Minute
 	m.trackPlays = 3
-	m.presets = map[int]string{1: "aa", 4: "u1"}
+	m.s.Presets = map[int]string{1: "aa", 4: "u1"}
 	view := stripANSI(strings.Join(m.receiverRows(m.innerWidth(), m.contentHeight()), "\n"))
 	for _, want := range []string{"4h 12m", "heard 3", "2 SAVED", "2 CH"} {
 		if !strings.Contains(view, want) {
@@ -576,7 +578,7 @@ func TestStaticCollapseMatchesTheWaveRowCount(t *testing.T) {
 	for _, rows := range []int{1, 2, 3} {
 		m := playingAt(t, 120, 40)
 		m.wave.SetRows(rows)
-		m.ph, m.tuneAt = phTune, m.now
+		m.s.Phase, m.s.TuneAt = session.Tuning, m.now
 		got := m.staticRows(20, m.th)
 		if len(got) != rows*2 {
 			t.Fatalf("rows=%d: static collapse produced %d rows, want %d", rows, len(got), rows*2)

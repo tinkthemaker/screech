@@ -2,10 +2,19 @@ package core
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/tinkthemaker/screech/internal/streamurl"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Station is a cached radio-browser entry plus screech's own columns.
@@ -58,16 +67,22 @@ func (s *Station) StreamURL() string {
 	return s.URL
 }
 
-// schemaVersion is stamped into meta on open. Nothing reads it yet, which
-// is the point: the first migration that needs to tell an old database from
-// a new one can't retroactively ask a database that never recorded this.
-const schemaVersion = "1"
+// queryer is the small surface the store needs from *sql.DB or *sql.Tx.
+type queryer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
 
 type Store struct {
 	db *sql.DB
+	q  queryer
+	// recoveredFrom records where a corrupted database was archived during
+	// OpenStore, so the app can tell the user the cache started over.
+	recoveredFrom string
 }
 
-func OpenStore(path string) (*Store, error) {
+func openOne(path string) (*Store, error) {
 	// The path is escaped: a data_dir carrying '?', '#', or '&' would
 	// otherwise truncate the DSN into an unrelated (or invalid) one, and the
 	// driver error that follows says nothing about the real cause.
@@ -78,16 +93,12 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // single writer; screech is a one-process app
-	s := &Store{db: db}
+	s := &Store{db: db, q: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
-	// Stamp the schema version, leaving an existing stamp alone. Every
-	// database that has ever existed is at version 1, so claiming it for
-	// the unstamped ones is accurate rather than optimistic.
-	if _, err := db.Exec(`INSERT INTO meta(key,value) VALUES('schema_version', ?)
-		ON CONFLICT(key) DO NOTHING`, schemaVersion); err != nil {
+	if err := s.quickCheck(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -98,11 +109,38 @@ func OpenStore(path string) (*Store, error) {
 	// session is "we don't know how long it played", not "zero credit
 	// for a listen that may have run for hours".
 	cutoff := time.Now().Add(-2 * time.Minute)
-	if _, err := db.Exec(`UPDATE listens SET ended_at=started_at WHERE ended_at IS NULL AND started_at < ?`, cutoff.Unix()); err != nil {
+	if _, err := s.q.Exec(`UPDATE listens SET ended_at=started_at WHERE ended_at IS NULL AND started_at < ?`, cutoff.Unix()); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+func OpenStore(path string) (*Store, error) {
+	var lastErr error
+	var archived string
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			// The first attempt found corruption: move the bad file aside
+			// and try to build a fresh database. Seed stations will be
+			// restored on the next directory sync.
+			bak, err := archiveCorruptDB(path)
+			if err != nil {
+				return nil, err
+			}
+			archived = bak
+		}
+		s, err := openOne(path)
+		if err == nil {
+			s.recoveredFrom = archived
+			return s, nil
+		}
+		lastErr = err
+		if !isCorruption(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("could not open database after corruption recovery: %w", lastErr)
 }
 
 // escapeDSNPath percent-encodes the three characters that change how a
@@ -114,10 +152,94 @@ func escapeDSNPath(path string) string {
 
 var dsnPathEscaper = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
 
-func (s *Store) Close() error { return s.db.Close() }
+// errIntegrity marks a database that opened fine but failed quick_check.
+// It is corruption by definition — a clean open only proves the header
+// parsed — so OpenStore recovers from it like any other damaged file.
+var errIntegrity = errors.New("database failed integrity check")
 
-func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+func isCorruption(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errIntegrity) {
+		return true
+	}
+	var se *sqlite.Error
+	if errors.As(err, &se) {
+		switch se.Code() & 0xff {
+		case sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB:
+			return true
+		}
+	}
+	s := err.Error()
+	return strings.Contains(s, "database disk image is malformed") ||
+		strings.Contains(s, "database is malformed") ||
+		strings.Contains(s, "file is not a database") ||
+		strings.Contains(s, "database corruption")
+}
+
+// archiveCorruptDB moves a damaged database (and its WAL/SHM companions —
+// a stale journal left next to a fresh database can be replayed into it)
+// aside, and returns the stem they were moved to.
+func archiveCorruptDB(path string) (string, error) {
+	bak := path + ".corrupt." + strconv.FormatInt(time.Now().Unix(), 10)
+	if err := os.Rename(path, bak); err != nil {
+		return "", err
+	}
+	for _, ext := range []string{"-wal", "-shm"} {
+		if err := os.Rename(path+ext, bak+ext); err != nil && !os.IsNotExist(err) {
+			return bak, err
+		}
+	}
+	return bak, nil
+}
+
+// OpenStoreReadOnly opens an existing database for inspection without
+// creating files, writing schema, or touching user data. It is used by the
+// doctor command and is intentionally read-only.
+func OpenStoreReadOnly(path string) (*Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	dsn := "file:" + escapeDSNPath(path) + "?_pragma=busy_timeout(5000)&mode=ro"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db, q: db}
+	// sql.Open is lazy: without a probe a garbage file would report ok.
+	if err := s.quickCheck(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error {
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// Begin starts a transaction. The caller is responsible for Commit/Rollback.
+func (s *Store) Begin() (*sql.Tx, error) { return s.db.Begin() }
+
+// WithTx returns a Store that executes all queries inside the given
+// transaction. Use it to group multiple persistence operations atomically.
+func (s *Store) WithTx(tx *sql.Tx) *Store { return &Store{q: tx} }
+
+type migration struct {
+	version int
+	sql     string
+	// fn runs after sql inside the same transaction, for migrations that
+	// need to touch rows (rewrite, backfill) rather than only schema.
+	fn func(tx *sql.Tx) error
+}
+
+var migrations = []migration{
+	{1, `
 CREATE TABLE IF NOT EXISTS stations(
 	uuid TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -165,8 +287,6 @@ CREATE TABLE IF NOT EXISTS loved(
 	title TEXT NOT NULL DEFAULT '',
 	loved_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_loved_artist_title ON loved(artist_key, title);
-CREATE INDEX IF NOT EXISTS idx_loved_station ON loved(station_uuid);
 CREATE TABLE IF NOT EXISTS bandit(
 	station_uuid TEXT NOT NULL,
 	daypart TEXT NOT NULL,
@@ -189,13 +309,353 @@ CREATE TABLE IF NOT EXISTS presets(
 	station_uuid TEXT NOT NULL,
 	saved_at INTEGER NOT NULL
 );
-`)
-	return err
+`, nil},
+	// The love toggle, the heart on every title change, and unlove all
+	// look up loved rows by (artist_key, title) or by station; without
+	// these each one is a full scan of a table that only grows.
+	{2, `
+CREATE INDEX IF NOT EXISTS idx_loved_artist_title ON loved(artist_key, title);
+CREATE INDEX IF NOT EXISTS idx_loved_station ON loved(station_uuid);
+`, nil},
+	// Rows written before CleanText existed can carry double spaces or
+	// control bytes that the cleaned ingest now differs from: a track
+	// loved under an older version must still toggle, forget, and count
+	// under its cleaned name.
+	{3, "", normalizeTextRows},
+	// Before the player suppressed mpv's URL-basename media-title, every
+	// tune logged the stream filename ("aac-128") as a heard track.
+	{4, "", purgeFilenameTracks},
+	// mpv's real fallback is wider than a URL basename: decoded text after
+	// the last '/' of the whole URL, query included — rows like
+	// "rqqps6cbe3quv?rj-ttl=5&rj-tok=AA" went in as tracks.
+	{5, "", purgeMpvFilenameTracks},
+}
+
+func (s *Store) migrate() error {
+	var v int
+	if err := s.q.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	for _, m := range migrations {
+		if m.version <= v {
+			continue
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		if m.sql != "" {
+			if _, err := tx.Exec(m.sql); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if m.fn != nil {
+			if err := m.fn(tx); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		// The version stamp belongs to the migration's transaction: a
+		// crash between commit and stamp would re-run a migration that
+		// may not be idempotent.
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// normalizeTextRows rewrites each table's display text through CleanText,
+// in place. A changed artist also gets its key recomputed — artist_key is
+// NormalizeArtist's output — while an unchanged artist keeps the stored
+// key (seeding writes pseudo-love rows whose key exists with an empty
+// title). Changed rows are collected before any UPDATE runs: exec while
+// iterating deadlocks on this single-connection database.
+func normalizeTextRows(tx *sql.Tx) error {
+	for _, table := range []struct {
+		name string
+		cols []string
+	}{
+		{"loved", []string{"artist_key", "artist", "title"}},
+		{"tracks_heard", []string{"artist_key", "artist", "title", "raw"}},
+	} {
+		if err := cleanTableRows(tx, table.name, table.cols); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cleanTableRows(tx *sql.Tx, table string, cols []string) error {
+	keyIdx, artIdx := -1, -1
+	for i, col := range cols {
+		switch col {
+		case "artist_key":
+			keyIdx = i
+		case "artist":
+			artIdx = i
+		}
+	}
+	rows, err := tx.Query(`SELECT id,` + strings.Join(cols, `,`) + ` FROM ` + table)
+	if err != nil {
+		return err
+	}
+	var updates [][]any
+	for rows.Next() {
+		var id int64
+		vals := make([]string, len(cols))
+		dest := make([]any, 0, len(cols)+1)
+		dest = append(dest, &id)
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			rows.Close()
+			return err
+		}
+		cleaned := make([]string, len(cols))
+		for i, v := range vals {
+			cleaned[i] = CleanText(v)
+		}
+		if artIdx >= 0 && keyIdx >= 0 && cleaned[artIdx] != vals[artIdx] {
+			cleaned[keyIdx] = NormalizeArtist(cleaned[artIdx])
+		}
+		changed := false
+		for i := range vals {
+			if cleaned[i] != vals[i] {
+				changed = true
+				break
+			}
+		}
+		if changed {
+			args := make([]any, 0, len(cols)+1)
+			for _, v := range cleaned {
+				args = append(args, v)
+			}
+			updates = append(updates, append(args, id))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(updates) == 0 {
+		return nil
+	}
+	sets := make([]string, len(cols))
+	for i, col := range cols {
+		sets[i] = col + "=?"
+	}
+	stmt, err := tx.Prepare(`UPDATE ` + table + ` SET ` + strings.Join(sets, `,`) + ` WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, args := range updates {
+		if _, err := stmt.Exec(args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// urlBasenames returns the unescaped and escaped last path segment of a
+// stream URL — the values mpv may report as media-title before ICY metadata
+// arrives. Mirrors the player's curFile rule; duplicated here rather than
+// shared so core doesn't import the player package.
+func urlBasenames(rawurl string) (string, string) {
+	u, err := url.Parse(rawurl)
+	if err != nil || u.Path == "" || u.Path == "/" {
+		return "", ""
+	}
+	return path.Base(u.Path), path.Base(u.EscapedPath())
+}
+
+// purgeFilenameTracks deletes tracks_heard rows that are only mpv's
+// URL-basename media-title masquerading as a track: no artist, and a title
+// equal to the basename of that row's station URL. loved rows are left
+// alone — loving one was a deliberate act.
+func purgeFilenameTracks(tx *sql.Tx) error {
+	names := map[string][]string{}
+	srows, err := tx.Query(`SELECT uuid, url, url_resolved FROM stations`)
+	if err != nil {
+		return err
+	}
+	for srows.Next() {
+		var uuid, u, ur string
+		if err := srows.Scan(&uuid, &u, &ur); err != nil {
+			srows.Close()
+			return err
+		}
+		for _, raw := range []string{u, ur} {
+			if base, esc := urlBasenames(raw); base != "" {
+				names[uuid] = append(names[uuid], base, esc)
+			}
+		}
+	}
+	srows.Close()
+	if err := srows.Err(); err != nil {
+		return err
+	}
+
+	var ids []int64
+	trows, err := tx.Query(`SELECT id, station_uuid, title FROM tracks_heard
+		WHERE artist_key = '' AND artist = '' AND title <> ''`)
+	if err != nil {
+		return err
+	}
+	for trows.Next() {
+		var id int64
+		var uuid, title string
+		if err := trows.Scan(&id, &uuid, &title); err != nil {
+			trows.Close()
+			return err
+		}
+		if slices.Contains(names[uuid], title) {
+			ids = append(ids, id)
+		}
+	}
+	trows.Close()
+	if err := trows.Err(); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`DELETE FROM tracks_heard WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		if _, err := stmt.Exec(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// purgeMpvFilenameTracks is migration 4's purge under mpv's real filename
+// rule: the percent-decoded text after the last '/' of the whole URL,
+// query string included. Same shape — artist-less titles only, matched
+// against that row's own station URLs, loved untouched.
+func purgeMpvFilenameTracks(tx *sql.Tx) error {
+	names := map[string][]string{}
+	srows, err := tx.Query(`SELECT uuid, url, url_resolved FROM stations`)
+	if err != nil {
+		return err
+	}
+	for srows.Next() {
+		var uuid, u, ur string
+		if err := srows.Scan(&uuid, &u, &ur); err != nil {
+			srows.Close()
+			return err
+		}
+		for _, raw := range []string{u, ur} {
+			names[uuid] = append(names[uuid], streamurl.MpvFilenames(raw)...)
+		}
+	}
+	srows.Close()
+	if err := srows.Err(); err != nil {
+		return err
+	}
+
+	var ids []int64
+	trows, err := tx.Query(`SELECT id, station_uuid, title FROM tracks_heard
+		WHERE artist_key = '' AND artist = '' AND title <> ''`)
+	if err != nil {
+		return err
+	}
+	for trows.Next() {
+		var id int64
+		var uuid, title string
+		if err := trows.Scan(&id, &uuid, &title); err != nil {
+			trows.Close()
+			return err
+		}
+		if slices.Contains(names[uuid], title) {
+			ids = append(ids, id)
+		}
+	}
+	trows.Close()
+	if err := trows.Err(); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`DELETE FROM tracks_heard WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		if _, err := stmt.Exec(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// quickCheck runs PRAGMA quick_check and returns an error if the database
+// is anything other than healthy.
+func (s *Store) quickCheck() error {
+	var ok string
+	if err := s.q.QueryRow(`PRAGMA quick_check`).Scan(&ok); err != nil {
+		return err
+	}
+	if ok != "ok" {
+		return fmt.Errorf("%w: %s", errIntegrity, ok)
+	}
+	return nil
+}
+
+// SchemaVersion reports the schema stamp, PRAGMA user_version: the
+// authoritative record of which migrations this database has had.
+func (s *Store) SchemaVersion() (int, error) {
+	var v int
+	err := s.q.QueryRow(`PRAGMA user_version`).Scan(&v)
+	return v, err
 }
 
 // --- stations ---
 
+// UpsertStations merges a directory slice into the station cache. Every
+// column here is directory-owned and refreshed wholesale, with two
+// exceptions: fail_count is local and only ever forgiven a strike, and
+// ad_risk is the one value Screech computes rather than receives.
+//
+// ComputeAdRisk is deterministic over the very columns being refreshed, so
+// overwriting it costs nothing today. That stops being true the moment a
+// second source of ad-risk exists (a lazily judged score, a user override):
+// this clause would erase it on the next weekly sync. Keep such a value in
+// its own table keyed by uuid rather than widening this one.
+// upsertChunk bounds one transaction's size. The store runs on a single
+// connection, so a 20k-row sync transaction would hold the writer for its
+// whole duration and block every UI-thread read (love, titles, presets).
+const upsertChunk = 500
+
 func (s *Store) UpsertStations(sts []Station, fetchedAt time.Time) error {
+	ts := fetchedAt.Unix()
+	for start := 0; start < len(sts); start += upsertChunk {
+		end := start + upsertChunk
+		if end > len(sts) {
+			end = len(sts)
+		}
+		if err := s.upsertStations(sts[start:end], ts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) upsertStations(sts []Station, ts int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -215,7 +675,6 @@ func (s *Store) UpsertStations(sts []Station, fetchedAt time.Time) error {
 		return err
 	}
 	defer stmt.Close()
-	ts := fetchedAt.Unix()
 	for _, st := range sts {
 		ok := 0
 		if st.LastCheckOK {
@@ -230,7 +689,7 @@ func (s *Store) UpsertStations(sts []Station, fetchedAt time.Time) error {
 }
 
 func (s *Store) LoadStations() ([]Station, error) {
-	rows, err := s.db.Query(`SELECT uuid,name,url,url_resolved,homepage,tags,country,codec,
+	rows, err := s.q.Query(`SELECT uuid,name,url,url_resolved,homepage,tags,country,codec,
 		bitrate,votes,clickcount,lastcheckok,ad_risk,fail_count FROM stations`)
 	if err != nil {
 		return nil, err
@@ -246,18 +705,34 @@ func (s *Store) LoadStations() ([]Station, error) {
 			return nil, err
 		}
 		st.LastCheckOK = ok == 1
+		// Rows written before display-text sanitization existed can still
+		// carry terminal escapes; clean at read so old data is safe too.
+		st.Name = CleanText(st.Name)
+		st.Tags = CleanText(st.Tags)
+		st.Country = CleanText(st.Country)
+		st.Codec = CleanText(st.Codec)
+		st.Homepage = CleanText(st.Homepage)
 		out = append(out, st)
 	}
 	return out, rows.Err()
 }
 
+func (s *Store) StationCount() (int, error) {
+	var n int
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM stations`).Scan(&n)
+	return n, err
+}
+
 // PruneStale deletes stations the directory no longer vouches for: fetched
 // before the given cutoff, absent from the fresh slice, and carrying no user
-// history. Seeds, presets, anything listened to, loved on, or scored by the
-// bandit, and the resume station all survive regardless.
+// history. Seeds, the listener's own (custom:) stations, presets, anything
+// listened to, loved on, or scored by the bandit, and the resume station
+// all survive regardless. The directory never lists a custom: station, so
+// without its exemption every sync would delete it.
 func (s *Store) PruneStale(before time.Time, keepUUID string) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM stations WHERE fetched_at < ?
+	res, err := s.q.Exec(`DELETE FROM stations WHERE fetched_at < ?
 		AND uuid NOT LIKE 'seed:%'
+		AND uuid NOT LIKE 'custom:%'
 		AND uuid != ?
 		AND uuid NOT IN (SELECT DISTINCT station_uuid FROM bandit)
 		AND uuid NOT IN (SELECT DISTINCT station_uuid FROM listens)
@@ -270,15 +745,51 @@ func (s *Store) PruneStale(before time.Time, keepUUID string) (int64, error) {
 	return res.RowsAffected()
 }
 
+// DeleteCustomExcept drops the listener-added station rows whose uuid is
+// not in keep: links taken out of config.toml. Their preset slots go too,
+// since a slot for a station that isn't there recalls nothing. Listens,
+// loves, heard tracks and bandit counts stay under the uuid, so adding the
+// same link back picks its history up again.
+func (s *Store) DeleteCustomExcept(keep map[string]bool) (int64, error) {
+	rows, err := s.q.Query(`SELECT uuid FROM stations WHERE uuid LIKE 'custom:%'`)
+	if err != nil {
+		return 0, err
+	}
+	var gone []string
+	for rows.Next() {
+		var uuid string
+		if err := rows.Scan(&uuid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !keep[uuid] {
+			gone = append(gone, uuid)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, uuid := range gone {
+		if _, err := s.q.Exec(`DELETE FROM presets WHERE station_uuid=?`, uuid); err != nil {
+			return 0, err
+		}
+		if _, err := s.q.Exec(`DELETE FROM stations WHERE uuid=?`, uuid); err != nil {
+			return 0, err
+		}
+	}
+	return int64(len(gone)), nil
+}
+
 func (s *Store) BumpFailCount(uuid string, delta int) error {
-	_, err := s.db.Exec(`UPDATE stations SET fail_count = MAX(0, fail_count + ?) WHERE uuid = ?`, delta, uuid)
+	_, err := s.q.Exec(`UPDATE stations SET fail_count = MAX(0, fail_count + ?) WHERE uuid = ?`, delta, uuid)
 	return err
 }
 
 // --- listens / tracks / loved ---
 
 func (s *Store) InsertListen(station string, start time.Time, daypart string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO listens(station_uuid, started_at, daypart) VALUES(?,?,?)`,
+	res, err := s.q.Exec(`INSERT INTO listens(station_uuid, started_at, daypart) VALUES(?,?,?)`,
 		station, start.Unix(), daypart)
 	if err != nil {
 		return 0, err
@@ -287,19 +798,19 @@ func (s *Store) InsertListen(station string, start time.Time, daypart string) (i
 }
 
 func (s *Store) FinishListen(id int64, end time.Time, skipFast, duringAd bool) error {
-	_, err := s.db.Exec(`UPDATE listens SET ended_at=?, skip_fast=?, during_ad=? WHERE id=?`,
+	_, err := s.q.Exec(`UPDATE listens SET ended_at=?, skip_fast=?, during_ad=? WHERE id=?`,
 		end.Unix(), b2i(skipFast), b2i(duringAd), id)
 	return err
 }
 
 func (s *Store) InsertTrack(station, artistKey, artist, title, raw string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO tracks_heard(station_uuid,artist_key,artist,title,raw,heard_at)
+	_, err := s.q.Exec(`INSERT INTO tracks_heard(station_uuid,artist_key,artist,title,raw,heard_at)
 		VALUES(?,?,?,?,?,?)`, station, artistKey, artist, title, raw, at.Unix())
 	return err
 }
 
 func (s *Store) InsertLoved(station, artistKey, artist, title string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO loved(station_uuid,artist_key,artist,title,loved_at)
+	_, err := s.q.Exec(`INSERT INTO loved(station_uuid,artist_key,artist,title,loved_at)
 		VALUES(?,?,?,?,?)`, station, artistKey, artist, title, at.Unix())
 	return err
 }
@@ -327,7 +838,7 @@ type LovedTrack struct {
 }
 
 func (s *Store) RecentlyHeard(n int) ([]RecentTrack, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		SELECT t.station_uuid, COALESCE(st.name, t.station_uuid), t.artist, t.title,
 		       t.heard_at, EXISTS(
 		         SELECT 1 FROM loved l
@@ -348,6 +859,9 @@ func (s *Store) RecentlyHeard(n int) ([]RecentTrack, error) {
 		if err := rows.Scan(&r.StationUUID, &r.StationName, &r.Artist, &r.Title, &heard, &r.Loved); err != nil {
 			return nil, err
 		}
+		r.StationName = CleanText(r.StationName)
+		r.Artist = CleanText(r.Artist)
+		r.Title = CleanText(r.Title)
 		r.HeardAt = time.Unix(heard, 0)
 		out = append(out, r)
 	}
@@ -355,7 +869,7 @@ func (s *Store) RecentlyHeard(n int) ([]RecentTrack, error) {
 }
 
 func (s *Store) LovedTracks(n int) ([]LovedTrack, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		WITH ranked AS (
 			SELECT l.station_uuid, COALESCE(st.name, l.station_uuid) AS station_name,
 			       l.artist_key, l.artist, l.title, l.loved_at,
@@ -391,6 +905,9 @@ func (s *Store) LovedTracks(n int) ([]LovedTrack, error) {
 			&entry.Artist, &entry.Title, &lovedAt, &entry.LoveCount, &entry.HeardCount); err != nil {
 			return nil, err
 		}
+		entry.StationName = CleanText(entry.StationName)
+		entry.Artist = CleanText(entry.Artist)
+		entry.Title = CleanText(entry.Title)
 		entry.LovedAt = time.Unix(lovedAt, 0)
 		out = append(out, entry)
 	}
@@ -398,7 +915,7 @@ func (s *Store) LovedTracks(n int) ([]LovedTrack, error) {
 }
 
 func (s *Store) ForgetLovedTrack(artistKey, title string) (bool, error) {
-	result, err := s.db.Exec(`DELETE FROM loved
+	result, err := s.q.Exec(`DELETE FROM loved
 		WHERE artist_key=? AND lower(trim(title))=lower(trim(?))`, artistKey, title)
 	if err != nil {
 		return false, err
@@ -413,7 +930,7 @@ func (s *Store) ForgetLovedTrack(artistKey, title string) (bool, error) {
 // must be a row that unlove can actually delete.
 func (s *Store) LovedTrackExists(artistKey, title string) (bool, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM loved
 		WHERE artist_key=? AND lower(trim(title))=lower(trim(?))`, artistKey, title).Scan(&n)
 	return n > 0, err
 }
@@ -424,7 +941,7 @@ func (s *Store) LovedTrackExists(artistKey, title string) (bool, error) {
 // stream must never read as un-loving a different silent stream.
 func (s *Store) TracklessStationLoveExists(stationUUID string) (bool, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM loved
 		WHERE station_uuid=? AND artist_key='' AND trim(title)=''`, stationUUID).Scan(&n)
 	return n > 0, err
 }
@@ -432,7 +949,7 @@ func (s *Store) TracklessStationLoveExists(stationUUID string) (bool, error) {
 // ForgetTracklessStationLove removes one station's trackless love rows and
 // leaves every other station's alone.
 func (s *Store) ForgetTracklessStationLove(stationUUID string) (bool, error) {
-	res, err := s.db.Exec(`DELETE FROM loved
+	res, err := s.q.Exec(`DELETE FROM loved
 		WHERE station_uuid=? AND artist_key='' AND trim(title)=''`, stationUUID)
 	if err != nil {
 		return false, err
@@ -446,12 +963,12 @@ func (s *Store) ForgetTracklessStationLove(stationUUID string) (bool, error) {
 // loved track by them is gone.
 func (s *Store) CountLovedArtist(artistKey string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM loved WHERE artist_key=?`, artistKey).Scan(&n)
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM loved WHERE artist_key=?`, artistKey).Scan(&n)
 	return n, err
 }
 
 func (s *Store) LovedArtistKeys() (map[string]bool, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT artist_key FROM loved WHERE artist_key != ''`)
+	rows, err := s.q.Query(`SELECT DISTINCT artist_key FROM loved WHERE artist_key != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -469,7 +986,7 @@ func (s *Store) LovedArtistKeys() (map[string]bool, error) {
 
 // StationArtists returns station -> set of artist keys observed there.
 func (s *Store) StationArtists() (map[string]map[string]bool, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT station_uuid, artist_key FROM tracks_heard WHERE artist_key != ''`)
+	rows, err := s.q.Query(`SELECT DISTINCT station_uuid, artist_key FROM tracks_heard WHERE artist_key != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +1013,7 @@ type banditRow struct {
 }
 
 func (s *Store) PutBandit(station, daypart string, alpha, beta float64, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO bandit(station_uuid,daypart,alpha,beta,updated_at) VALUES(?,?,?,?,?)
+	_, err := s.q.Exec(`INSERT INTO bandit(station_uuid,daypart,alpha,beta,updated_at) VALUES(?,?,?,?,?)
 		ON CONFLICT(station_uuid,daypart) DO UPDATE SET alpha=excluded.alpha, beta=excluded.beta, updated_at=excluded.updated_at`,
 		station, daypart, alpha, beta, at.Unix())
 	return err
@@ -504,7 +1021,7 @@ func (s *Store) PutBandit(station, daypart string, alpha, beta float64, at time.
 
 // AllBandit loads every bandit row grouped by station then daypart.
 func (s *Store) AllBandit() (map[string]map[string]banditRow, error) {
-	rows, err := s.db.Query(`SELECT station_uuid,daypart,alpha,beta,updated_at FROM bandit`)
+	rows, err := s.q.Query(`SELECT station_uuid,daypart,alpha,beta,updated_at FROM bandit`)
 	if err != nil {
 		return nil, err
 	}
@@ -529,7 +1046,7 @@ func (s *Store) AllBandit() (map[string]map[string]banditRow, error) {
 // --- tag affinity ---
 
 func (s *Store) AllTagAffinity() (map[string]banditRow, error) { // reuse: Alpha=weight
-	rows, err := s.db.Query(`SELECT tag,weight,updated_at FROM tag_affinity`)
+	rows, err := s.q.Query(`SELECT tag,weight,updated_at FROM tag_affinity`)
 	if err != nil {
 		return nil, err
 	}
@@ -549,7 +1066,7 @@ func (s *Store) AllTagAffinity() (map[string]banditRow, error) { // reuse: Alpha
 }
 
 func (s *Store) PutTagAffinity(tag string, weight float64, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO tag_affinity(tag,weight,updated_at) VALUES(?,?,?)
+	_, err := s.q.Exec(`INSERT INTO tag_affinity(tag,weight,updated_at) VALUES(?,?,?)
 		ON CONFLICT(tag) DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at`,
 		tag, weight, at.Unix())
 	return err
@@ -559,7 +1076,7 @@ func (s *Store) PutTagAffinity(tag string, weight float64, at time.Time) error {
 
 func (s *Store) GetMeta(key string) (string, error) {
 	var v string
-	err := s.db.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&v)
+	err := s.q.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&v)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -567,7 +1084,7 @@ func (s *Store) GetMeta(key string) (string, error) {
 }
 
 func (s *Store) SetMeta(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO meta(key,value) VALUES(?,?)
+	_, err := s.q.Exec(`INSERT INTO meta(key,value) VALUES(?,?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err
 }
@@ -594,7 +1111,7 @@ type SavedStation struct {
 // first. A station qualifies by being a preset or having any loved rows —
 // the two ways a user says "remember this one".
 func (s *Store) SavedStations() ([]SavedStation, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		WITH listen_time AS (
 			SELECT station_uuid,
 			       SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)) AS total
@@ -631,6 +1148,7 @@ func (s *Store) SavedStations() ([]SavedStation, error) {
 		if err := rows.Scan(&e.UUID, &e.Name, &secs, &e.PresetSlot, &e.LoveCount); err != nil {
 			return nil, err
 		}
+		e.Name = CleanText(e.Name)
 		e.Total = time.Duration(secs) * time.Second
 		out = append(out, e)
 	}
@@ -639,21 +1157,33 @@ func (s *Store) SavedStations() ([]SavedStation, error) {
 
 // RemoveStation forgets a saved station: clears its preset slot (if any)
 // and deletes the loved rows credited to it. Listen history and bandit
-// counts stay — they're historical fact, not recall state.
+// counts stay — they're historical fact, not recall state. The two deletes
+// run in one transaction so recall state is never left half-removed.
 func (s *Store) RemoveStation(uuid string) (presetCleared bool, lovesRemoved int, err error) {
-	res, err := s.db.Exec(`DELETE FROM presets WHERE station_uuid=?`, uuid)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM presets WHERE station_uuid=?`, uuid)
 	if err != nil {
 		return false, 0, err
 	}
 	if n, e := res.RowsAffected(); e == nil {
 		presetCleared = n > 0
 	}
-	res, err = s.db.Exec(`DELETE FROM loved WHERE station_uuid=?`, uuid)
+	res, err = tx.Exec(`DELETE FROM loved WHERE station_uuid=?`, uuid)
 	if err != nil {
 		return presetCleared, 0, err
 	}
 	n, e := res.RowsAffected()
-	return presetCleared, int(n), e
+	if e != nil {
+		return presetCleared, 0, e
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, err
+	}
+	return presetCleared, int(n), nil
 }
 
 // StationTotal is how long this station has been listened to across every
@@ -662,10 +1192,143 @@ func (s *Store) RemoveStation(uuid string) (presetCleared bool, lovesRemoved int
 // itself. Open listens contribute nothing rather than counting to now.
 func (s *Store) StationTotal(uuid string) (time.Duration, error) {
 	var secs int64
-	err := s.db.QueryRow(`SELECT COALESCE(SUM(MAX(0,
+	err := s.q.QueryRow(`SELECT COALESCE(SUM(MAX(0,
 		COALESCE(ended_at, started_at) - started_at)), 0)
 		FROM listens WHERE station_uuid = ?`, uuid).Scan(&secs)
 	return time.Duration(secs) * time.Second, err
+}
+
+// VacuumInto writes a consistent copy of the database to path — SQLite's
+// online-backup API. A read-only connection still runs it: the copy is a
+// new file, not a write to this database.
+func (s *Store) VacuumInto(path string) error {
+	_, err := s.q.Exec(`VACUUM INTO ?`, path)
+	return err
+}
+
+// TasteTotals is the TASTE tab's listening ledger in one pass: per-daypart
+// audible sums plus the share whose listens started inside the week
+// window. The caller folds the daypart rows into the overall totals.
+func (s *Store) TasteTotals(weekStart time.Time) (byDaypart, weekByDaypart map[string]time.Duration, err error) {
+	rows, err := s.q.Query(`SELECT daypart,
+		COALESCE(SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)), 0),
+		COALESCE(SUM(CASE WHEN started_at >= ? THEN MAX(0, COALESCE(ended_at, started_at) - started_at) ELSE 0 END), 0)
+		FROM listens GROUP BY daypart`, weekStart.Unix())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	byDaypart, weekByDaypart = map[string]time.Duration{}, map[string]time.Duration{}
+	for rows.Next() {
+		var dp string
+		var total, week int64
+		if err := rows.Scan(&dp, &total, &week); err != nil {
+			return nil, nil, err
+		}
+		byDaypart[dp] = time.Duration(total) * time.Second
+		weekByDaypart[dp] = time.Duration(week) * time.Second
+	}
+	return byDaypart, weekByDaypart, rows.Err()
+}
+
+// TasteArtists counts heard tracks per artist, but only titles caught
+// inside a listen that ran at least minListen — a ten-second skip is not
+// taste — or inside the currently open one, and only from the last
+// `since` days. The display name is the most recent form the stream sent.
+func (s *Store) TasteArtists(now, since time.Time, minListen time.Duration, n int) ([]ArtistPlays, error) {
+	rows, err := s.q.Query(`SELECT t.artist_key,
+		(SELECT t2.artist FROM tracks_heard t2 WHERE t2.artist_key = t.artist_key
+		 ORDER BY t2.heard_at DESC, t2.id DESC LIMIT 1) AS artist,
+		COUNT(*) AS plays
+		FROM tracks_heard t
+		WHERE t.artist_key <> '' AND t.heard_at >= ?
+		  AND EXISTS (SELECT 1 FROM listens l
+		              WHERE l.station_uuid = t.station_uuid
+		                AND t.heard_at BETWEEN l.started_at AND COALESCE(l.ended_at, ?)
+		                AND (l.ended_at IS NULL OR l.ended_at - l.started_at >= ?))
+		GROUP BY t.artist_key
+		ORDER BY plays DESC, artist
+		LIMIT ?`, since.Unix(), now.Unix(), int64(minListen.Seconds()), n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArtistPlays
+	for rows.Next() {
+		var a ArtistPlays
+		var key string
+		if err := rows.Scan(&key, &a.Artist, &a.Plays); err != nil {
+			return nil, err
+		}
+		a.Artist = CleanText(a.Artist)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// TopStationsSince is the listen-time leaderboard restricted to listens
+// that started inside the window — the TASTE tab's "lately" column.
+func (s *Store) TopStationsSince(since time.Time, n int) ([]HistEntry, error) {
+	rows, err := s.q.Query(`SELECT l.station_uuid,
+		COALESCE(st.name, l.station_uuid) AS name,
+		SUM(MAX(0, COALESCE(l.ended_at, l.started_at) - l.started_at)) AS total
+		FROM listens l LEFT JOIN stations st ON st.uuid = l.station_uuid
+		WHERE l.started_at >= ?
+		GROUP BY l.station_uuid ORDER BY total DESC LIMIT ?`, since.Unix(), n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HistEntry
+	for rows.Next() {
+		var e HistEntry
+		var secs int64
+		if err := rows.Scan(&e.UUID, &e.Name, &secs); err != nil {
+			return nil, err
+		}
+		e.Name = CleanText(e.Name)
+		e.Total = time.Duration(secs) * time.Second
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// LovedTrackCount is the deduplicated loved-track total — the same
+// (artist_key, lowered title) grouping the library applies.
+func (s *Store) LovedTrackCount() (int, error) {
+	var n int
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM (
+		SELECT 1 FROM loved WHERE trim(title) != ''
+		GROUP BY artist_key, lower(trim(title)))`).Scan(&n)
+	return n, err
+}
+
+// StationStats collects one station's listen history for the info sheet:
+// cumulative audible time (the same sum as StationTotal), visits that
+// lasted at least a minute, the first and most recent listen starts, and
+// how many loved rows name a track rather than the station itself.
+func (s *Store) StationStats(uuid string) (listened time.Duration, visits int, first, last time.Time, lovedTracks int, err error) {
+	var secs, firstAt, lastAt int64
+	err = s.q.QueryRow(`SELECT
+		COALESCE(SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)), 0),
+		COALESCE(SUM(CASE WHEN ended_at IS NOT NULL AND ended_at - started_at >= 60 THEN 1 ELSE 0 END), 0),
+		COALESCE(MIN(started_at), 0),
+		COALESCE(MAX(started_at), 0)
+		FROM listens WHERE station_uuid = ?`, uuid).Scan(&secs, &visits, &firstAt, &lastAt)
+	if err != nil {
+		return
+	}
+	listened = time.Duration(secs) * time.Second
+	if firstAt > 0 {
+		first = time.Unix(firstAt, 0)
+	}
+	if lastAt > 0 {
+		last = time.Unix(lastAt, 0)
+	}
+	err = s.q.QueryRow(`SELECT COUNT(*) FROM loved
+		WHERE station_uuid = ? AND (artist_key <> '' OR title <> '')`,
+		uuid).Scan(&lovedTracks)
+	return
 }
 
 // ListenTotals is cumulative listen time per station, for the dial's
@@ -673,7 +1336,7 @@ func (s *Store) StationTotal(uuid string) (time.Duration, error) {
 // wants the whole distribution, including the long tail of stations you
 // only ever heard once.
 func (s *Store) ListenTotals() (map[string]time.Duration, error) {
-	rows, err := s.db.Query(`SELECT station_uuid,
+	rows, err := s.q.Query(`SELECT station_uuid,
 		SUM(MAX(0, COALESCE(ended_at, started_at) - started_at)) AS total
 		FROM listens GROUP BY station_uuid HAVING total > 0`)
 	if err != nil {
@@ -697,7 +1360,7 @@ func (s *Store) ListenTotals() (map[string]time.Duration, error) {
 // heard count never disagree.
 func (s *Store) TrackPlayCount(artistKey, title string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM tracks_heard
+	err := s.q.QueryRow(`SELECT COUNT(*) FROM tracks_heard
 		WHERE artist_key = ? AND lower(trim(title)) = lower(trim(?))`,
 		artistKey, title).Scan(&n)
 	return n, err
@@ -707,7 +1370,7 @@ func (s *Store) TrackPlayCount(artistKey, title string) (int, error) {
 // yet) count as zero; stations pruned from the cache keep their logged name
 // via the join fallback.
 func (s *Store) TopListened(n int) ([]HistEntry, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.q.Query(`
 		SELECT l.station_uuid,
 		       COALESCE(st.name, l.station_uuid) AS name,
 		       SUM(MAX(0, COALESCE(l.ended_at, l.started_at) - l.started_at)) AS total
@@ -728,6 +1391,7 @@ func (s *Store) TopListened(n int) ([]HistEntry, error) {
 		if err := rows.Scan(&e.UUID, &e.Name, &secs); err != nil {
 			return nil, err
 		}
+		e.Name = CleanText(e.Name)
 		e.Total = time.Duration(secs) * time.Second
 		out = append(out, e)
 	}
@@ -737,7 +1401,7 @@ func (s *Store) TopListened(n int) ([]HistEntry, error) {
 // --- presets ---
 
 func (s *Store) Presets() (map[int]string, error) {
-	rows, err := s.db.Query(`SELECT slot, station_uuid FROM presets`)
+	rows, err := s.q.Query(`SELECT slot, station_uuid FROM presets`)
 	if err != nil {
 		return nil, err
 	}
@@ -755,14 +1419,14 @@ func (s *Store) Presets() (map[int]string, error) {
 }
 
 func (s *Store) SetPreset(slot int, uuid string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO presets(slot, station_uuid, saved_at) VALUES(?,?,?)
+	_, err := s.q.Exec(`INSERT INTO presets(slot, station_uuid, saved_at) VALUES(?,?,?)
 		ON CONFLICT(slot) DO UPDATE SET station_uuid=excluded.station_uuid, saved_at=excluded.saved_at`,
 		slot, uuid, at.Unix())
 	return err
 }
 
 func (s *Store) DeletePreset(slot int) error {
-	_, err := s.db.Exec(`DELETE FROM presets WHERE slot=?`, slot)
+	_, err := s.q.Exec(`DELETE FROM presets WHERE slot=?`, slot)
 	return err
 }
 

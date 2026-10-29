@@ -28,11 +28,23 @@ jobs:
           fi
       - name: Vet
         run: go vet ./...
+      # Same pins as ci.yml: a release should fail on what CI fails on.
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          staticcheck ./...
+      # The GUI shell only exists under GOOS=windows; gate it too.
+      - name: Staticcheck (windows)
+        run: GOOS=windows staticcheck ./...
       # The tune path runs across goroutines (background sync, fire-and-forget
       # directory reports, the player's event pump), so the race detector is
       # the only thing that will catch a regression there before a user does.
       - name: Test
         run: go test -race ./...
+      - name: Vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck ./...
 
   build:
     needs: check
@@ -57,9 +69,17 @@ jobs:
             output="tmp/${name}/screech"
             if [ "$os" = windows ]; then output="${output}.exe"; fi
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
-              -trimpath -ldflags "-s -w -X screech/internal/version.Current=${version}" \
+              -trimpath -ldflags "-s -w -X github.com/tinkthemaker/screech/internal/version.Current=${version}" \
               -o "$output" ./cmd/screech
-            cp README.md "tmp/${name}/"
+            if [ "$os" = windows ]; then
+              # The LCARS window ships beside the terminal binary; its
+              # per-arch .syso (icon + manifest) rides GOARCH.
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
+                -tags desktop,production -trimpath \
+                -ldflags "-H windowsgui -s -w -X github.com/tinkthemaker/screech/internal/version.Current=${version}" \
+                -o "tmp/${name}/screech-gui.exe" ./cmd/screech-gui
+            fi
+            cp README.md LICENSE CHANGELOG.md "tmp/${name}/"
             if [ "$os" = windows ]; then
               (cd tmp && zip -qr "../release/${name}.zip" "$name")
             else
@@ -67,14 +87,67 @@ jobs:
             fi
           done
           (cd release && sha256sum * > SHA256SUMS.txt)
+      # Scoop installs straight from a manifest URL, so every release carries
+      # its own and README can point at releases/latest/download/screech.json.
+      # Hashes come from the archives built above; checkver/autoupdate let a
+      # bucket adopt the same file later without edits.
+      - name: Scoop manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "${GITHUB_REF_NAME#v}" "https://github.com/${GITHUB_REPOSITORY}" <<'PY'
+          import hashlib, json, sys
+          version, repo = sys.argv[1], sys.argv[2]
+          def arch(goarch):
+              name = f"screech-{version}-windows-{goarch}"
+              with open(f"release/{name}.zip", "rb") as f:
+                  digest = hashlib.sha256(f.read()).hexdigest()
+              return {"url": f"{repo}/releases/download/v{version}/{name}.zip",
+                      "hash": digest, "extract_dir": name}
+          def auto(goarch):
+              name = f"screech-$version-windows-{goarch}"
+              return {"url": f"{repo}/releases/download/v$version/{name}.zip", "extract_dir": name}
+          manifest = {
+              "version": version,
+              "description": "A radio that learns what you like, in a terminal or a small LCARS window on Windows.",
+              "homepage": repo,
+              "license": "MIT",
+              "notes": "screech plays through mpv: scoop bucket add extras; scoop install mpv",
+              "suggest": {"mpv": "extras/mpv"},
+              "architecture": {"64bit": arch("amd64"), "arm64": arch("arm64")},
+              "bin": ["screech.exe", "screech-gui.exe"],
+              "shortcuts": [["screech-gui.exe", "Screech"]],
+              "checkver": "github",
+              "autoupdate": {
+                  "architecture": {"64bit": auto("amd64"), "arm64": auto("arm64")},
+                  "hash": {"url": "$baseurl/SHA256SUMS.txt"},
+              },
+          }
+          with open("release/screech.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: screech-release
           path: release/*
           if-no-files-found: error
           retention-days: 3
+      # Notes come from CHANGELOG.md's section for this version, so the
+      # release page says what changed in words, not commit subjects. A tag
+      # without a section still publishes, with generated notes.
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --generate-notes --verify-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          notes="$RUNNER_TEMP/notes.md"
+          awk -v v="$version" '$1 == "##" && $2 == v { f = 1; next } f && /^## / { exit } f' CHANGELOG.md > "$notes"
+          if [ -s "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" release/* --notes-file "$notes" --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" release/* --generate-notes --verify-tag
+          fi

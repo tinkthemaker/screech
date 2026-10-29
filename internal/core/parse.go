@@ -29,6 +29,16 @@ func SuspectAd(raw, stationName string) bool {
 	if stationName != "" && t == strings.ToLower(strings.TrimSpace(stationName)) {
 		return true
 	}
+	return AdMarker(raw)
+}
+
+// AdMarker reports whether a raw title literally announces a break
+// ("advertisement", "commercial break" …). SuspectAd's empty and
+// station-name cases also come from DJ talk and station IDs; a marker is
+// the stream saying so itself — the only evidence strong enough to act on
+// unattended.
+func AdMarker(raw string) bool {
+	t := strings.ToLower(strings.TrimSpace(raw))
 	for _, m := range adMarkers {
 		if strings.Contains(t, m) {
 			return true
@@ -55,6 +65,13 @@ func ParseTitle(raw, stationName string) (Track, bool) {
 		return tr, false
 	}
 
+	// Some stations template "Album - Artist - Title" and send the empty
+	// field anyway: " - Om Unit - Patterning". The leading separator is the
+	// mirror of the trailing one trimmed off the title below, not part of
+	// the artist's name.
+	for strings.HasPrefix(s, "- ") {
+		s = strings.TrimSpace(s[2:])
+	}
 	artist, title := "", s
 	if i := strings.Index(s, " - "); i > 0 {
 		artist = strings.TrimSpace(s[:i])
@@ -83,13 +100,19 @@ func ParseTitle(raw, stationName string) (Track, bool) {
 
 // NormalizeArtist produces the matching key for an artist name.
 // Case-folded, "the " stripped, feat./ft. suffixes cut, whitespace collapsed.
+//
+// The guest-credit markers stay limited to the unambiguous ones. " with " was
+// one of them until it turned out to truncate band names that merely contain
+// the word: "Sleeping With Sirens" keyed as "sleeping". Missing an "Artist
+// with Guest" collapse costs one unlinked play; a false merge corrupts the
+// loved set and the fingerprint IDF that weights it.
 func NormalizeArtist(a string) string {
 	s := strings.ToLower(strings.TrimSpace(a))
 	if s == "" {
 		return ""
 	}
 	s = strings.TrimPrefix(s, "the ")
-	for _, sep := range []string{" feat.", " feat ", " featuring ", " ft.", " ft ", " with "} {
+	for _, sep := range []string{" feat.", " feat ", " featuring ", " ft.", " ft "} {
 		if i := strings.Index(s, sep); i > 0 {
 			s = s[:i]
 		}

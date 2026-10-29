@@ -14,11 +14,23 @@ const (
 	EventBuffering
 	// EventStreamError: the current stream failed to play.
 	EventStreamError
+	// EventStreamEnded: the current stream ended on its own. For live
+	// radio that means the server dropped us — mpv does not reconnect
+	// non-seekable ICY streams — not that the programme finished.
+	EventStreamEnded
 	// EventDied: the backend itself is gone (mpv exited).
 	EventDied
 	// EventLevel: real audio loudness, 0 (silence) to 1 (loud). Sourced from
 	// mpv's astats filter; absent on backends that can't measure.
 	EventLevel
+	// EventPaused: output paused, by screech or by anything else driving
+	// mpv — media keys, the OS media flyout, MPRIS.
+	EventPaused
+	// EventResumed: output unpaused again, same sources as EventPaused.
+	EventResumed
+	// EventStopped: playback was stopped from outside (the mpv `stop`
+	// command — nothing is loaded any more). Screech never sends stop.
+	EventStopped
 )
 
 type Event struct {
@@ -47,8 +59,13 @@ type Player interface {
 	Play(url string) error
 	// SetVolume changes this player's output only, from silent (0) to full (100).
 	SetVolume(percent int) error
+	// SetPaused pauses or resumes output without unloading the stream.
+	SetPaused(paused bool) error
 	// Events is the stream of title/state changes. Closed when the backend dies.
 	Events() <-chan Event
+	// Restart replaces a dead backend with a fresh process; Events()
+	// returns the new stream afterwards.
+	Restart() error
 	// Close shuts the backend down.
 	Close() error
 }

@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Screech</title>
+  <link rel="stylesheet" href="css/lcars.css">
+</head>
+<body>
+  <div id="strip" data-box>
+    <div class="frame" id="blk" data-box data-leaf data-fixed data-id="left-block">
+      <span data-text id="wordmark">SCREECH</span>
+    </div>
+    <div class="frame" id="barA" data-box data-leaf data-fixed data-id="bar-a"></div>
+    <div class="frame" id="barB" data-box data-leaf data-fixed data-id="bar-b"></div>
+    <div class="frame" id="barC" data-box data-leaf data-fixed data-id="bar-c"></div>
+    <div class="frame ic tl" id="curveA" data-box data-leaf data-fixed data-id="curve-a"></div>
+    <div class="frame ic bl" id="curveB" data-box data-leaf data-fixed data-id="curve-b"></div>
+    <div class="frame" id="btnSpacer" data-box data-leaf data-fixed data-id="btn-spacer"></div>
+    <div class="s btn" id="btnPause" data-box data-leaf data-fixed data-id="btn-pause"><span data-text class="ellipsis">PAUSE</span></div>
+    <div class="s btn" id="btnNext" data-box data-leaf data-fixed data-id="btn-next"><span data-text class="ellipsis">NEXT</span></div>
+    <div class="s btn" id="btnLove" data-box data-leaf data-fixed data-id="btn-love"><span data-text class="ellipsis">LOVE</span></div>
+    <div class="s btn" id="btnMore" data-box data-leaf data-fixed data-id="btn-more"><span data-text class="ellipsis">MORE</span></div>
+    <div class="s btn" id="btnExit" data-box data-leaf data-fixed data-id="btn-exit"><span data-text class="ellipsis">EXIT</span></div>
+    <div class="row" id="stationRow" data-col="text" data-box data-leaf data-fixed data-id="station-row">
+      <span class="t stn ellipsis scroll-viewport" data-text data-id="station" id="station"><span class="scroll-text"></span></span>
+    </div>
+    <div class="meter" id="meter" data-box data-leaf data-fixed data-id="meter"></div>
+    <div class="row" id="trackRow" data-col="text" data-leaf data-fixed data-id="track-row">
+      <span class="t trk ellipsis scroll-viewport" data-text data-id="track" id="track"><span class="scroll-text"></span></span>
+    </div>
+    <div id="statusBox" data-col="text" data-leaf data-fixed data-id="status-box">
+      <span class="chip" id="chip" data-id="chip" hidden>BREAK</span>
+      <span class="t meta ellipsis" data-text data-id="status" id="status"><span class="w" data-id="status-word" id="statusWord"></span><span data-id="status-detail" id="statusRest"></span></span>
+    </div>
+    <div class="t meta" id="volLabel" data-text data-fixed data-id="vol-label">VOL</div>
+    <div id="volTrack" data-leaf data-fixed data-id="vol-track">
+      <i class="rail"></i><i class="fill" id="volFill"></i><i class="thumb" id="volThumb"></i>
+    </div>
+    <div class="t meta" id="volValue" data-text data-fixed data-id="vol-value">70</div>
+  </div>
+  <div id="console" data-box>
+    <div class="frame" id="sideCap" data-box data-leaf data-fixed data-id="sidebar-top"></div>
+    <div class="frame ic tl" id="curveC" data-box data-leaf data-fixed data-id="curve-c"></div>
+    <div class="tab" id="tabRecent" data-box data-leaf data-fixed data-id="tab-recent" data-tab="recent"><span data-text>RECENT</span></div>
+    <div class="tab" id="tabLoved" data-box data-leaf data-fixed data-id="tab-loved" data-tab="loved"><span data-text>LOVED</span></div>
+    <div class="tab" id="tabStations" data-box data-leaf data-fixed data-id="tab-stations" data-tab="stations"><span data-text>STATIONS</span></div>
+    <div class="tab" id="tabTaste" data-box data-leaf data-fixed data-id="tab-taste" data-tab="taste"><span data-text>TASTE</span></div>
+    <div class="tab" id="tabSearch" data-box data-leaf data-fixed data-id="tab-search" data-tab="search"><span data-text>SEARCH</span></div>
+    <div class="tab" id="tabInfo" data-box data-leaf data-fixed data-id="tab-info" data-tab="info"><span data-text>INFO</span></div>
+    <div class="tab" id="tabSleep" data-box data-leaf data-fixed data-id="tab-sleep" data-tab="sleep"><span data-text id="sleepTabLabel">SLEEP</span></div>
+    <div class="frame" id="elbow" data-box data-leaf data-fixed data-id="elbow"><span class="t meta" id="clock" data-text>08-47</span></div>
+    <div class="frame ic bl" id="curveD" data-box data-leaf data-fixed data-id="curve-d"></div>
+    <div class="frame" id="barD" data-box data-leaf data-fixed data-id="bar-d"></div>
+    <div class="frame" id="barE" data-box data-leaf data-fixed data-id="bar-e"></div>
+    <div id="content"></div>
+    <div id="presets" data-box data-leaf data-fixed data-id="presets">
+      <span class="t meta" id="presetsLabel" data-text>PRESETS</span>
+      <span id="presetSlots"></span>
+      <div class="pill" id="presetSave" data-box data-leaf data-fixed data-id="preset-save"><span class="t" data-text>SAVE</span></div>
+    </div>
+  </div>
+  <script type="module" src="js/main.js"></script>
+  <script type="module" src="js/console.js"></script>
+  <script type="module" src="js/keys.js"></script>
+</body>
+</html>

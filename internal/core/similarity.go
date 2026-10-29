@@ -84,3 +84,37 @@ func (fp *fingerprints) lovedOverlap(station string, loved map[string]bool) (sco
 	}
 	return sum / (sum + 3.0), matches
 }
+
+// overlapScore is the pair lovedOverlap returns, keyed per station for the
+// batch walk below.
+type overlapScore struct {
+	score   float64
+	matches int
+}
+
+// lovedOverlaps computes every station's overlap in one pass: the loved set
+// walks the inverted index once, so the whole cache scores in time
+// proportional to loved artists × their stations — not stations × loved.
+// Scores use the same sum-idf / (sum + 3) formula as lovedOverlap.
+func (fp *fingerprints) lovedOverlaps(loved map[string]bool) map[string]overlapScore {
+	out := map[string]overlapScore{}
+	if len(loved) == 0 {
+		return out
+	}
+	sums := map[string]float64{}
+	matches := map[string]int{}
+	for a := range loved {
+		idf := fp.idf(a)
+		if idf == 0 {
+			continue // never heard anywhere: contributes nothing
+		}
+		for station := range fp.artistStations[a] {
+			sums[station] += idf
+			matches[station]++
+		}
+	}
+	for station, sum := range sums {
+		out[station] = overlapScore{score: sum / (sum + 3.0), matches: matches[station]}
+	}
+	return out
+}

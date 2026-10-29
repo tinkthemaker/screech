@@ -2,3 +2,9 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+
+# Local working state: review captures and the layout guard's screenshots,
+# planning-tool scratch, and the code index. Never part of a commit.
+.review/
+.superpowers/
+.codegraph/

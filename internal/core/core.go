@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,11 +33,19 @@ type Core struct {
 	listenID     int64
 	listenStart  time.Time
 
+	// A pause splits a listen into rows; priorDwell carries the banked
+	// dwell of the session's earlier segments so a fast skip after resume
+	// is judged on the whole session, and lastSegDur holds the most
+	// recently closed segment so resume can bank it.
+	priorDwell time.Duration
+	lastSegDur time.Duration
+
 	lastRawTitle string
 	curTrack     Track
 	hasTrack     bool
 	everTrack    bool
 	suspectAd    bool
+	adMarker     bool
 	seedTag      string
 	seedPicks    int
 }
@@ -114,8 +123,25 @@ func (c *Core) StationCount() int {
 }
 
 // NeedsSync reports whether the cache is effectively empty (seeds only).
+// It counts directory rows only: a fresh install with a few links in
+// config.toml has still never fetched the directory, and stations the
+// listener added must not pass for one.
 func (c *Core) NeedsSync() bool {
-	return c.StationCount() <= len(seedStations)
+	return c.directoryCount() <= len(seedStations)
+}
+
+// directoryCount is the cache size without the listener's own stations:
+// seeds plus whatever the directory sync brought in.
+func (c *Core) directoryCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for i := range c.stations {
+		if !IsCustom(c.stations[i].UUID) {
+			n++
+		}
+	}
+	return n
 }
 
 // Sync refreshes the station cache from radio-browser, then prunes stations
@@ -123,7 +149,7 @@ func (c *Core) NeedsSync() bool {
 // failure the existing cache (at minimum the seeds) keeps working; the error
 // is returned for the status line, not as a stop condition.
 func (c *Core) Sync(ctx context.Context, limit int) (added int, pruned int, err error) {
-	sts, err := c.rb.FetchTop(ctx, limit)
+	sts, complete, err := c.rb.FetchTop(ctx, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -131,11 +157,15 @@ func (c *Core) Sync(ctx context.Context, limit int) (added int, pruned int, err 
 	if err := c.store.UpsertStations(sts, fetchedAt); err != nil {
 		return 0, 0, err
 	}
-	// Anything older than this sync that the fresh slice didn't re-vouch for
-	// and that has no history is a corpse candidate.
-	n, err := c.store.PruneStale(fetchedAt, c.ResumeUUID())
-	if err != nil {
-		return len(sts), 0, err
+	// A partial directory slice is valuable, but pruning against it would
+	// throw away stations the directory still vouches for that simply
+	// weren't in the incomplete response. Only prune after a full sync.
+	var n int64
+	if complete {
+		n, err = c.store.PruneStale(fetchedAt, c.ResumeUUID())
+		if err != nil {
+			return len(sts), 0, err
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -164,7 +194,7 @@ func (c *Core) SyncStale(limit int) bool {
 	if time.Since(time.Unix(ts, 0)) > 7*24*time.Hour {
 		return true
 	}
-	return c.StationCount() < limit/2
+	return c.directoryCount() < limit/2
 }
 
 func (c *Core) StationByUUID(uuid string) (Station, bool) {
@@ -182,6 +212,13 @@ func (c *Core) StationByUUID(uuid string) (Station, bool) {
 func (c *Core) ResumeUUID() string {
 	v, _ := c.store.GetMeta("last_station")
 	return v
+}
+
+// RecoveredFrom is the archive path a corrupted database was moved to on
+// open ("" when the store was healthy). Startup surfaces it so a fresh
+// cache doesn't read as data loss with no explanation.
+func (c *Core) RecoveredFrom() string {
+	return c.store.recoveredFrom
 }
 
 // TopListened returns the listen-time leaderboard for the history view.
@@ -218,8 +255,34 @@ func (c *Core) RemoveStation(uuid string) error {
 	return nil
 }
 
+// RecentlyHeard is the face's view of the last n heard rows: consecutive
+// rows with the same station, artist and title collapse to the newest —
+// a relaunch or reconnect repeats the current track without it being a
+// new listen. Overfetch refills the window collapse shrinks. The store
+// stays raw: `screech export heard` needs every row.
 func (c *Core) RecentlyHeard(n int) ([]RecentTrack, error) {
-	return c.store.RecentlyHeard(n)
+	fetch := -1 // store treats a negative limit as "all"
+	if n > 0 {
+		fetch = 3 * n
+	}
+	rows, err := c.store.RecentlyHeard(fetch)
+	if err != nil {
+		return nil, err
+	}
+	out := rows[:0]
+	for _, r := range rows {
+		if last := len(out) - 1; last >= 0 {
+			p := out[last]
+			if p.StationUUID == r.StationUUID && p.Artist == r.Artist && p.Title == r.Title {
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	if n > 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
 }
 
 // StationTotal is cumulative listen time for one station, for the
@@ -229,10 +292,134 @@ func (c *Core) StationTotal(uuid string) (time.Duration, error) {
 	return c.store.StationTotal(uuid)
 }
 
+// StationInfo is the station sheet's picture of one station: how much of
+// it has actually been heard, what was loved on it, and how the picker
+// currently rates it for this part of the day.
+type StationInfo struct {
+	Listened    time.Duration // all-time audible time, same sum as StationTotal
+	Visits      int           // finished listen rows that lasted at least a minute
+	FirstHeard  time.Time     // zero if never
+	LastHeard   time.Time     // started_at of the most recent listen; zero if never
+	LovedTracks int           // loved rows for this station that name a track
+	Heard       bool          // the station has bandit rows, so Match means something
+	Match       float64       // the picker's own posterior mean for Daypart; 0 when !Heard
+	Daypart     string        // DaypartFor(now)
+}
+
+// StationInfo gathers the info sheet for one station. The candidate is
+// built the way buildPool builds it for one station — overlap only matters
+// for unheard stations, which report Heard=false anyway.
+func (c *Core) StationInfo(uuid string, now time.Time) (StationInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.stationByUUIDLocked(uuid)
+	if st == nil {
+		return StationInfo{}, fmt.Errorf("unknown station %s", uuid)
+	}
+	listened, visits, first, last, lovedTracks, err := c.store.StationStats(uuid)
+	if err != nil {
+		return StationInfo{}, err
+	}
+	info := StationInfo{
+		Listened:    listened,
+		Visits:      visits,
+		FirstHeard:  first,
+		LastHeard:   last,
+		LovedTracks: lovedTracks,
+		Daypart:     DaypartFor(now),
+	}
+	if len(c.bandit[uuid]) > 0 {
+		info.Heard = true
+		info.Match = c.posteriorMean(
+			candidate{st: st, tagScore: c.tagScore(st, now)}, info.Daypart, now)
+	}
+	return info, nil
+}
+
 // ListenTotals is cumulative listen time per station, for the dial's
 // density strip.
 func (c *Core) ListenTotals() (map[string]time.Duration, error) {
 	return c.store.ListenTotals()
+}
+
+// Taste is the library's picture of the listener: how much has actually
+// been heard, at what time of day, and which artists, tags and stations
+// the hours keep landing on.
+type Taste struct {
+	Total       time.Duration            // all-time audible time, same per-row sum as StationTotal
+	Week        time.Duration            // audible time of listens started in the last 7 days
+	ByDaypart   map[string]time.Duration // all-time audible time keyed by the listen row's daypart
+	TopArtists  []ArtistPlays            // most-played artists of the last 90 days, at most 8
+	TopTags     []TagWeight              // strongest tag affinities above prior, at most 8
+	TopStations []HistEntry              // most-listened stations of the last 30 days, at most 5
+	LovedTracks int                      // distinct loved tracks, same dedupe as LovedTracks
+}
+
+// ArtistPlays is one line of the TASTE artist leaderboard.
+type ArtistPlays struct {
+	Artist string
+	Plays  int
+}
+
+// TagWeight is a decayed tag affinity with the prior already subtracted.
+type TagWeight struct {
+	Tag    string
+	Weight float64
+}
+
+// Taste gathers the TASTE tab. Artists only count when they played during
+// a listen that ran at least FastSkipWindow — a ten-second skip is not
+// taste — or during the one still open.
+func (c *Core) Taste(now time.Time) (Taste, error) {
+	byDaypart, weekByDaypart, err := c.store.TasteTotals(now.AddDate(0, 0, -7))
+	if err != nil {
+		return Taste{}, err
+	}
+	artists, err := c.store.TasteArtists(now, now.AddDate(0, 0, -90), FastSkipWindow, 8)
+	if err != nil {
+		return Taste{}, err
+	}
+	stations, err := c.store.TopStationsSince(now.AddDate(0, 0, -30), 5)
+	if err != nil {
+		return Taste{}, err
+	}
+	loved, err := c.store.LovedTrackCount()
+	if err != nil {
+		return Taste{}, err
+	}
+
+	c.mu.Lock()
+	var tags []TagWeight
+	for tag, r := range c.tags {
+		// Decay approaches the prior without reaching it; a boost worn
+		// down to a sliver is history, not taste.
+		w := decayToward(r.Alpha, r.UpdatedAt, now) - 1
+		if w > 0.05 {
+			tags = append(tags, TagWeight{Tag: tag, Weight: w})
+		}
+	}
+	c.mu.Unlock()
+	sort.Slice(tags, func(i, j int) bool {
+		if tags[i].Weight != tags[j].Weight {
+			return tags[i].Weight > tags[j].Weight
+		}
+		return tags[i].Tag < tags[j].Tag
+	})
+	if len(tags) > 8 {
+		tags = tags[:8]
+	}
+
+	var t Taste
+	t.ByDaypart = byDaypart
+	for _, d := range byDaypart {
+		t.Total += d
+	}
+	for _, w := range weekByDaypart {
+		t.Week += w
+	}
+	t.TopArtists, t.TopTags, t.TopStations = artists, tags, stations
+	t.LovedTracks = loved
+	return t, nil
 }
 
 // TrackPlayCount is how many times a track has been logged from any station.
@@ -318,27 +505,31 @@ func (c *Core) Presets() map[int]string {
 // TogglePreset saves the current station to the lowest free slot, or unsaves
 // it if already saved. Presets are pure recall: they never touch the taste
 // model. full=true means all nine slots are taken.
-func (c *Core) TogglePreset(now time.Time) (slot int, saved bool, full bool) {
+func (c *Core) TogglePreset(now time.Time) (slot int, saved bool, full bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.currentUUID == "" {
-		return 0, false, false
+		return 0, false, false, nil
 	}
 	for s, u := range c.presets {
 		if u == c.currentUUID {
 			delete(c.presets, s)
-			_ = c.store.DeletePreset(s)
-			return s, false, false
+			if err := c.store.DeletePreset(s); err != nil {
+				return 0, false, false, err
+			}
+			return s, false, false, nil
 		}
 	}
 	for s := 1; s <= 9; s++ {
 		if _, used := c.presets[s]; !used {
 			c.presets[s] = c.currentUUID
-			_ = c.store.SetPreset(s, c.currentUUID, now)
-			return s, true, false
+			if err := c.store.SetPreset(s, c.currentUUID, now); err != nil {
+				return 0, false, false, err
+			}
+			return s, true, false, nil
 		}
 	}
-	return 0, false, true
+	return 0, false, true, nil
 }
 
 // TuneTo ends the current listen (dwell time judges it, as always) and hands
@@ -381,22 +572,85 @@ func (c *Core) TuneDead(now time.Time) (Pick, error) {
 func (c *Core) StartListen(uuid string, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.startListenLocked(uuid, now)
+}
+
+func (c *Core) startListenLocked(uuid string, now time.Time) {
+	if c.listenID != 0 {
+		if c.currentUUID == uuid {
+			// A superseding Play at the same stream (late lock, reconnect)
+			// must not split the session into two listen rows.
+			return
+		}
+		// A different station wins the slot: bank the old listen with no
+		// skip semantics — its dwell credit counts as on any clean close.
+		c.endListenLocked(now, false)
+	}
 	if c.currentUUID != "" && c.currentUUID != uuid {
 		c.previousUUID = c.currentUUID
 	}
 	c.currentUUID = uuid
 	c.listenStart = now
+	c.priorDwell = 0
 	c.lastRawTitle = ""
 	c.curTrack = Track{}
 	c.hasTrack = false
 	c.everTrack = false
 	c.suspectAd = false
+	c.adMarker = false
 	id, err := c.store.InsertListen(uuid, now, DaypartFor(now))
 	if err == nil {
 		c.listenID = id
 	}
 	_ = c.store.SetMeta("last_station", uuid)
 	c.rb.Click(uuid)
+}
+
+// ResumeListen reopens the listen a pause closed. The pause already banked
+// one segment; resuming the same station adds its dwell to priorDwell so a
+// fast skip right after resuming is judged on the whole session's dwell,
+// not on a fresh-looking segment. Track state deliberately survives: it is
+// the same session with the same track on screen — the title dedupe keeps
+// a re-sent ICY title from logging the track twice, and love keeps
+// targeting what is displayed. No SetMeta write and no directory click:
+// nothing here is a new choice.
+func (c *Core) ResumeListen(uuid string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.listenID != 0 {
+		return
+	}
+	if c.currentUUID != uuid {
+		c.startListenLocked(uuid, now)
+		return
+	}
+	c.priorDwell += c.lastSegDur
+	c.listenStart = now
+	id, err := c.store.InsertListen(uuid, now, DaypartFor(now))
+	if err == nil {
+		c.listenID = id
+	}
+}
+
+// ListenOpen reports whether a listen is currently being recorded — a
+// read-only probe for callers (tests, diagnostics) asserting that pause and
+// resume never leave a segment dangling.
+func (c *Core) ListenOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.listenID != 0
+}
+
+// BanditBeta sums the learned beta across the station's daypart rows: a
+// read-only probe for callers asserting a skip penalty did or didn't land.
+func (c *Core) BanditBeta(uuid string) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var b float64
+	for _, r := range c.bandit[uuid] {
+		b += r.Beta
+	}
+	return b
 }
 
 // EndListen closes the current listen without a skip judgment (quit, stream
@@ -412,25 +666,26 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 		return
 	}
 	dur := now.Sub(c.listenStart)
-	skipFast := userSkip && dur < FastSkipWindow
+	skipFast := userSkip && dur+c.priorDwell < FastSkipWindow
 	duringAd := skipFast && c.suspectAd
 	_ = c.store.FinishListen(c.listenID, now, skipFast, duringAd)
 
 	daypart := DaypartFor(c.listenStart)
 	switch {
 	case skipFast && duringAd:
-		c.applyRewardLocked(c.currentUUID, daypart, 0, skipBetaDuringAd, now)
+		_ = c.applyRewardLocked(c.currentUUID, daypart, 0, skipBetaDuringAd, now)
 	case skipFast:
-		c.applyRewardLocked(c.currentUUID, daypart, 0, skipBeta, now)
+		_ = c.applyRewardLocked(c.currentUUID, daypart, 0, skipBeta, now)
 	case dur >= FastSkipWindow:
-		c.applyRewardLocked(c.currentUUID, daypart, listenAlpha(dur), 0, now)
+		_ = c.applyRewardLocked(c.currentUUID, daypart, listenAlpha(dur), 0, now)
 		if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
 			bump := clamp(dur.Minutes()/30, 0.05, 1.0)
 			for _, t := range st.TagList() {
-				c.bumpTagLocked(t, bump, now)
+				_ = c.bumpTagLocked(t, bump, now)
 			}
 		}
 	}
+	c.lastSegDur = dur
 	c.listenID = 0
 }
 
@@ -441,10 +696,15 @@ func (c *Core) endListenLocked(now time.Time, userSkip bool) {
 func (c *Core) NoteTitle(raw string, now time.Time) (Track, bool, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// ICY titles come from arbitrary stream servers: sanitize before the
+	// dedupe compare so an escape-only difference can't defeat it, before
+	// the parse, and before the raw is stored.
+	raw = CleanText(raw)
 	if raw == c.lastRawTitle || c.currentUUID == "" {
 		return c.curTrack, c.hasTrack, c.suspectAd, c.trackLovedLocked()
 	}
 	c.lastRawTitle = raw
+	c.adMarker = AdMarker(raw)
 
 	st := c.stationByUUIDLocked(c.currentUUID)
 	name := ""
@@ -493,13 +753,13 @@ func (c *Core) trackLovedLocked() bool {
 // exactly those boosts. A returned love decays away like every other
 // bounded reward — it is a bounded dose, not a permanent scar on the model.
 //
-// Returns (track, hadTrack, nowLoved): nowLoved is the resulting state —
+// Returns (track, hadTrack, nowLoved, err): nowLoved is the resulting state —
 // true when the press loved, false when it unloved.
-func (c *Core) Love(now time.Time) (Track, bool, bool) {
+func (c *Core) Love(now time.Time) (Track, bool, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.currentUUID == "" {
-		return Track{}, false, false
+		return Track{}, false, false, nil
 	}
 
 	// The toggle is grounded in what the user can see: the loved row for
@@ -508,32 +768,50 @@ func (c *Core) Love(now time.Time) (Track, bool, bool) {
 	// missing, so (artist_key, title) identifies it either way; the
 	// trackless case is the only one that keys on the station.
 	if c.hasTrack {
-		if exists, err := c.store.LovedTrackExists(c.curTrack.ArtistKey, c.curTrack.Title); err == nil && exists {
+		exists, err := c.store.LovedTrackExists(c.curTrack.ArtistKey, c.curTrack.Title)
+		if err != nil {
+			return Track{}, false, false, err
+		}
+		if exists {
 			return c.unloveLocked(now)
 		}
-	} else if exists, err := c.store.TracklessStationLoveExists(c.currentUUID); err == nil && exists {
-		return c.unloveLocked(now)
+	} else {
+		exists, err := c.store.TracklessStationLoveExists(c.currentUUID)
+		if err != nil {
+			return Track{}, false, false, err
+		}
+		if exists {
+			return c.unloveLocked(now)
+		}
 	}
 
 	daypart := DaypartFor(now)
-	c.applyRewardLocked(c.currentUUID, daypart, loveAlpha, 0, now)
+	if err := c.applyRewardLocked(c.currentUUID, daypart, loveAlpha, 0, now); err != nil {
+		return Track{}, false, false, err
+	}
 	if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
 		for _, t := range st.TagList() {
-			c.bumpTagLocked(t, 0.5, now)
+			if err := c.bumpTagLocked(t, 0.5, now); err != nil {
+				return Track{}, false, false, err
+			}
 		}
 	}
 	if !c.hasTrack {
 		// Trackless love: record the intent against the station so a later
 		// unlove (and the loved library's origin links) can find it.
-		_ = c.store.InsertLoved(c.currentUUID, "", "", "", now)
-		return Track{}, false, true
+		if err := c.store.InsertLoved(c.currentUUID, "", "", "", now); err != nil {
+			return Track{}, false, false, err
+		}
+		return Track{}, false, true, nil
 	}
 	tr := c.curTrack
-	_ = c.store.InsertLoved(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, now)
+	if err := c.store.InsertLoved(c.currentUUID, tr.ArtistKey, tr.Artist, tr.Title, now); err != nil {
+		return Track{}, false, false, err
+	}
 	if tr.ArtistKey != "" {
 		c.loved[tr.ArtistKey] = true
 	}
-	return tr, true, true
+	return tr, true, true, nil
 }
 
 // unloveLocked reverses a Love on the current track (or, trackless, on the
@@ -541,32 +819,40 @@ func (c *Core) Love(now time.Time) (Track, bool, bool) {
 // boosts, and drops the artist from the loved set when no other loved
 // track by them remains. Already-banked listen rewards are historical fact
 // and stay.
-func (c *Core) unloveLocked(now time.Time) (Track, bool, bool) {
+func (c *Core) unloveLocked(now time.Time) (Track, bool, bool, error) {
 	daypart := DaypartFor(now)
-	c.applyRewardLocked(c.currentUUID, daypart, -loveAlpha, 0, now)
+	if err := c.applyRewardLocked(c.currentUUID, daypart, -loveAlpha, 0, now); err != nil {
+		return Track{}, false, false, err
+	}
 	if st := c.stationByUUIDLocked(c.currentUUID); st != nil {
 		for _, t := range st.TagList() {
-			c.bumpTagLocked(t, -0.5, now)
+			if err := c.bumpTagLocked(t, -0.5, now); err != nil {
+				return Track{}, false, false, err
+			}
 		}
 	}
 
 	if !c.hasTrack {
 		// Scoped to this station: a trackless love is a statement about one
 		// stream, so returning it must not touch any other station's row.
-		_, _ = c.store.ForgetTracklessStationLove(c.currentUUID)
-		return Track{}, false, false
+		_, err := c.store.ForgetTracklessStationLove(c.currentUUID)
+		return Track{}, false, false, err
 	}
 	tr := c.curTrack
 	removed, err := c.store.ForgetLovedTrack(tr.ArtistKey, tr.Title)
 	if err != nil || !removed {
-		return tr, true, false
+		return tr, true, false, err
 	}
 	if tr.ArtistKey != "" {
-		if n, err := c.store.CountLovedArtist(tr.ArtistKey); err == nil && n == 0 {
+		n, err := c.store.CountLovedArtist(tr.ArtistKey)
+		if err != nil {
+			return tr, true, false, err
+		}
+		if n == 0 {
 			delete(c.loved, tr.ArtistKey)
 		}
 	}
-	return tr, true, false
+	return tr, true, false, nil
 }
 
 // MarkStationFailed bumps a station's failure count (stream wouldn't start).
@@ -594,10 +880,31 @@ func (c *Core) MarkStationHealthy(uuid string) {
 	}
 }
 
+// ForgiveFailure undoes one failure strike, floored at zero. The UI uses it
+// to roll back strikes a station earned while the network was down —
+// blaming the station for an outage isn't fair to either of them.
+func (c *Core) ForgiveFailure(uuid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.store.BumpFailCount(uuid, -1)
+	if st := c.stationByUUIDLocked(uuid); st != nil && st.FailCount > 0 {
+		st.FailCount--
+	}
+}
+
 func (c *Core) SuspectedAd() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.suspectAd
+}
+
+// AdBreak is the auto-hop trigger: stricter than SuspectedAd — it only
+// fires when the title literally announced a break, so DJ talk and
+// station IDs never cause a hop.
+func (c *Core) AdBreak() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.adMarker
 }
 
 // --- internals ---
@@ -613,7 +920,7 @@ func (c *Core) stationByUUIDLocked(uuid string) *Station {
 
 // applyRewardLocked adds (dAlpha, dBeta) to the given daypart row and the
 // all-time row, decaying each toward the prior first (lazy decay).
-func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, now time.Time) {
+func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, now time.Time) error {
 	for _, dp := range []string{daypart, DaypartAll} {
 		if dp == "" {
 			continue
@@ -632,18 +939,21 @@ func (c *Core) applyRewardLocked(uuid, daypart string, dAlpha, dBeta float64, no
 			c.bandit[uuid] = map[string]banditRow{}
 		}
 		c.bandit[uuid][dp] = nr
-		_ = c.store.PutBandit(uuid, dp, a, b, now)
+		if err := c.store.PutBandit(uuid, dp, a, b, now); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (c *Core) bumpTagLocked(tag string, delta float64, now time.Time) {
+func (c *Core) bumpTagLocked(tag string, delta float64, now time.Time) error {
 	row := banditRow{Alpha: 1, UpdatedAt: now}
 	if r, ok := c.tags[tag]; ok {
 		row = r
 	}
 	w := math.Max(decayToward(row.Alpha, row.UpdatedAt, now)+delta, countFloor)
 	c.tags[tag] = banditRow{Alpha: w, UpdatedAt: now}
-	_ = c.store.PutTagAffinity(tag, w, now)
+	return c.store.PutTagAffinity(tag, w, now)
 }
 
 // SeedResult is what a typed seed query resolved to.
@@ -739,7 +1049,7 @@ func (c *Core) Seed(ctx context.Context, query string, now time.Time) (SeedResul
 			return false
 		})
 	}
-	if cd, _, err := c.pickFrom(cands, now, c.rng); err == nil {
+	if cd, err := c.pickFrom(cands, now, c.rng); err == nil {
 		c.endListenLocked(now, true)
 		return SeedResult{Pick: Pick{Station: *cd.st, Reason: "seeded: " + q}, Kind: "artist", Label: q}, true
 	}
@@ -749,7 +1059,9 @@ func (c *Core) Seed(ctx context.Context, query string, now time.Time) (SeedResul
 // tuneTagLocked bumps the tag and tunes a station carrying it. Caller's
 // lock must be held.
 func (c *Core) tuneTagLocked(tag string, now time.Time) (Pick, bool) {
-	c.bumpTagLocked(tag, 2.0, now) // love-sized bump; decays like the rest
+	if err := c.bumpTagLocked(tag, 2.0, now); err != nil { // love-sized bump; decays like the rest
+		return Pick{}, false
+	}
 	c.seedTag, c.seedPicks = tag, 4
 	cands := c.candidatesFor(now, func(st *Station) bool {
 		for _, t := range st.TagList() {
@@ -759,7 +1071,7 @@ func (c *Core) tuneTagLocked(tag string, now time.Time) (Pick, bool) {
 		}
 		return false
 	})
-	if cd, _, err := c.pickFrom(cands, now, c.rng); err == nil {
+	if cd, err := c.pickFrom(cands, now, c.rng); err == nil {
 		c.endListenLocked(now, true)
 		return Pick{Station: *cd.st, Reason: "seeded: " + tag}, true
 	}
@@ -789,7 +1101,7 @@ func (c *Core) pickSeededLocked(q string, now time.Time) (Pick, bool) {
 	cands := c.candidatesFor(now, func(st *Station) bool {
 		return strings.Contains(strings.ToLower(st.Name), q)
 	})
-	if cd, _, err := c.pickFrom(cands, now, c.rng); err == nil {
+	if cd, err := c.pickFrom(cands, now, c.rng); err == nil {
 		c.endListenLocked(now, true)
 		return Pick{Station: *cd.st, Reason: "seeded: " + q}, true
 	}

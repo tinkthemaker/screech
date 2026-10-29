@@ -7,7 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 func modelWithListens(t *testing.T) Model {
@@ -52,8 +53,8 @@ func TestHistoryOpenTuneClose(t *testing.T) {
 	if m.history {
 		t.Fatal("tuning from saved stations should close the view")
 	}
-	if m.st.UUID != "seed:wfmu" || m.reason != "from saved stations" {
-		t.Fatalf("expected saved-station tune: %q %q", m.st.UUID, m.reason)
+	if m.s.Station.UUID != "seed:wfmu" || m.s.Reason != "from saved stations" {
+		t.Fatalf("expected saved-station tune: %q %q", m.s.Station.UUID, m.s.Reason)
 	}
 	if cmd == nil {
 		t.Fatal("saved-station tune should trigger playback")
@@ -104,7 +105,7 @@ func TestHistoryViewNeverOverflows(t *testing.T) {
 			{UUID: "h", Name: "H", Total: 7 * time.Minute},
 			{UUID: "i", Name: "I", Total: 6 * time.Minute},
 		}
-		m.presets = map[int]string{1: "a"}
+		m.s.Presets = map[int]string{1: "a"}
 		assertFits(t, m.View(), sz.w, sz.h)
 	}
 }
@@ -194,19 +195,19 @@ func TestLoveToggleInTUI(t *testing.T) {
 	// Point the UI at the same station/track the core is playing.
 	for _, st := range core.SeedStations() {
 		if st.UUID == "seed:wfmu" {
-			m.st = st
+			m.s.Station = st
 		}
 	}
-	m.haveSt = true
-	m.ph = phPlay
-	m.playStart = m.now.Add(-time.Minute)
-	m.track = "Broadcast · Come On Let's Go"
-	m.haveTrack = true
+	m.s.HaveStation = true
+	m.s.Phase = session.Playing
+	m.s.PlayStart = m.now.Add(-time.Minute)
+	m.setTrack("Broadcast", "Come On Let's Go")
+	m.s.HaveTrack = true
 	m.trackAt = m.now
 
 	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	m = mm.(Model)
-	if !m.lovedTrack {
+	if !m.s.LovedTrack {
 		t.Fatal("first l should light the heart")
 	}
 	if !strings.Contains(m.View(), m.th.G.Heart) {
@@ -215,11 +216,11 @@ func TestLoveToggleInTUI(t *testing.T) {
 
 	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	m = mm.(Model)
-	if m.lovedTrack {
+	if m.s.LovedTrack {
 		t.Fatal("second l on the same track should put the heart out")
 	}
-	if !strings.Contains(m.feedback, "UNLOVED") {
-		t.Fatalf("unlove feedback missing: %q", m.feedback)
+	if !strings.Contains(m.s.Feedback, "UNLOVED") {
+		t.Fatalf("unlove feedback missing: %q", m.s.Feedback)
 	}
 }
 
@@ -231,15 +232,15 @@ func TestLovedLibraryActions(t *testing.T) {
 
 	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	after := mm.(Model)
-	if cmd == nil || after.history || !after.seeking {
+	if cmd == nil || after.history || !after.s.Seeking {
 		t.Fatal("enter should launch discovery from the selected artist")
 	}
 
 	m.loadHistory(historyLoved)
 	mm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	after = mm.(Model)
-	if cmd == nil || after.history || after.st.UUID != "seed:wfmu" || after.reason != "from a loved track" {
-		t.Fatalf("origin station recall failed: station=%q reason=%q", after.st.UUID, after.reason)
+	if cmd == nil || after.history || after.s.Station.UUID != "seed:wfmu" || after.s.Reason != "from a loved track" {
+		t.Fatalf("origin station recall failed: station=%q reason=%q", after.s.Station.UUID, after.s.Reason)
 	}
 }
 
@@ -313,15 +314,15 @@ func TestSavedStationsSearchNavigateAndRemove(t *testing.T) {
 
 func TestLearningFeedbackExpiresBackToReason(t *testing.T) {
 	m := testModel(t)
-	m.haveSt = true
-	m.feedback = "fast skip"
-	m.feedbackAt = m.now
-	m.reason = "wildcard"
+	m.s.HaveStation = true
+	m.s.Feedback = "fast skip"
+	m.s.FeedbackAt = m.now
+	m.s.Reason = "wildcard"
 	m.tw = NewTypewriter("wildcard", m.now.Add(-time.Minute))
 	if got := m.reasonRow(64); !strings.Contains(got, "fast skip") {
 		t.Fatalf("feedback not shown: %q", got)
 	}
-	m.now = m.now.Add(feedbackDur + time.Millisecond)
+	m.now = m.now.Add(session.FeedbackDuration + time.Millisecond)
 	if got := m.reasonRow(64); !strings.Contains(got, "wildcard") {
 		t.Fatalf("reason did not return: %q", got)
 	}
@@ -329,13 +330,89 @@ func TestLearningFeedbackExpiresBackToReason(t *testing.T) {
 
 func TestFirstRunStartsWithoutBlockingPrompt(t *testing.T) {
 	m := testModel(t)
-	if !m.syncing || !m.virgin {
-		t.Fatalf("expected seed-only first run: syncing=%v virgin=%v", m.syncing, m.virgin)
+	if !m.s.Syncing || !m.s.Virgin {
+		t.Fatalf("expected seed-only first run: syncing=%v virgin=%v", m.s.Syncing, m.s.Virgin)
 	}
 	if m.prompt {
 		t.Fatal("first run should play immediately; seed prompt remains available on /")
 	}
 	if m.Init() == nil {
 		t.Fatal("first run should schedule playback and directory sync")
+	}
+}
+
+func TestTasteTabCyclesRendersAndWraps(t *testing.T) {
+	m := modelWithListens(t)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+	m.start = m.now.Add(-time.Minute)
+
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	m = mm.(Model)
+	if m.historyView != historyLoved {
+		t.Fatalf("H should open loved, got %v", m.historyView)
+	}
+	tab := func() {
+		mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = mm.(Model)
+	}
+	shiftTab := func() {
+		mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		m = mm.(Model)
+	}
+	tab()
+	if m.historyView != historyStations {
+		t.Fatalf("tab from loved should reach stations, got %v", m.historyView)
+	}
+	tab()
+	if m.historyView != historyTaste {
+		t.Fatalf("tab from stations should reach taste, got %v", m.historyView)
+	}
+	view := m.View()
+	if !strings.Contains(view, "TASTE") || !strings.Contains(view, "LISTENING") {
+		t.Fatalf("taste view missing sections:\n%s", view)
+	}
+	if !strings.Contains(view, "next view") {
+		t.Fatalf("taste footer should offer the next view:\n%s", view)
+	}
+	// j/k do nothing here — the view has no cursor.
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = mm.(Model)
+	if m.historyView != historyTaste {
+		t.Fatal("j should not move the taste view")
+	}
+	// ? still reaches the help sheet from the fourth view.
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = mm.(Model)
+	if !m.helpOpen {
+		t.Fatal("? should open help over the taste view")
+	}
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mm.(Model)
+
+	tab()
+	if m.historyView != historyRecent {
+		t.Fatalf("tab past taste should wrap to recent, got %v", m.historyView)
+	}
+	shiftTab()
+	if m.historyView != historyTaste {
+		t.Fatalf("shift+tab from recent should reach taste, got %v", m.historyView)
+	}
+	shiftTab()
+	if m.historyView != historyStations {
+		t.Fatalf("shift+tab from taste should reach stations, got %v", m.historyView)
+	}
+}
+
+func TestTasteEmptyState(t *testing.T) {
+	m := testModel(t)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+	m.start = m.now.Add(-time.Minute)
+	if !m.loadHistory(historyTaste) {
+		t.Fatal("taste should load on an empty database")
+	}
+	if !strings.Contains(m.View(), "Nothing yet") {
+		t.Fatalf("empty taste should invite listening:\n%s", m.View())
 	}
 }

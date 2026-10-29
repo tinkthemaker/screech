@@ -1,17 +1,41 @@
 package core
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
+// errNoTestNetwork is what any directory call out of a plain test core
+// hits. Tests that exercise the directory use pointCoreAt / openTestCoreAt
+// to aim at an httptest server instead.
+var errNoTestNetwork = errors.New("test core has no network; use pointCoreAt")
+
+type deadTransport struct{}
+
+func (deadTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errNoTestNetwork
+}
+
+// openTestCore builds a Core whose directory client is dead on arrival: the
+// httptest server is closed before the core returns, and the transport
+// refuses outright, so neither a stray call nor the pickServer fallback
+// (which fires after dropServer wipes the dead base) can reach the real
+// radio-browser.
 func openTestCore(t *testing.T) *Core {
 	t.Helper()
+	srv := httptest.NewServer(http.NewServeMux())
 	c, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
+		srv.Close()
 		t.Fatalf("Open: %v", err)
 	}
+	pointCoreAt(c, srv)
+	srv.Close()
+	c.rb.client = &http.Client{Transport: deadTransport{}}
 	t.Cleanup(func() { c.Close() })
 	return c
 }
@@ -71,7 +95,7 @@ func TestListenLoveRoundtrip(t *testing.T) {
 		t.Fatalf("artist key: %q", tr.ArtistKey)
 	}
 
-	loved, hadTrack, lovedNow := c.Love(now.Add(2 * time.Minute))
+	loved, hadTrack, lovedNow, _ := c.Love(now.Add(2 * time.Minute))
 	if !hadTrack || !lovedNow || loved.ArtistKey != "stellardrone" {
 		t.Fatalf("Love: hadTrack=%v lovedNow=%v key=%q", hadTrack, lovedNow, loved.ArtistKey)
 	}
@@ -226,7 +250,7 @@ func TestUnloveReturnsBoosts(t *testing.T) {
 	}
 
 	baseAlpha := alphaOf()
-	if _, _, lovedNow := c.Love(now.Add(2 * time.Minute)); !lovedNow {
+	if _, _, lovedNow, _ := c.Love(now.Add(2 * time.Minute)); !lovedNow {
 		t.Fatal("love should apply")
 	}
 	lovedAlpha := alphaOf()
@@ -243,7 +267,7 @@ func TestUnloveReturnsBoosts(t *testing.T) {
 	}
 
 	// Second press on the same track unloves.
-	_, hadTrack, lovedNow := c.Love(now.Add(3 * time.Minute))
+	_, hadTrack, lovedNow, _ := c.Love(now.Add(3 * time.Minute))
 	if !hadTrack || lovedNow {
 		t.Fatalf("second press should unlove the same track: hadTrack=%v lovedNow=%v", hadTrack, lovedNow)
 	}
@@ -272,10 +296,10 @@ func TestTracklessLoveToggles(t *testing.T) {
 	}
 	c.StartListen(p.Station.UUID, now)
 	// No NoteTitle: the stream never sent one, so hasTrack is false.
-	if _, hadTrack, lovedNow := c.Love(now.Add(time.Minute)); hadTrack || !lovedNow {
+	if _, hadTrack, lovedNow, _ := c.Love(now.Add(time.Minute)); hadTrack || !lovedNow {
 		t.Fatalf("trackless love: hadTrack=%v lovedNow=%v", hadTrack, lovedNow)
 	}
-	if _, _, lovedNow := c.Love(now.Add(2 * time.Minute)); lovedNow {
+	if _, _, lovedNow, _ := c.Love(now.Add(2 * time.Minute)); lovedNow {
 		t.Fatal("second trackless press should unlove the station")
 	}
 	var n int
@@ -322,5 +346,298 @@ func TestVolumePersistsAndClamps(t *testing.T) {
 	}
 	if got := c.Volume(); got != 0 {
 		t.Fatalf("low clamp=%d, want 0", got)
+	}
+}
+
+// A superseding Play at the same stream must not split a session into two
+// listen rows, and a different station must bank the first before opening
+// its own — the late-lock-while-offline fix depends on both.
+func TestStartListenIsIdempotent(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+
+	c.StartListen("s1", now)
+	c.StartListen("s1", now.Add(5*time.Second)) // same stream: keep the row
+	var n int
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("double StartListen on one station left %d rows, want 1", n)
+	}
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens WHERE ended_at IS NULL`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("the kept listen should still be open, %d open rows", n)
+	}
+
+	c.StartListen("s2", now.Add(10*time.Second)) // different station: bank the first
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("switching stations should leave 2 rows, got %d", n)
+	}
+	var ended int64
+	if err := c.store.db.QueryRow(`SELECT ended_at FROM listens WHERE station_uuid='s1'`).Scan(&ended); err != nil {
+		t.Fatal(err)
+	}
+	if ended <= now.Unix() {
+		t.Fatalf("the superseded listen should be banked, ended_at=%d", ended)
+	}
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens WHERE ended_at IS NULL`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("only the current listen may be open, %d open rows", n)
+	}
+}
+
+func listenRow(t *testing.T, c *Core, n int) (skipFast int, open bool) {
+	t.Helper()
+	var ended any
+	row := c.store.db.QueryRow(`SELECT skip_fast, ended_at FROM listens ORDER BY id LIMIT 1 OFFSET ?`, n-1)
+	if err := row.Scan(&skipFast, &ended); err != nil {
+		t.Fatal(err)
+	}
+	return skipFast, ended == nil
+}
+
+// Pause/resume splits a listen into segments; the fast-skip call on resume
+// is judged on the session's whole dwell.
+func TestResumeListenJudgesSessionDwell(t *testing.T) {
+	t.Run("long dwell is no fast skip", func(t *testing.T) {
+		c := openTestCore(t)
+		now := time.Now()
+		p, err := c.Tune(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.StartListen(p.Station.UUID, now)
+		c.EndListen(now.Add(2 * time.Minute))
+		c.ResumeListen(p.Station.UUID, now.Add(3*time.Minute))
+
+		if _, err := c.Tune(now.Add(3*time.Minute + 10*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Fatalf("pause+resume should leave 2 listen rows, got %d", n)
+		}
+		skip, open := listenRow(t, c, 2)
+		if skip != 0 || open {
+			t.Fatalf("second segment: skip_fast=%d open=%v, want 0 false", skip, open)
+		}
+		if r := c.bandit[p.Station.UUID]; r != nil && r[DaypartAll].Beta > 1.0 {
+			t.Fatalf("beta rose to %v on a long-session close", r[DaypartAll].Beta)
+		}
+	})
+
+	t.Run("short dwell is a fast skip", func(t *testing.T) {
+		c := openTestCore(t)
+		now := time.Now()
+		p, err := c.Tune(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.StartListen(p.Station.UUID, now)
+		c.EndListen(now.Add(30 * time.Second))
+		c.ResumeListen(p.Station.UUID, now.Add(time.Minute))
+
+		if _, err := c.Tune(now.Add(time.Minute + 10*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		skip, open := listenRow(t, c, 2)
+		if skip != 1 || open {
+			t.Fatalf("second segment: skip_fast=%d open=%v, want 1 false", skip, open)
+		}
+		if r := c.bandit[p.Station.UUID]; r == nil || r[DaypartAll].Beta <= 1.0 {
+			t.Fatalf("session-dwell fast skip should charge beta, got %v", r)
+		}
+	})
+}
+
+func TestResumeListenKeepsTrack(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.StartListen(p.Station.UUID, now)
+	if _, ok, _, _ := c.NoteTitle("Stellardrone - Billions and Billions", now.Add(time.Minute)); !ok {
+		t.Fatal("NoteTitle did not take")
+	}
+	c.EndListen(now.Add(2 * time.Minute))
+	c.ResumeListen(p.Station.UUID, now.Add(3*time.Minute))
+
+	// Love still targets the track on screen from before the pause.
+	tr, hadTrack, lovedNow, err := c.Love(now.Add(4 * time.Minute))
+	if err != nil || !hadTrack || !lovedNow || tr.ArtistKey != "stellardrone" {
+		t.Fatalf("Love after resume: %v hadTrack=%v loved=%v key=%q", err, hadTrack, lovedNow, tr.ArtistKey)
+	}
+
+	// The stream re-sending the same ICY title must not log the track twice.
+	if _, ok, _, _ := c.NoteTitle("Stellardrone - Billions and Billions", now.Add(5*time.Minute)); !ok {
+		t.Fatal("re-sent title should still report the current track")
+	}
+	var n int
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM tracks_heard`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("same title across a resume logged %d rows, want 1", n)
+	}
+}
+
+func TestResumeListenDifferentStationStartsFresh(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.StartListen(p.Station.UUID, now)
+	if _, ok, _, _ := c.NoteTitle("Stellardrone - Billions and Billions", now.Add(time.Minute)); !ok {
+		t.Fatal("NoteTitle did not take")
+	}
+	c.EndListen(now.Add(2 * time.Minute))
+	c.ResumeListen("other-station", now.Add(3*time.Minute))
+
+	if c.currentUUID != "other-station" || c.previousUUID != p.Station.UUID {
+		t.Fatalf("resume to a different station should move like StartListen: cur=%q prev=%q",
+			c.currentUUID, c.previousUUID)
+	}
+	if c.hasTrack {
+		t.Fatal("a different station must reset the track on screen")
+	}
+}
+
+func TestResumeListenWhileOpenIsNoop(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.StartListen(p.Station.UUID, now)
+	c.ResumeListen(p.Station.UUID, now.Add(10*time.Second))
+	var n int
+	if err := c.store.db.QueryRow(`SELECT COUNT(*) FROM listens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("ResumeListen over an open listen added a row, got %d", n)
+	}
+}
+
+// The station sheet reads the same rows the picker and readouts use:
+// finished segments of a minute or more count as visits, an open listen
+// contributes nothing, and loves split into named tracks and the bare
+// station heart.
+func TestStationInfo(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now().Truncate(time.Second)
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuid := p.Station.UUID
+
+	seed := func(start, end time.Time) {
+		id, err := c.store.InsertListen(uuid, start, DaypartFor(start))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !end.IsZero() {
+			if err := c.store.FinishListen(id, end, false, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	seed(now.Add(-48*time.Hour), now.Add(-46*time.Hour))
+	seed(now.Add(-24*time.Hour), now.Add(-24*time.Hour+90*time.Second))
+	seed(now.Add(-2*time.Hour), now.Add(-2*time.Hour+30*time.Second)) // a visit too short to count
+	seed(now.Add(-time.Minute), time.Time{})                          // still open: contributes nothing
+
+	// Trackless love first — a heart for the station itself — then two
+	// named tracks.
+	c.StartListen(uuid, now)
+	if _, _, loved, err := c.Love(now); err != nil || !loved {
+		t.Fatalf("trackless love: loved=%v err=%v", loved, err)
+	}
+	if _, ok, _, _ := c.NoteTitle("Artist One - Song One", now.Add(time.Second)); !ok {
+		t.Fatal("first NoteTitle did not take")
+	}
+	if _, _, loved, err := c.Love(now.Add(time.Second)); err != nil || !loved {
+		t.Fatalf("track love one: loved=%v err=%v", loved, err)
+	}
+	if _, ok, _, _ := c.NoteTitle("Artist Two - Song Two", now.Add(2*time.Second)); !ok {
+		t.Fatal("second NoteTitle did not take")
+	}
+	if _, _, loved, err := c.Love(now.Add(2 * time.Second)); err != nil || !loved {
+		t.Fatalf("track love two: loved=%v err=%v", loved, err)
+	}
+	c.EndListen(now.Add(3 * time.Second))
+
+	info, err := c.StationInfo(uuid, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantListened := 2*time.Hour + 90*time.Second + 30*time.Second + 3*time.Second
+	if info.Listened != wantListened {
+		t.Fatalf("Listened = %v, want %v", info.Listened, wantListened)
+	}
+	if info.Visits != 2 {
+		// The sub-minute and open rows count toward time, not visits.
+		t.Fatalf("Visits = %d, want 2", info.Visits)
+	}
+	if !info.FirstHeard.Equal(now.Add(-48 * time.Hour)) {
+		t.Fatalf("FirstHeard = %v", info.FirstHeard)
+	}
+	if !info.LastHeard.Equal(now) {
+		t.Fatalf("LastHeard = %v, want the live listen start %v", info.LastHeard, now)
+	}
+	if info.LovedTracks != 2 {
+		t.Fatalf("LovedTracks = %d, want 2 named tracks", info.LovedTracks)
+	}
+	if !info.Heard {
+		t.Fatal("a loved, listened-to station should count as heard")
+	}
+	daypart := DaypartFor(now.Add(4 * time.Second))
+	if info.Daypart != daypart {
+		t.Fatalf("Daypart = %q, want %q", info.Daypart, daypart)
+	}
+	wantMatch := c.posteriorMean(
+		candidate{st: &p.Station, tagScore: c.tagScore(&p.Station, now.Add(4*time.Second))},
+		daypart, now.Add(4*time.Second))
+	if info.Match != wantMatch {
+		t.Fatalf("Match = %v, want posteriorMean %v", info.Match, wantMatch)
+	}
+}
+
+func TestStationInfoUnheard(t *testing.T) {
+	c := openTestCore(t)
+	now := time.Now()
+	p, err := c.Tune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.StationInfo(p.Station.UUID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Heard || info.Match != 0 {
+		t.Fatalf("never-heard station: Heard=%v Match=%v", info.Heard, info.Match)
+	}
+	if !info.FirstHeard.IsZero() || info.Visits != 0 || info.Listened != 0 {
+		t.Fatalf("never-heard station has history: %+v", info)
+	}
+	if _, err := c.StationInfo("no-such-station", now); err == nil {
+		t.Fatal("unknown uuid should error")
 	}
 }

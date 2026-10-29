@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -11,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"screech/internal/version"
+	"github.com/tinkthemaker/screech/internal/version"
 )
 
 // rbUserAgent follows radio-browser etiquette: a real, identifying agent
@@ -63,7 +64,8 @@ func (rb *RadioBrowser) get(ctx context.Context, u string, out any) error {
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	// A hostile or broken mirror gets 64MB to be wrong in, not the whole heap.
+	return json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out)
 }
 
 // pickServer resolves a server per radio-browser etiquette: ask the pool,
@@ -132,12 +134,14 @@ type rbStation struct {
 // FetchTop pulls the top `limit` working stations by votes, paging through
 // the directory 5000 at a time (gentler on their volunteer-run servers than
 // one giant request). Votes shift between pages, so results are deduped;
-// a partial slice beats no slice if a later page fails.
-func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, error) {
+// a partial slice beats no slice if a later page fails. The returned bool is
+// true only when every requested page was fetched without a network break.
+func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, bool, error) {
 	const page = 5000
 	base := rb.pickServer(ctx)
 	seen := map[string]bool{}
 	var out []Station
+	complete := true
 	for offset := 0; offset < limit; offset += page {
 		n := page
 		if limit-offset < page {
@@ -153,29 +157,29 @@ func (rb *RadioBrowser) FetchTop(ctx context.Context, limit int) ([]Station, err
 		if err := rb.get(ctx, base+"/json/stations/search?"+q.Encode(), &raw); err != nil {
 			rb.dropServer() // let the next attempt pick a different server
 			if len(out) > 0 {
-				return out, nil
+				// We got some fresh data; keep it but mark as partial so the
+				// cache is not pruned against an incomplete directory slice.
+				complete = false
+				return out, complete, nil
 			}
-			return nil, err
+			return nil, false, err
 		}
 		for _, r := range raw {
-			if r.UUID == "" || seen[r.UUID] || (r.URL == "" && r.URLResolved == "") {
+			if seen[r.UUID] {
+				continue
+			}
+			st, ok := toStation(r)
+			if !ok {
 				continue
 			}
 			seen[r.UUID] = true
-			st := Station{
-				UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
-				Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
-				Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
-				LastCheckOK: r.LastCheckOK >= 1,
-			}
-			st.AdRisk = ComputeAdRisk(&st)
 			out = append(out, st)
 		}
 		if len(raw) < n {
 			break // directory exhausted before the limit
 		}
 	}
-	return out, nil
+	return out, complete, nil
 }
 
 // SearchByName finds working stations whose name matches (niche internet
@@ -210,27 +214,48 @@ func (rb *RadioBrowser) search(ctx context.Context, q url.Values, limit int) ([]
 		return nil, err
 	}
 	out := make([]Station, 0, len(raw))
+	seen := map[string]bool{}
 	for _, r := range raw {
-		if r.URL == "" && r.URLResolved == "" {
+		if seen[r.UUID] {
 			continue
 		}
-		st := Station{
-			UUID: r.UUID, Name: r.Name, URL: r.URL, URLResolved: r.URLResolved,
-			Homepage: r.Homepage, Tags: r.Tags, Country: r.Country, Codec: r.Codec,
-			Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
-			LastCheckOK: r.LastCheckOK >= 1,
+		st, ok := toStation(r)
+		if !ok {
+			continue
 		}
-		st.AdRisk = ComputeAdRisk(&st)
+		seen[r.UUID] = true
 		out = append(out, st)
 	}
 	return out, nil
 }
 
+// toStation maps one directory record onto the cache shape. A record with
+// no UUID or no URL at all can't be tuned to and is rejected; display text
+// is sanitized at ingest (the directory is user-submitted); ad-risk is
+// precomputed since it only ever derives from these columns.
+func toStation(r rbStation) (Station, bool) {
+	if r.UUID == "" || (r.URL == "" && r.URLResolved == "") {
+		return Station{}, false
+	}
+	st := Station{
+		UUID: r.UUID, Name: CleanText(r.Name),
+		URL: r.URL, URLResolved: r.URLResolved,
+		Homepage: CleanText(r.Homepage), Tags: CleanText(r.Tags),
+		Country: CleanText(r.Country), Codec: CleanText(r.Codec),
+		Bitrate: r.Bitrate, Votes: r.Votes, ClickCount: r.ClickCount,
+		LastCheckOK: r.LastCheckOK >= 1,
+	}
+	st.AdRisk = ComputeAdRisk(&st)
+	return st, true
+}
+
 // Click reports a tune-in to radio-browser (their etiquette; improves their
 // popularity data). Fire and forget; errors are irrelevant. Seed stations
-// (seed: prefix) are screech-local and never reported.
+// (seed: prefix) and the listener's own (custom:) are screech-local and
+// never reported: the directory doesn't know them, and a hash of a private
+// link is nobody else's business.
 func (rb *RadioBrowser) Click(stationUUID string) {
-	if stationUUID == "" || len(stationUUID) > 64 || strings.HasPrefix(stationUUID, "seed:") {
+	if stationUUID == "" || len(stationUUID) > 64 || strings.HasPrefix(stationUUID, "seed:") || IsCustom(stationUUID) {
 		return
 	}
 	go func() {

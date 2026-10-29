@@ -10,7 +10,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/session"
 )
 
 // Daypart temperature: midday runs brighter and cooler, night dims and warms
@@ -155,7 +156,7 @@ func TestIdleSettle(t *testing.T) {
 // its coral while loved.
 func TestLoveWashAndMaterial(t *testing.T) {
 	m := testModel(t)
-	m.lovedTrack = true
+	m.s.LovedTrack = true
 	base := fmt.Sprint(m.th.LoveFill.GetBackground())
 
 	m.loveAt = m.now
@@ -181,8 +182,9 @@ func TestLoveWashAndMaterial(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	m.loveAt = m.now.Add(-3 * time.Second) // resting wash, past the flash
 	m.w = 110
-	m.haveTrack = true
-	m.track = "Broadcast · Come On Let's Go"
+	m.s.HaveTrack = true
+	m.setTrack("Broadcast", "Come On Let's Go")
+	m.s.HaveTrack = true
 	m.trackAt = m.now.Add(-time.Minute)
 	// termenv rounds hex -> RGB (53 -> 52), so assert the rendered value.
 	if row := m.trackRow(80, false); !strings.Contains(row, "48;2;52;23;15") {
@@ -200,7 +202,7 @@ func TestTypewriterWired(t *testing.T) {
 	m.w, m.h = 110, 32
 	m.start = m.now.Add(-time.Minute)
 
-	mm, _ := m.applyPick(core.Pick{Station: core.SeedStations()[1], Reason: "wildcard"})
+	mm, _ := m.step(session.Tuned{Pick: core.Pick{Station: core.SeedStations()[1], Reason: "wildcard"}})
 	m = mm
 	iw := m.innerWidth()
 
@@ -251,21 +253,29 @@ func TestBootSkippableAndShort(t *testing.T) {
 	}
 }
 
-// The wave bay and the faceplate agree on the compact threshold: at h>=14 the
-// wave renders at the receiver's right-bay width, below it at full width.
+// The wave bay and the faceplate agree: wherever receiverShape claims the
+// terminal the wave renders at the right-bay width, everywhere else it
+// takes the full stacked width. Heights like 14 don't fit the panel — the
+// accounting now says so rather than drawing it truncated.
 func TestWaveGateConsistency(t *testing.T) {
 	m := testModel(t)
 	m.w = 110
 	iw := m.innerWidth()
 	_, _, right := receiverColumns(iw)
 
+	for h := 8; h <= 30; h++ {
+		m.h = h
+		want := iw
+		if m.receiverShape() {
+			want = right
+		}
+		if got := m.waveRenderWidth(); got != want {
+			t.Fatalf("h=%d: wave width %d but the layout decision says %d", h, got, want)
+		}
+	}
 	m.h = 15
 	if got := m.waveRenderWidth(); got != right {
-		t.Errorf("h=15 should render the wave in the right bay (%d), got %d", right, got)
-	}
-	m.h = 14
-	if got := m.waveRenderWidth(); got != right {
-		t.Errorf("h=14 should render the wave in the right bay (%d), got %d", right, got)
+		t.Errorf("h=15 fits the faceplate: wave should take the right bay (%d), got %d", right, got)
 	}
 	m.h = 13
 	if got := m.waveRenderWidth(); got != iw {

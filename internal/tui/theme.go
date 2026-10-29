@@ -8,7 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"screech/internal/core"
+	"github.com/tinkthemaker/screech/internal/core"
 )
 
 // Theme: one saturated accent, three warm grays. NFO austerity, not a
@@ -148,6 +148,7 @@ type Glyphs struct {
 	Tick     string // preset mark on the band line
 	Knob     string // volume slider thumb
 	Pointer  string // active row in browsable lists
+	Times    string // play-count multiplier ("heard 3×")
 	Seam     string // gutter between the two faceplate bays
 	FrameTL  string
 	FrameTR  string
@@ -170,6 +171,7 @@ var unicodeGlyphs = Glyphs{
 	Tick:     "┴",
 	Knob:     "●",
 	Pointer:  "›",
+	Times:    "×",
 	Seam:     "│",
 	FrameTL:  "╭",
 	FrameTR:  "╮",
@@ -192,6 +194,7 @@ var asciiGlyphs = Glyphs{
 	Tick:     "+",
 	Knob:     "O",
 	Pointer:  ">",
+	Times:    "x",
 	Seam:     ":",
 	FrameTL:  "+",
 	FrameTR:  "+",

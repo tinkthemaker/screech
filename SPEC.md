@@ -41,7 +41,10 @@ two controls:
   un-loving the first.
 - **dead streams** (`TuneDead`) — a stream that fails to lock closes its
   listen with no skip semantics and no bandit reward; fail_count is the
-  whole penalty. Network trouble is not dislike.
+  whole penalty. Network trouble is not dislike — and an outage is not the
+  stations' fault either: three consecutive failures read as the network,
+  so those strikes are returned (`ForgiveFailure`) and the UI goes offline
+  instead of burning through the cache (see Playback).
 
 Shipped in v0.2, still within the austerity budget:
 
@@ -66,7 +69,38 @@ Shipped in v0.2, still within the austerity budget:
   background; every later launch keeps zero-press resume.
 - **volume** (`v`, then arrows or `-`/`+`): application-only mpv volume,
   persisted in SQLite. It appears as a temporary instrument slider rather
-  than occupying permanent space in the idle display.
+  than occupying permanent space in the idle display, and it behaves like
+  one: it tucks itself away after four seconds without a volume key, and
+  any other key closes it and still does its own job — the slider never
+  turns space into a dead key.
+- **pause** (`p`): one pause state — mpv's own `pause` property — so `p`,
+  keyboard media keys, headset buttons, the OS media flyout, and MPRIS all
+  hold the same output. Pausing splits the listen: the banked segment keeps
+  its dwell credit, paused wall time counts toward nothing, and a fast
+  skip after resuming is judged on the session's total active dwell, not
+  the fresh-looking segment. Resuming inside 30s unpauses in place and
+  picks up from mpv's buffer a few seconds behind live, like pausing live
+  TV; past that the buffer is stale or the server has hung up, so resume
+  reloads and rejoins the live edge. The flyout's Stop button lands the
+  same way but unloads the stream, so it always reloads on resume;
+  Next/Previous do nothing — there is no playlist. Choosing a station
+  (space, digits, library, seed) turns the radio back on regardless of
+  who paused it.
+- **sleep timer** (`z`): steps 15/30/45/60/90 minutes then off, counted
+  down in the footer. The last 30 seconds ease the player's volume toward
+  silence — the persisted listener volume is untouched and restored —
+  and expiry pauses the radio.
+- **help** (`?`): a read-only key sheet over whatever is underneath. Any
+  other key closes it and still does its own job, like the volume strip.
+- **station info** (`i`): a read-only sheet for the tuned station —
+  directory facts plus the personal ledger: audible time, visits, first
+  and last heard, named loves, preset slot, strikes. Its MATCH figure is
+  the mean of the Beta the picker samples this station from in the
+  current daypart, not a parallel score, and the sheet re-requests as the
+  radio moves, so it always answers for what is playing.
+
+Pause, sleep, help and info arrived in v0.8; none of them teaches the
+model anything (pause only stops the clock).
 
 `q` quits. Launch resumes the last station and plays immediately — zero-press startup,
 like a physical radio. Everything else is automatic or read-only.
@@ -78,6 +112,17 @@ Four layers, buildable in vertical slices:
 1. **Core package** — SQLite, scoring, fingerprints, ad-risk, radio-browser client.
    No UI knowledge. The portable heart for Path 2.
 2. **Bubble Tea TUI** — talks to core directly at first, daemon API later.
+   The listening state machine is not the TUI's: `internal/session` holds
+   it as a UI-free value (`State`, Elm-style `Update(Msg) (State, []Cmd)`)
+   that any face drives. It owns phases, picks, the tune/drop/offline/
+   restart rules below, pause from any source, the sleep timer, auto-hop,
+   love, presets, volume and the transient feedback line. The TUI renders
+   a `session.State`, maps keys to intents, and does only face work on top
+   (ceremony on each pick, wave energy, readouts, overlays, library and
+   info sheets that read core directly). `internal/app` is the shared
+   startup — config, single-instance lock, last-run log, database, mpv —
+   and returns errors for the face to present. State-machine behaviour is
+   pinned by `internal/session`'s tests; rendering by the TUI's.
 3. **Daemon** — small JSON API (~8 endpoints) on the homelab. For browser clients it
    **relays the stream**: one upstream connection per tuned station, reads ICY titles
    from the bytes it's already forwarding, serves the audio same-origin over HTTPS.
@@ -89,6 +134,76 @@ Four layers, buildable in vertical slices:
    Tailscale HTTPS). One big NEXT button, a small heart, now-playing text. Tailscale
    for off-LAN, zero exposed ports.
 
+### Faces over one engine
+
+Layers 1 and 2 above are a dependency direction, not just a list. `core`
+knows no UI. `internal/session` sits on `core` and `player` and knows no
+face either. A face imports `session` and draws it:
+
+    core -> session -> faces: tui (terminal), gui (Windows window)
+    app  = the shared startup both programs call first
+
+`cmd/screech` runs `app.Start`, then the Bubble Tea faceplate over a
+`session.State`. `cmd/screech-gui` (Windows only; every file in it is
+`//go:build windows`) runs the same `app.Start`, then a frameless Wails v2
+window. The window has no Bubble Tea loop to ride, so the engine runs on a
+`session.Runner`: one goroutine owns the `State`, each command runs on its
+own goroutine, a 250 ms tick republishes the changes no message causes
+(feedback expiring, the sleep minutes), and the face receives a
+`session.Snapshot` only when it differs from the last. A `Snapshot` is a
+comparable value: everything the now-playing area draws and nothing it
+needs a slice or map for. Level readings go out at most every 33 ms; the
+meter animates between them. The single-instance lock covers both
+programs, so only one of them plays at a time. The window's own design
+record is `docs/superpowers/specs/2026-10-18-lcars-gui-design.md`.
+
+The strip keeps familiar player controls in reading order: PAUSE/RESUME,
+NEXT/RETRY NOW, LOVE, MORE/LESS, then a permanent EXIT at the far right.
+EXIT calls the same bridge quit path as `q`. Station and track text that
+exceeds its row makes one measured pass after a reading pause, then returns
+to the start; reduced motion leaves it still. The frameless HWND gets a
+DPI-scaled window region on restore and each fold change, following the
+LCARS face's 48-px left curves and smaller right caps. Dragged onto a
+monitor at another scale, Wails resizes the window on `WM_DPICHANGED`
+without telling Go, so the page watches `devicePixelRatio` and calls
+`Rescaled`, and the shell reshapes the region to the window's new size.
+
+**The bridge contract** (`internal/gui`, which imports neither Wails nor
+`x/sys/windows`, so its tests run on every OS). `gui.Bridge` is the one
+object bound to the page, and every bound method is exactly one of two
+things: a single queued session intent, which first sends `session.Touch`
+so a startup notice clears on the first interaction, as it does in the
+terminal; or a single `core` read for a library view (recent, loved,
+stations, taste, info), returned as a DTO with lowerCamel JSON, times in unix
+milliseconds and durations in whole seconds. Nothing on that surface
+blocks; slow work runs on the runner and reports back as an event. Go
+pushes two events, `snapshot` (a `session.Snapshot`) and `level` (`[L, R,
+peak]`). The page draws `Snapshot`s and never decides behaviour: wording
+the terminal already has is reused verbatim, and even the first-run
+wildcard is an intent (`Wildcard`), not page logic. What only the shell
+can do goes through the small `gui.Window` interface (fold and unfold,
+quit), and display choices the page can't read for itself (reduced motion)
+come from `Bridge.Prefs()`. Two tests pin the surface from both sides:
+`TestBoundSurface` lists the exported methods, and `TestBridgeJSContract`
+requires `bridge.js` to name exactly those, so a method can't exist on one
+side only.
+
+**The layout guard.** The front end is plain ES modules served from
+`embed.FS` with no build step, so nothing but a test stands between a CSS
+edit and a crooked panel. `go test -tags layout -run "Layout|KeyboardMap"
+./internal/gui` (Windows only; skipped when Edge is absent) renders every
+window state (each strip state, every console view, empty and 150-row
+lists, nine full presets) in headless Edge, at 100% and 150% scaling,
+folded and unfolded. The fixtures are built from the bridge's own Go types
+and fed to the real page through a fake bridge. It fails on any box edge off
+the 4 px grid, text off the x = 136 column (filled rows 124), text that
+overflows or escapes its box, two leaves that overlap, wrong words or
+colours where a fixture pins them, and any strip element that moves between
+states or between folded and unfolded. `TestKeyboardMap` replays scripted
+key and wheel events on the real page and checks which bridge calls each
+one makes, including that the wheel never sets the volume. Screenshots land
+in `.review/gui/`, and CI uploads them.
+
 ## Playback (TUI)
 
 Shell out to `mpv --no-video --idle` over JSON IPC. mpv handles codecs, ICY,
@@ -99,6 +214,86 @@ IPC transport differs by OS: unix socket on linux/mac, **named pipe on Windows**
 (`\\.\pipe\…`, via go-winio). The thin client (~150 lines) supports both behind
 build tags. Observe `metadata` (prefer `icy-title` key) and `media-title` as
 fallback; watch `core-idle` / `paused-for-cache` for the connect spinner.
+
+**Stream lifecycle (v0.7).** Live radio drops constantly, and mpv does not
+reconnect non-seekable ICY streams by default, so a dropped server used to
+leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
+
+- `end-file` events are filtered by load generation: between a `loadfile`
+  and the next `start-file`, any `end-file` belongs to the file being
+  replaced (mpv always reports the old file's `stop` before the new
+  `start-file`) and is dropped. What remains is about the current stream:
+  `error` → stream failed, `eof` → stream ended on its own.
+- `--stream-lavf-o=reconnect_streamed=1` lets ffmpeg ride out brief drops
+  inside one connection; the app-level rules below are the backstop.
+  `--ytdl=no`: mpv's hook would otherwise run yt-dlp on every URL that
+  fails to load, delaying the failure everything below keys on. Page links
+  are resolved by screech itself instead (next item).
+- **Page links (optional, off by default).** A listener's own station may
+  be a page (YouTube, SoundCloud, Vimeo, Mixcloud, Bandcamp or Twitch,
+  matched by host in `streamurl.IsPage`). With `ytdlp_path` set, `Play`
+  runs `yt-dlp -f bestaudio/best --no-playlist --playlist-items 1 --get-url`
+  plus `--print` lines for artist, track and title before `loadfile`, under
+  a hard 6 s timeout: the tune watchdog allows 12 s from the pick, so mpv
+  keeps half. `/best` is there because YouTube live streams offer only muxed
+  HLS, which mpv plays audio-only under `--no-video`. The old station is
+  stopped first (that `stop`'s end-file falls inside `loadPending` and is
+  dropped) so its titles can't land on the new listen. A resolution that
+  fails or times out returns `player.ErrResolve`, which the session handles
+  as `PlayFailed`: one strike, on to the next station. A Play overtaken
+  while resolving returns `player.ErrSuperseded` and loads nothing; the
+  check and the `loadfile` share one lock hold, and the session ignores
+  that error, so a skip during yt-dlp leaves no strike and no stray listen.
+  The direct URL is cached in memory per page for an hour, well inside the
+  ~6 h its signature lasts, and dropped when its stream errors or ends, so
+  a reconnect or the next visit resolves afresh. It is never stored: the
+  station keeps its page link. The URL carries no ICY metadata and its
+  filename is junk, so the title goes in as a per-file option,
+  `loadfile <url> replace -1 force-media-title=%n%<title>` (mpv's
+  length-prefixed quoting, so commas, quotes and `=` survive; needs mpv
+  0.38+), and rides the media-title path like any other title. The title is
+  "artist - track" when yt-dlp knows both, else the page title, else none,
+  leaving the filename filter to keep the URL out of the heard list. The
+  extractor is an interface (`player.Extractor`), so unit tests run a
+  scripted yt-dlp and never the network. Without `ytdlp_path`, a page link
+  goes to mpv as-is and fails there, as before.
+- Personal `mpv.conf` still applies (audio device, exclusive mode — the
+  parts worth keeping), but options that break live radio are pinned at
+  spawn: `keep-open` and `loop-*` would swallow the eof that drop
+  detection keys on, `pause=yes` would make every tune look dead,
+  `resume-playback`/`save-position-on-quit` would "resume" a live stream
+  at a stale offset, and the default demuxer cache (150MiB ahead, 50MiB
+  back) only grows for radio — about 55 minutes of never-seeked back
+  buffer per hour at 128k — so it is bounded to 32MiB/4MiB.
+- Pause is mpv's `pause` property, observed like the other properties:
+  property-changes map to paused/resumed events (an external `stop`
+  end-file maps to stopped), and `Play` always sends `pause=false` after
+  `loadfile` because mpv's pause survives the load — a chosen station must
+  never start silent.
+- Until an ICY title arrives, `media-title` falls back to mpv's `filename`:
+  the whole URL percent-decoded, then everything after its last `/`, query
+  included (`aac-128`, `kexp128.mp3`, `rq?rj-ttl=5&rj-tok=…`; KEXP sends an
+  empty `icy-title`, so its stays that forever). The player drops a
+  media-title equal to any form `streamurl.MpvFilenames` derives from the
+  URL it loaded, or to the `filename` mpv last reported, which covers
+  playlist entries Screech never saw. It used to show as the track and log
+  a junk heard-track on every tune (migrations 4 and 5 purged them).
+- A failure *before* lock (error, eof, or 12s of nothing) is the station's:
+  one strike, move on. A failure *after* lock (eof, error, or a 20s buffer
+  stall) is a drop: re-`loadfile` the same station without touching the open
+  listen, so dwell credit and the readout clock carry across the gap. More
+  than three drops without a stable minute in between counts as a failure.
+- Three consecutive pre-lock failures mean the network, not the stations
+  (offline DNS fails in milliseconds; striking each would bench the whole
+  cache in a minute). The strikes are returned, the listen closes without
+  semantics, and the UI enters `OFFLINE`: retries back off 5s → 60s,
+  alternating the last station that locked with a fresh pick, and never
+  strike. Any lock clears it.
+- A crashed mpv is respawned (same volume, new IPC endpoint) and the station
+  resumed as a reconnect, at most three times per five minutes.
+- mpv is a child that must not outlive screech: a kill-on-close job object
+  on Windows, `PDEATHSIG` on Linux. macOS has no kernel equivalent; a clean
+  quit, SIGTERM, SIGHUP, or panic all still stop it.
 
 ## Station data
 
@@ -114,13 +309,35 @@ signal only.
 (staleness = last_sync older than 7 days, or cache under half the limit after
 the knob grows). On each sync: stations absent from the fresh slice with no user
 history (no listens, no bandit counts, no loves, not preset, not the resume
-station, not a seed) are pruned; re-vouched stations heal one local `fail_count`
+station, not a seed, not one of the listener's own) are pruned; re-vouched stations heal one local `fail_count`
 strike, so temporary outages rehabilitate. Locally, three consecutive play
 failures still bench a station immediately — `lastcheckok` alone was never
 enough.
 
 A small embedded seed list (SomaFM, Radio Paradise, WFMU, KEXP, NTS, WWOZ…) covers
 first-run when the API is unreachable and gives cold start a decent floor.
+
+**The listener's own stations (`custom:`).** Any http/https stream link is a
+station: a `[[stations]]` table in config.toml, written by hand or by
+`screech add <link> [--name N] [--tags T]`. The config file is their record
+and the database only a cache of it, so the database stays disposable. Each
+launch (`internal/app`, so both faces) hands the list to
+`Core.SetCustomStations`, which upserts every entry under `custom:` plus the
+first 16 hex digits of the SHA-256 of its link (scheme and host case-folded),
+then deletes the custom rows whose link has left the config, with their
+preset slots. Hashing the link means reordering or renaming entries never
+re-identifies a station, and listens, loves, heard tracks and bandit counts
+stay under the uuid, so adding a removed link back finds its history. The
+link is played as given (there is no directory to resolve it) and gets the
+same ad-risk curation as directory stations; a launch heals one strike, as
+it does for seeds. The directory sync can't touch these rows: its uuids
+never collide with `custom:` ones, `PruneStale` spares `custom:%` beside
+`seed:%`, and the click report skips both namespaces. `NeedsSync` counts
+directory rows only (seeds included), so links in a fresh config never pass
+for a synced cache. `screech add`/`remove` edit config.toml as text, so
+comments, order and spacing survive; each edit is re-read and checked before
+it replaces the file, and neither command opens the database. A running
+instance picks the change up on its next launch.
 
 ## The algorithm
 
@@ -178,14 +395,36 @@ Thin data backs off to all-time automatically.
 
 - top stations by decayed tag affinity
 - stations whose observed artists overlap the loved set (IDF-weighted)
+- heard favourites: up to 12 stations whose own posterior mean (the Beta the
+  sampler draws from) is above 0.5. Without them a station could only come
+  back through its tags, a loved artist, or the random slice, which lost
+  tagless favourites for listeners who rarely press love
+- the listener's own stations: up to 4 `custom:` stations per pick, drawn at
+  random when there are more. Unheard and often untagged, they can't win tag
+  affinity or overlap, and the random slice draws a dozen from twenty
+  thousand. In the harness's genre+links scenario, three liked links went
+  from 0% of picks to 7% for a listener who never loves (8% with loves), a
+  dull fourth was gone from the late picks, and late E[like] held
+  (0.604 → 0.609; 0.595 → 0.630 with loves)
 - a small pure-random slice (serendipity)
 - never the current or previous station; never stations with fail_count ≥ 3
+
+The pool is handed to the sampler in a fixed order, so a seeded rng is
+reproducible. `go test -tags eval -run TestEval -v ./internal/core` runs the
+simulated-listener harness: synthetic catalogs, a listener with hidden taste
+who stays or skips, and E[like] of the picks over time against a random
+pick. Its scenarios cover genre taste, station-specific taste, genre plus
+per-station quality, and genre taste plus four pasted links (three liked,
+one dull), each with and without loves. Change the picker or the rewards,
+then check this table.
 
 Never-heard stations get priors seeded from tag affinity × loved-artist overlap ×
 ad-risk penalty.
 
 **Explainability:** every pick carries a reason string, shown dim under the band
-line: "plays 3 artists you love" / "tag: ambient" / "wildcard".
+line: "plays 3 artists you love" / "tag: ambient" / "added by you" /
+"wildcard". A listener-added station that wins without artist or favourite
+evidence says "added by you", never "wildcard".
 
 ## Ad minimization
 
@@ -200,7 +439,12 @@ Curation does the real work; runtime detection is a bonus, and expectations stay
    commercial streams *don't* change titles during breaks, and DJs legitimately set
    the title to the station name — so detection only flags a *suspected* break
    (dim indicator) and discounts skips made during it. **Auto-hop is config-gated
-   and off by default.**
+   and off by default.** With `auto_hop_ads` on, only a literal marker in the
+   title (`AdMarker`) hops — the empty and station-name cases stay suspicion,
+   because DJ talk and station IDs produce them too. A hop is a skip through
+   `Tune`, so it lands as a break skip (β += 0.25 when fast), the same lesson
+   as pressing SPACE; one hop per 30 s keeps a run of stations all mid-break
+   from chaining hops faster than a listener can follow.
 
 ## SQLite schema
 
@@ -215,7 +459,18 @@ Curation does the real work; runtime detection is a bonus, and expectations stay
   as ground truth.
 - `bandit` — (station, daypart) → alpha, beta, updated_at  (daypart 'all' = all-time row)
 - `tag_affinity` — tag → weight, updated_at
-- `meta` — key/value (schema version, last station, last sync)
+- `meta` — key/value (last station, last sync, volume, theme)
+- `presets` — slot 1-9 → station, saved_at
+
+Schema changes are numbered migrations recorded in `PRAGMA user_version`,
+each applied with its version stamp inside one transaction. Opening runs
+`quick_check`; a database that fails it (or isn't SQLite at all) is moved
+aside with its WAL/SHM as `screech.db.corrupt.<ts>` and rebuilt, and the
+status line says so. Text arriving from the network (station metadata, ICY
+titles) is stripped of terminal escapes, controls, and bidi overrides at
+ingest and again on read; migration 3 normalized rows stored before that
+(re-deriving artist keys), so loves recorded by older versions still toggle,
+forget, and count.
 
 ## UI — visual language
 
@@ -236,10 +491,21 @@ allowed for fine detail.
 
 **Faceplate layout (v0.5).** The brand/status rail pins to the top and the
 stateful key strip pins to the bottom. At 78 columns and sufficient height, a
-single framed receiver body centers between them. Its left bay contains track,
-artist, broadcast identity, and the station's genre tags; its right bay
-contains the live signal and the station-memory dial. A raised full-width
-readout explains the current pick.
+single framed receiver body centers between them — which includes the
+standard 80×24 window, the most common terminal there is. Its left bay
+contains track, artist, broadcast identity, and the station's genre tags; its
+right bay contains the live signal and the station-memory dial. A raised
+full-width readout explains the current pick, and when it carries feedback
+it keeps that feedback's own label (`LOVED  Track and station`, `ONLINE
+Signal restored`) rather than a generic one.
+
+"Sufficient height" is counted, not estimated. The height check adds up
+every row the panel will actually draw — both rails, the readout, the
+genre block when the station has tags, the density strip when there is
+history — and only then decides between faceplate and stacked layout. It
+used to assume the meter's first rows were free, and at common heights
+(a 100×20 window, say) the readout and the bottom rail were silently cut
+off by the screen edge. A frame is never drawn without its bottom edge.
 
 **The station-memory dial is an instrument, not a hairline.** Three rows: a
 listening-density strip, the band carrying the needle and the preset ticks,
@@ -375,21 +641,35 @@ affect listening state. The chosen finish tempers with the daypart — brighter
 and cooler midday, dimmer and warmer at night; austere takes the lightness
 shift only, and picker previews render under the current daypart.
 
-**Library views.** `h` opens recent tracks. `H` opens a unified library on the
-loved view; Tab cycles recent, loved, and saved stations. Loved tracks are
+**Library views.** `h` opens recent tracks; `j`/`k` (and page keys) scroll the
+hundred most recent — they used to load and then show only what fit. `H`
+opens a unified library on the loved view; Tab cycles recent, loved,
+saved stations, and a taste view. Loved tracks are
 deduplicated, searchable across artist/title/origin station, and
 keyboard-selectable. The selected track can seed more music from its artist,
 return to its origin station, or be removed with a guarded action.
 
 The **saved-stations view** is the full two-tier station list: presets
-(carrying their slot number) plus every station with loved tracks, unified
-and sorted most-listened first. It's unbounded — presets stay at nine for
+plus every station with loved tracks, unified and sorted most-listened
+first. A preset's slot sits left of its name like a channel number; the
+right side is aligned columns of listen time and love count. The slot used
+to trail the love count on the right, where `♥1 1` read as one number and
+the ASCII form `<31` read as "less than 31". It's unbounded — presets stay at nine for
 instant digit recall, but the library holds every station you've ever
 marked. `/` filters by name, `j`/`k` select, `enter` tunes, digits jump to a
 preset, and a guarded `x` removes the station from recall (preset slot and
 loved rows) while leaving listen history and the taste model untouched.
 Radio metadata is recall and discovery context, never presented as an
-on-demand replay URL. Esc closes.
+on-demand replay URL. Esc clears an active filter first, then closes —
+in both filterable views.
+
+The **taste view** reads the record back at the listener: all-time and
+seven-day audible time, an audible-time histogram across the four
+dayparts, the artists heard most in the last 90 days (only titles caught
+inside a listen that ran at least the fast-skip window, or the one still
+open — a ten-second skip is not taste), the tag affinities still above
+prior after decay, the most-listened stations of the last 30 days, and
+the loved-track count.
 
 **The wave (honest amplitude, synthetic texture).** Touching braille cells,
 the top block of rows the left channel and the bottom block the right, with
@@ -398,9 +678,12 @@ peak and peak-hold ticks that cool through the ramp as they fall. Bars are
 bass-weighted, so per-channel levels still read as a spectrum, not a uniform
 bounce; the tilt is a lean (1.0 → 0.74), not a cliff, or the right of the
 bay goes structurally dead. Amplitude is real (mpv astats per-channel RMS +
-peak over IPC ~20Hz, mono mixdown fallback); texture is synthetic. If level
-data stops (other backends), it falls back to self-animated breathing after
-3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already takes
+peak over IPC ~20Hz, mono mixdown fallback); texture is synthetic. The
+filter is labelled (`--af=@meter:lavfi=[astats…]`) and read as
+`af-metadata/meter/lavfi.astats.*`: an unlabelled path is an error on mpv
+0.41, and an observed property that errors simply never fires, which left
+the wave on its fallback unnoticed until 0.9. If level data stops (other
+backends), it falls back to self-animated breathing after 3s. Real FFT arrives with Path 2's pure-Go audio; the renderer already takes
 a `[]float64` either way.
 
 **Resolution is per-row, and one row is not enough.** A braille cell's eight
@@ -438,14 +721,30 @@ same frame as the keypress, always; never block render on network.
 **Idle (the main state).** After ~3 min without keys: everything dims except track
 title and wave; the accent marker breathes (slow luminance sine, ~6s period). Any
 key snaps bright. Natural track changes step the new title dim → mid → bright.
-Marquee etiquette for long titles: pause 2s, scroll once, pause, reset — no
-endless loops. Past 5 min without any activity the chrome — wordmark, frame
+Marquee etiquette for long titles: pause 2s, scroll once, pause, then rest on
+the head of the title with an ellipsis — no endless loops. (For a while it
+did loop, every few seconds for as long as the track played, in an
+interface meant to be left alone for hours.) Past 5 min without any activity the chrome — wordmark, frame
 metal, key strip, microlabels — eases to an ember floor over ~30s; the wave,
 dial marker, and LIVE readout keep living, and any key, tune, or player state
 event restores the room instantly.
 
 **Boot.** ~600ms: rules draw outward from center, wordmark letterspaces in, then
 content. Skippable on any key — the key still lands.
+
+**Reduced motion.** `--reduced-motion` (or `SCREECH_REDUCED_MOTION`) is a
+real mode, not a single switch: no boot sequence, no decrypt scramble, no
+static collapse, no scrolling titles, no blinking (buffering, cursors), no
+idle breathing, no love flash, and the dial needle lands on the new station
+instead of springing to it. Everything still changes state on the same
+frame; it just stops moving to get there. The decrypt, when it does run,
+resolves into exactly the text that stays on screen — it used to resolve
+into the plain name and then snap to the letterspaced plate a frame later.
+
+**Startup notices survive startup.** A message the user must see once (a
+damaged database moved aside) holds the readout until the first key. It
+used to share the transient note slot, and the zero-press resume cleared it
+within milliseconds of launch, so nobody ever saw it.
 
 **Texture.** Mid-contrast readout cluster top-right: `AAC  128K  2:14:06`.
 Fixed-width clock formatting and uppercase codec labels provide
@@ -455,20 +754,75 @@ status line, keeping the whole display a single 12–14-line object.
 **Reality.** One `tea.Tick` heartbeat (15–20fps); every animation is a pure
 function of elapsed time; no per-effect goroutines. Fixed zone heights so frames
 never reflow. All truncation through go-runewidth, ellipsis, never wrap.
-Degradation ladder: <50 cols drop wave + band line; <40 drop readout; never break.
-`ascii = true` in TOML swaps every fancy glyph for ASCII (bad SSH insurance).
+Degradation ladder, in the order things are shed:
+
+- **Header.** The subtitle goes first (`PERSONAL RADIO`, or `SYNCING
+  DIRECTORY…` while a refresh runs — background work lives there, so it
+  never hides playback state), then the codec/bitrate/clock readout, then
+  the `BREAK` tag, then the wordmark. The state word — `LIVE`, `OFFLINE`,
+  `BUFFERING`, `RECONNECTING`, `TUNING`, `STOPPED` — is the last thing
+  standing. It used to be the first: a narrow window dropped the whole right
+  side at once.
+- **Key strip.** Separators tighten, then navigation labels drop (`quit`,
+  `theme`, `library`, `discover`, `skip`) before state labels (`loved`,
+  `preset 7`, `75%`), and bare keys come last. The full strip is 95 columns,
+  so an 80-column window used to get nothing but `SPACE L F / H V T Q`. The
+  strip also follows state: offline, `SPACE` reads `retry`; once the player
+  has stopped for good, only the keys that still do something remain.
+- **Body.** Below 78 columns, or when the height can't hold every row of
+  the faceplate, it collapses to the stacked composition; below 28 inner
+  columns the stacked wave and band go; at the narrowest, rows are clipped
+  rather than wrapped.
+
+"Never break" is enforced, not hoped for: `TestViewFitsEveryTerminalSize`
+renders every overlay — boot and reduced motion included — at every width
+1–30 and height 1–16 (sampled beyond) and fails on any panic, overflowing
+row, or a frame whose bottom edge went missing. There is no minimum terminal
+size at startup.
+`ascii = true` in TOML swaps every fancy glyph for ASCII (bad SSH insurance),
+and `TestASCIIModeIsSevenBit` holds it to that: in ASCII mode every rendered
+cell is 7-bit. Before that test, a multiplication sign, a few hard-coded
+ellipses and a track display that split on the Unicode dot had all leaked
+through — the last one made the faceplate print the whole track as the title
+and `NOW PLAYING` as the artist.
 
 ## Config
 
 One TOML at `os.UserConfigDir()/screech/config.toml`, created with commented
-defaults on first run: `accent`, `ascii`, `mpv_path`, `data_dir`, `auto_hop_ads`.
+defaults on first run: `accent`, `ascii`, `mpv_path`, `data_dir`, `auto_hop_ads`,
+`sync_limit`, `ytdlp_path` (empty: page links off), and a commented example
+of `[[stations]]`. `data_dir` expands
+`~` and resolves relative paths against the config directory (a
+double-click launch has a different CWD than a shell).
+Bad values never stop the radio: unknown keys, a malformed accent, and an
+out-of-range `sync_limit` (1–50,000) are repaired with a warning in the log
+and in `screech doctor`; only invalid TOML is fatal.
+
+`[[stations]]` tables (see Station data) take `name` and `url` (required)
+and `tags` (a string or a list), `codec`, `bitrate`, `country`, `homepage`.
+They are decoded in a second pass of their own, field by field, because
+decoding them into the config struct would turn one wrong type into a fatal
+load. Every text field goes through `core.CleanText`; tags are lowercased
+and comma-joined; the url must pass the player's own rule (http or https,
+with a host). A table missing its name or url, with a link that fails the
+rule, or repeating an earlier table's link (by `custom:` id) is skipped, and
+an unknown key or a wrongly typed field is dropped, each with a warning that
+names the table. A top-level setting written below a `[[stations]]` header
+belongs to that table in TOML; its warning says so and where to move it,
+rather than calling it unknown. A page link while `ytdlp_path` is empty
+loads but is warned about, since it can't play. `screech doctor` reports
+how many stations the config carries, and checks yt-dlp when `ytdlp_path`
+is set (exit bit 32 when it won't run).
 
 ## Stack
 
 bubbletea + lipgloss + harmonica · hand-rolled mpv IPC client (unix socket +
 windows named pipe) · hand-rolled radio-browser client · modernc.org/sqlite ·
 go-runewidth · BurntSushi/toml. No bubbles/list in v1 (nothing to list).
-Daemon later: net/http stdlib; phone page: htmx.
+The Windows window: Wails v2.16.0 (builds with plain `go build` and
+`-tags desktop,production`; no Wails CLI, no Node, no cgo), a plain-JS front
+end, Antonio (OFL) as its font. Daemon later: net/http stdlib; phone page:
+htmx.
 
 ## Build order (v2 — data starts flowing on day one)
 
@@ -487,7 +841,8 @@ Daemon later: net/http stdlib; phone page: htmx.
 
 ## Path 2 notes (do not build, do not preclude)
 
-Wails desktop app reusing core unchanged. mpv → pure-Go audio (oto + decoders) or
-webview `<audio>`. Daemon optional. ICY reading in-process. Real FFT feeds the
-same wave renderer. Known tradeoff: without the daemon, multi-device state doesn't
-sync (acceptable; SQLite sync or optional daemon later).
+A Wails desktop app reusing core unchanged: the Windows window (`cmd/screech-gui`,
+v0.9) is its first step, and it keeps mpv. What stays Path 2: mpv → pure-Go audio
+(oto + decoders) or webview `<audio>`. Daemon optional. ICY reading in-process.
+Real FFT feeds the same wave renderer. Known tradeoff: without the daemon,
+multi-device state doesn't sync (acceptable; SQLite sync or optional daemon later).
