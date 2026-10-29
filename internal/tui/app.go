@@ -109,7 +109,10 @@ type Model struct {
 	density      []float64
 
 	prompt       bool
+	promptMode   promptKind // which search the open prompt sends: FIND or RADIO
 	buf          []rune
+	finds        []core.DiscoveryRow // "pick up where you left off", read when / opens
+	findPos      int                 // selected row of finds
 	history      bool
 	hist         []core.HistEntry
 	recent       []core.RecentTrack

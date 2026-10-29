@@ -24,7 +24,7 @@ func (m Model) helpRows(iw, budget int) []string {
 			{"Z", "sleep timer: 15, 30, 45, 60, 90 min, off"},
 		}},
 		{"FIND", []entry{
-			{"/", "discover: a genre, an artist, a station"},
+			{"/", "find: an artist, a song, a genre or a YouTube link (TAB: radio)"},
 			{"H", "library: recent, loved, saved (TAB switches)"},
 			{"I", "about this station"},
 		}},
