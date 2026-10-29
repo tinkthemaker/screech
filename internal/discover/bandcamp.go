@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +40,16 @@ type BandcampClient struct {
 	HTTP      *http.Client // nil: a client with a 10 s timeout
 	UserAgent string
 	Endpoint  string // "" = defaultEndpoint; tests point it at httptest
+}
+
+// StatusError is Bandcamp's feed answering with something other than 200:
+// 429 when it is throttling, 5xx when it is down, 4xx when the undocumented
+// request has stopped being understood. The caller can tell them apart with
+// errors.As.
+type StatusError struct{ Code int }
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("bandcamp discover: HTTP %d %s", e.Code, http.StatusText(e.Code))
 }
 
 var fallbackHTTP = &http.Client{Timeout: 10 * time.Second}
@@ -116,7 +125,7 @@ func (c BandcampClient) Tag(ctx context.Context, tag, slice string) ([]BCItem, e
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("bandcamp discover: %s", resp.Status)
+		return nil, &StatusError{Code: resp.StatusCode}
 	}
 	var out bcResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBandcampBody)).Decode(&out); err != nil {
@@ -185,9 +194,6 @@ const (
 	bcProbeCap = 4
 )
 
-// errPaced says a request was held back by the gap, not that anything failed.
-var errPaced = errors.New("discover: bandcamp asked too soon")
-
 type bcEntry struct {
 	items []BCItem
 	at    time.Time
@@ -215,7 +221,7 @@ func (q *Queue) bcFetch(ctx context.Context, tag, slice string, free bool) ([]BC
 		if q.bcErr != nil {
 			return nil, time.Time{}, q.bcErr
 		}
-		return nil, time.Time{}, errPaced
+		return nil, time.Time{}, ErrPaced
 	}
 	prev := q.bcLast
 	q.bcLast = now
