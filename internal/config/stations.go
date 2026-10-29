@@ -14,11 +14,15 @@ import (
 // Station is one of the listener's own streams: a [[stations]] table in
 // config.toml, written by `screech add` or by hand. The config file is the
 // record of these; the database only caches them, so it stays disposable.
-// name and url are required; the rest only fill in the station sheet and
-// give tag affinity something to match.
+// name and exactly one of url and discover are required; the rest only fill
+// in the station sheet and give tag affinity something to match. A url is
+// one stream (or page link) to play. A discover is a phrase or a YouTube
+// link to find songs from: a discovery station, which has no stream of its
+// own to name.
 type Station struct {
 	Name     string `toml:"name"`
-	URL      string `toml:"url"`
+	URL      string `toml:"url,omitempty"`
+	Discover string `toml:"discover,omitempty"`
 	Tags     string `toml:"tags,omitempty"`
 	Codec    string `toml:"codec,omitempty"`
 	Bitrate  int    `toml:"bitrate,omitzero"`
@@ -26,9 +30,22 @@ type Station struct {
 	Homepage string `toml:"homepage,omitempty"`
 }
 
-// ID is the station's custom: uuid, the identity the database and
-// `screech remove` know it by.
-func (s Station) ID() string { return core.CustomUUID(s.URL) }
+// ID is the station's custom: (or, for a discovery, disc:) uuid, the
+// identity the database and `screech remove` know it by.
+func (s Station) ID() string {
+	if s.Discover != "" {
+		return core.DiscoveryUUID(s.Discover)
+	}
+	return core.CustomUUID(s.URL)
+}
+
+// source is what the station was written as, for messages.
+func (s Station) source() string {
+	if s.Discover != "" {
+		return s.Discover
+	}
+	return s.URL
+}
 
 const badStationsShape = "stations must be [[stations]] tables; ignored"
 
@@ -71,7 +88,11 @@ func parseStations(raw any) ([]Station, []string) {
 			continue
 		}
 		if first, dup := seen[st.ID()]; dup {
-			warns = append(warns, fmt.Sprintf("%s: same url as #%d; skipped", label, first))
+			what := "url"
+			if st.Discover != "" {
+				what = "discover"
+			}
+			warns = append(warns, fmt.Sprintf("%s: same %s as #%d; skipped", label, what, first))
 			continue
 		}
 		seen[st.ID()] = i + 1
@@ -85,7 +106,7 @@ func parseStations(raw any) ([]Station, []string) {
 func parseStation(t map[string]any) (Station, []string) {
 	var st Station
 	text := map[string]*string{
-		"name": &st.Name, "url": &st.URL, "codec": &st.Codec,
+		"name": &st.Name, "url": &st.URL, "discover": &st.Discover, "codec": &st.Codec,
 		"country": &st.Country, "homepage": &st.Homepage,
 	}
 	keys := make([]string, 0, len(t))
@@ -171,9 +192,12 @@ func tagsValue(v any) (string, bool) {
 // text field through core.CleanText (the config is typed by hand and may
 // be pasted from anywhere), tags lowercased and comma-joined, and a link
 // the player will actually open. An error means the station can't be used.
+// A discovery has no link to check: its phrase is whatever the listener
+// typed, and only has to say something.
 func (s Station) clean() (Station, error) {
 	s.Name = core.CleanText(s.Name)
 	s.URL = core.CleanText(s.URL)
+	s.Discover = core.CleanText(s.Discover)
 	s.Tags = cleanTags(s.Tags)
 	s.Codec = core.CleanText(s.Codec)
 	s.Country = core.CleanText(s.Country)
@@ -181,11 +205,17 @@ func (s Station) clean() (Station, error) {
 	if s.Bitrate < 0 {
 		s.Bitrate = 0
 	}
-	if s.URL == "" {
+	switch {
+	case s.URL != "" && s.Discover != "":
+		return s, errors.New("url and discover are both set; use one")
+	case s.Discover != "":
+		// Nothing to check: any phrase will do.
+	case s.URL == "":
 		return s, errors.New("needs a url")
-	}
-	if err := checkLink(s.URL); err != nil {
-		return s, err
+	default:
+		if err := checkLink(s.URL); err != nil {
+			return s, err
+		}
 	}
 	if s.Name == "" {
 		return s, errors.New("needs a name")

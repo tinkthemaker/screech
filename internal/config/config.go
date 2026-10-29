@@ -88,6 +88,9 @@ ytdlp_path = ""
 # each. "screech add <link>" writes one for you. name and url are required;
 # tags, codec, bitrate, country and homepage are optional. They join the
 # rotation the next time Screech starts and survive every directory refresh.
+# Instead of a url, a station can be a discovery: discover = "<phrase or
+# YouTube link>" finds songs from that sound, song after song.
+# "screech add --discover <phrase>" writes one.
 # Keep every setting above this point: in TOML, a line below a [[stations]]
 # header belongs to that station.
 #
@@ -95,6 +98,10 @@ ytdlp_path = ""
 # name = "My station"
 # url = "https://example.com/stream.mp3"
 # tags = "jazz, late night"
+#
+# [[stations]]
+# name = "Dungeon synth"
+# discover = "dungeon synth"
 `
 
 // Read finds an existing config and returns it along with the resolved

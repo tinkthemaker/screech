@@ -104,6 +104,81 @@ func TestStartCachesCustomStations(t *testing.T) {
 	}
 }
 
+// A discovery the config names is cached on every launch, and one the
+// config doesn't (started from FIND, or taken out of the file) is history
+// that a later launch must leave alone, while the custom: set follows the
+// file exactly.
+func TestStartCachesDiscoveryStations(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "screech.log")
+	dbPath := filepath.Join(dir, "screech.db")
+	link := config.Station{Name: "My Link", URL: "https://mine.example/live.mp3"}
+	disc := config.Station{Name: "Dungeon", Discover: "dungeon synth"}
+	start := func(stations ...config.Station) {
+		t.Helper()
+		_, err := StartFrom(NewLog(p), func() (config.Config, string, error) {
+			return config.Config{DataDir: dir, MpvPath: filepath.Join(dir, "no-mpv"), Stations: stations}, dbPath, nil
+		})
+		var se *StartError
+		if !errors.As(err, &se) || se.Stage != StageMpv {
+			t.Fatalf("got %v, want the mpv stage to fail after the database opened", err)
+		}
+	}
+	cached := func() map[string]core.Station {
+		t.Helper()
+		store, err := core.OpenStoreReadOnly(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		sts, err := store.LoadStations()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]core.Station{}
+		for _, st := range sts {
+			out[st.UUID] = st
+		}
+		return out
+	}
+
+	start(link, disc)
+	got := cached()
+	st, ok := got[core.DiscoveryUUID("dungeon synth")]
+	if !ok || st.Name != "Dungeon" || st.StreamURL() != "discover:dungeon synth" {
+		t.Fatalf("discovery not cached as configured: %+v (found %v)", st, ok)
+	}
+	if _, ok := got[core.CustomUUID(link.URL)]; !ok {
+		t.Fatal("the link was not cached beside it")
+	}
+	if b, _ := os.ReadFile(p); !strings.Contains(string(b), "discovery stations from config: 1") {
+		t.Errorf("log = %q, want the discovery count", b)
+	}
+
+	start()
+	got = cached()
+	if _, ok := got[core.DiscoveryUUID("dungeon synth")]; !ok {
+		t.Error("a discovery left out of the config must stay: it is history")
+	}
+	if _, ok := got[core.CustomUUID(link.URL)]; ok {
+		t.Error("a link left out of the config must go")
+	}
+}
+
+func TestCustomStationsSplitsLinksFromDiscoveries(t *testing.T) {
+	links, discs := customStations([]config.Station{
+		{Name: "L", URL: "https://l.example/", Tags: "jazz"},
+		{Name: "D", Discover: "Dungeon Synth", Tags: "ambient"},
+	})
+	if len(links) != 1 || links[0].URL != "https://l.example/" || links[0].UUID != "" {
+		t.Errorf("links = %+v", links)
+	}
+	want := core.Station{UUID: core.DiscoveryUUID("dungeon synth"), Name: "D", URL: "discover:Dungeon Synth", Tags: "ambient"}
+	if len(discs) != 1 || discs[0].UUID != want.UUID || discs[0].Name != want.Name || discs[0].URL != want.URL || discs[0].Tags != want.Tags {
+		t.Errorf("discoveries = %+v, want %+v", discs, want)
+	}
+}
+
 func TestStartConfigFailure(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "screech.log")

@@ -124,20 +124,21 @@ func (c *Core) StationCount() int {
 
 // NeedsSync reports whether the cache is effectively empty (seeds only).
 // It counts directory rows only: a fresh install with a few links in
-// config.toml has still never fetched the directory, and stations the
-// listener added must not pass for one.
+// config.toml, or a first discovery started from FIND, has still never
+// fetched the directory, and stations the listener added must not pass
+// for one.
 func (c *Core) NeedsSync() bool {
 	return c.directoryCount() <= len(seedStations)
 }
 
-// directoryCount is the cache size without the listener's own stations:
-// seeds plus whatever the directory sync brought in.
+// directoryCount is the cache size without the listener's own stations
+// and discoveries: seeds plus whatever the directory sync brought in.
 func (c *Core) directoryCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := 0
 	for i := range c.stations {
-		if !IsCustom(c.stations[i].UUID) {
+		if u := c.stations[i].UUID; !IsCustom(u) && !IsDiscovery(u) {
 			n++
 		}
 	}

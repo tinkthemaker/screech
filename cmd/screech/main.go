@@ -30,8 +30,12 @@ var usage = "screech " + version + " - terminal internet radio\n\n" +
 	"                          write a consistent SQLite backup to <path>\n" +
 	"  screech add <link> [--name N] [--tags T]\n" +
 	"                          add your own station (any http/https stream) to\n" +
-	"                          config.toml; a running screech sees it on its next launch\n" +
-	"  screech remove <link|id>\n" +
+	"                          config.toml; a running screech sees it on its next launch.\n" +
+	"                          A YouTube link becomes a discovery station seeded from it\n" +
+	"  screech add --discover <phrase> [--name N] [--tags T]\n" +
+	"                          add a discovery station: songs found from a phrase\n" +
+	"                          (an artist, a song or a genre) or a YouTube link\n" +
+	"  screech remove <link|phrase|id>\n" +
 	"                          take one of your own stations back out of config.toml\n" +
 	"  screech --help          show this message\n" +
 	"  screech --version       show the version\n\n" +
@@ -61,7 +65,8 @@ type invocation struct {
 	cmd           command
 	exportKind    string // loved, heard or backup — only set for cmdExport
 	exportPath    string // the backup destination; empty for the CSV forms
-	link          string // cmdAdd's link, or cmdRemove's link or custom: id
+	link          string // cmdAdd's link, or cmdRemove's link, phrase or custom:/disc: id
+	discover      string // cmdAdd's --discover phrase or YouTube link
 	name, tags    string // cmdAdd's --name and --tags
 	reducedMotion bool
 }
@@ -134,33 +139,39 @@ func parseArgs(args []string) (invocation, error) {
 		}
 	case cmdRemove:
 		if len(operands) != 1 {
-			return inv, fmt.Errorf("remove takes one station: its link, or the custom: id screech add printed")
+			return inv, fmt.Errorf("remove takes one station: its link or phrase, or the id screech add printed")
 		}
 		inv.link = operands[0]
 	}
 	return inv, nil
 }
 
-// parseAdd reads `add <link> [--name N] [--tags T]`, with either flag also
-// accepted as --name=N.
+// parseAdd reads `add <link> [--name N] [--tags T]` and `add --discover
+// <phrase> [--name N] [--tags T]`, with any flag also accepted as --name=N.
+// A station is a link or a discovery, never both.
 func parseAdd(inv *invocation, operands []string) error {
 	for i := 0; i < len(operands); i++ {
 		a := operands[i]
 		switch {
-		case a == "--name" || a == "--tags":
+		case a == "--name" || a == "--tags" || a == "--discover":
 			if i+1 == len(operands) {
 				return fmt.Errorf("%s needs a value", a)
 			}
 			i++
-			if a == "--name" {
+			switch a {
+			case "--name":
 				inv.name = operands[i]
-			} else {
+			case "--tags":
 				inv.tags = operands[i]
+			default:
+				inv.discover = operands[i]
 			}
 		case strings.HasPrefix(a, "--name="):
 			inv.name = strings.TrimPrefix(a, "--name=")
 		case strings.HasPrefix(a, "--tags="):
 			inv.tags = strings.TrimPrefix(a, "--tags=")
+		case strings.HasPrefix(a, "--discover="):
+			inv.discover = strings.TrimPrefix(a, "--discover=")
 		case strings.HasPrefix(a, "-"):
 			return fmt.Errorf("add: unknown flag %q", a)
 		case inv.link == "":
@@ -169,8 +180,15 @@ func parseAdd(inv *invocation, operands []string) error {
 			return fmt.Errorf("add takes one link; got %q after %q (quote a name with spaces)", a, inv.link)
 		}
 	}
-	if inv.link == "" {
-		return fmt.Errorf("add needs a link: screech add <link> [--name N] [--tags T]")
+	switch {
+	case inv.discover != "" && inv.link != "":
+		return fmt.Errorf("add takes a link or --discover, not both (got %q and %q; quote a phrase with spaces)", inv.link, inv.discover)
+	case inv.discover != "":
+		if strings.TrimSpace(inv.discover) == "" {
+			return fmt.Errorf("--discover needs a phrase or a YouTube link")
+		}
+	case inv.link == "":
+		return fmt.Errorf("add needs a link: screech add <link> [--name N] [--tags T], or screech add --discover <phrase>")
 	}
 	return nil
 }
@@ -192,7 +210,7 @@ func main() {
 	case cmdExport:
 		os.Exit(runExport(inv.exportKind, inv.exportPath))
 	case cmdAdd:
-		os.Exit(runAdd(inv.link, inv.name, inv.tags))
+		os.Exit(runAdd(inv.link, inv.discover, inv.name, inv.tags))
 	case cmdRemove:
 		os.Exit(runRemove(inv.link))
 	default:

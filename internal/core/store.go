@@ -725,14 +725,16 @@ func (s *Store) StationCount() (int, error) {
 
 // PruneStale deletes stations the directory no longer vouches for: fetched
 // before the given cutoff, absent from the fresh slice, and carrying no user
-// history. Seeds, the listener's own (custom:) stations, presets, anything
-// listened to, loved on, or scored by the bandit, and the resume station
-// all survive regardless. The directory never lists a custom: station, so
-// without its exemption every sync would delete it.
+// history. Seeds, the listener's own (custom:) stations, discoveries
+// (disc:), presets, anything listened to, loved on, or scored by the
+// bandit, and the resume station all survive regardless. The directory
+// never lists a custom: or disc: station, so without their exemptions
+// every sync would delete them.
 func (s *Store) PruneStale(before time.Time, keepUUID string) (int64, error) {
 	res, err := s.q.Exec(`DELETE FROM stations WHERE fetched_at < ?
 		AND uuid NOT LIKE 'seed:%'
 		AND uuid NOT LIKE 'custom:%'
+		AND uuid NOT LIKE 'disc:%'
 		AND uuid != ?
 		AND uuid NOT IN (SELECT DISTINCT station_uuid FROM bandit)
 		AND uuid NOT IN (SELECT DISTINCT station_uuid FROM listens)
@@ -779,6 +781,41 @@ func (s *Store) DeleteCustomExcept(keep map[string]bool) (int64, error) {
 		}
 	}
 	return int64(len(gone)), nil
+}
+
+// RenameStation changes a station's name and nothing else.
+func (s *Store) RenameStation(uuid, name string) error {
+	_, err := s.q.Exec(`UPDATE stations SET name=? WHERE uuid=?`, name, uuid)
+	return err
+}
+
+// RecentDiscoveries lists up to n discovery (disc:) stations that have a
+// listen, ordered by the start of their latest one, newest first. A
+// discovery nobody has listened to yet is not somewhere to pick up from.
+func (s *Store) RecentDiscoveries(n int) ([]DiscoveryRow, error) {
+	rows, err := s.q.Query(`
+		SELECT st.uuid, st.name, MAX(l.started_at) AS last
+		FROM stations st JOIN listens l ON l.station_uuid = st.uuid
+		WHERE st.uuid LIKE 'disc:%'
+		GROUP BY st.uuid
+		ORDER BY last DESC, st.uuid
+		LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DiscoveryRow
+	for rows.Next() {
+		var r DiscoveryRow
+		var last int64
+		if err := rows.Scan(&r.UUID, &r.Name, &last); err != nil {
+			return nil, err
+		}
+		r.Name = CleanText(r.Name)
+		r.LastAt = time.Unix(last, 0)
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) BumpFailCount(uuid string, delta int) error {
@@ -982,6 +1019,15 @@ func (s *Store) LovedArtistKeys() (map[string]bool, error) {
 		out[k] = true
 	}
 	return out, rows.Err()
+}
+
+// HeardArtistKey reports whether an artist key has ever been logged as a
+// heard track or loved, on any station.
+func (s *Store) HeardArtistKey(artistKey string) (bool, error) {
+	var n int
+	err := s.q.QueryRow(`SELECT EXISTS(SELECT 1 FROM tracks_heard WHERE artist_key=?)
+		OR EXISTS(SELECT 1 FROM loved WHERE artist_key=?)`, artistKey, artistKey).Scan(&n)
+	return n != 0, err
 }
 
 // StationArtists returns station -> set of artist keys observed there.
