@@ -37,9 +37,10 @@ func TestWindowOutlineFollowsFaceCorners(t *testing.T) {
 		unfolded bool
 		corners  [4]w32Point
 	}{
-		{128, 1, false, [4]w32Point{{0, 48}, {480, 6}, {466, 128}, {0, 80}}},
-		{428, 1, true, [4]w32Point{{0, 48}, {480, 6}, {474, 428}, {0, 380}}},
-		{192, 1.5, false, [4]w32Point{{0, 72}, {720, 9}, {699, 192}, {0, 120}}},
+		// The top right follows the ✕ cap's 10-px radius, not the old bar's 6.
+		{128, 1, false, [4]w32Point{{0, 48}, {480, 10}, {466, 128}, {0, 80}}},
+		{428, 1, true, [4]w32Point{{0, 48}, {480, 10}, {474, 428}, {0, 380}}},
+		{192, 1.5, false, [4]w32Point{{0, 72}, {720, 15}, {699, 192}, {0, 120}}},
 	} {
 		w := round(480 * tc.scale)
 		pts := windowOutline(w, tc.h, tc.scale, tc.unfolded)
@@ -249,5 +250,45 @@ func TestPlacementRestoredOnScreen(t *testing.T) {
 	}
 	if !s.unfolded {
 		t.Fatal("unfolded state not restored")
+	}
+}
+
+// With nothing played yet there is no strip to look at: the window opens
+// unfolded on FIND, whatever fold state the last run saved.
+func TestFirstLaunchOpensUnfolded(t *testing.T) {
+	for _, saved := range []core.WindowPlacement{
+		{},
+		{X: 300, Y: 200, Unfolded: false, Saved: true},
+	} {
+		ops := &fakeOps{r: rect{720, 456, 1200, 584}, scale: 1}
+		m := fakeMons{areas: []rect{{0, 0, 1920, 1040}}, primary: rect{0, 0, 1920, 1040}}
+		s, _ := testShell(ops, m, saved)
+		s.firstRun = true
+		s.restore()
+		if ops.r.height() != 428 || !s.unfolded {
+			t.Fatalf("saved %+v: restored %+v unfolded=%v, want the 428-px console", saved, ops.r, s.unfolded)
+		}
+		if len(ops.regions) != 1 || !ops.regions[0] {
+			t.Fatalf("saved %+v: regions = %v, want one unfolded outline", saved, ops.regions)
+		}
+	}
+}
+
+func TestStartsUnfolded(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		saved  core.WindowPlacement
+		virgin bool
+		want   bool
+	}{
+		{"fresh install", core.WindowPlacement{}, true, true},
+		{"never played, folded last time", core.WindowPlacement{Saved: true}, true, true},
+		{"played, left folded", core.WindowPlacement{Saved: true}, false, false},
+		{"played, left unfolded", core.WindowPlacement{Saved: true, Unfolded: true}, false, true},
+		{"an unsaved placement's fold flag means nothing", core.WindowPlacement{Unfolded: true}, false, false},
+	} {
+		if got := startsUnfolded(tc.saved, tc.virgin); got != tc.want {
+			t.Errorf("%s: startsUnfolded = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

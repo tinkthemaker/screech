@@ -86,6 +86,35 @@
       }
     }
 
+    // Rule 3b: a placeholder is text the rules above cannot see — it lives
+    // in the input's shadow, so scrollWidth ignores it. Measure it the way
+    // the input would set it (its own ::placeholder font and tracking) and
+    // hold it to the room inside the input's padding.
+    const ctx = document.createElement('canvas').getContext('2d');
+    for (const el of document.querySelectorAll('input[placeholder]')) {
+      if (gone(el) || el.value) continue;
+      const ph = getComputedStyle(el, '::placeholder');
+      const cs = getComputedStyle(el);
+      ctx.font = `${ph.fontStyle} ${ph.fontWeight} ${ph.fontSize} ${ph.fontFamily}`;
+      ctx.letterSpacing = ph.letterSpacing === 'normal' ? '0px' : ph.letterSpacing;
+      const need = ctx.measureText(el.placeholder).width;
+      const room = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      if (need > room + 0.5) {
+        v(`placeholder ${tag(el)}: "${el.placeholder}" needs ${need.toFixed(1)} px, has ${room} px`);
+      }
+    }
+
+    // Rule 3c: a button's label is never cut. The labels carry the
+    // ellipsis class so a stray long string cannot spill, which also
+    // silences Rule 3 — and PAUSE, NEXT and LOVE shrank to 80 px when EXIT
+    // gave its room to MORE, so RESUME and RETRY NOW must still fit whole.
+    for (const el of document.querySelectorAll('.btn [data-text], .barcap [data-text]')) {
+      if (gone(el)) continue;
+      if (el.scrollWidth > el.clientWidth + 1) {
+        v(`label ${tag(el)}: "${words(el.textContent)}" is clipped (${el.scrollWidth} > ${el.clientWidth})`);
+      }
+    }
+
     // Rule 4: [data-leaf] elements never intersect, ignoring
     // ancestor/descendant pairs.
     const leaves = [...document.querySelectorAll('[data-leaf]')];
@@ -124,16 +153,20 @@
     // Rule 6: content and style expectations — geometry passing can hide
     // wrong words. Expect maps data-id to exact collapsed textContent;
     // ExpectStyle maps data-id to computed-style property/value pairs.
+    // An input's content is its value, not its textContent; "id@attr" pins
+    // an attribute (a placeholder) instead of the text.
     const expect = window.__expect || {};
-    for (const [id, want] of Object.entries(expect)) {
+    for (const [key, want] of Object.entries(expect)) {
+      const [id, attr] = key.split('@');
       const el = document.querySelector(`[data-id="${id}"]`);
       if (!el || gone(el)) {
-        v(`expect ${id}: element missing`);
+        v(`expect ${key}: element missing`);
         continue;
       }
-      const got = words(el.textContent);
+      const got = words(attr ? el.getAttribute(attr)
+        : el.tagName === 'INPUT' ? el.value : el.textContent);
       if (got !== words(want)) {
-        v(`expect ${id}: "${got}" != "${words(want)}"`);
+        v(`expect ${key}: "${got}" != "${words(want)}"`);
       }
     }
     const styles = window.__expectStyle || {};
@@ -153,6 +186,29 @@
           v(`expect-style ${id}: ${prop} "${got}" != "${want}"`);
         }
       }
+    }
+
+    // Rule 6b: exact boxes. Geometry on the 4-px grid can still be the
+    // wrong geometry; these are the approved mockup's coordinates, page px.
+    const near = (a, b) => Math.abs(a - b) <= 0.5;
+    for (const [id, want] of Object.entries(window.__expectRect || {})) {
+      const el = document.querySelector(`[data-id="${id}"]`);
+      if (!el || gone(el)) {
+        v(`expect-rect ${id}: element missing`);
+        continue;
+      }
+      const r = rect(el);
+      const got = [r.left, r.top, r.width, r.height];
+      if (!want.every((w, i) => near(w, got[i]))) {
+        v(`expect-rect ${id}: ${got.join(',')} != ${want.join(',')} (left,top,width,height)`);
+      }
+    }
+
+    // Rule 7: what was taken out stays out — EXIT gave way to the ✕ cap,
+    // and SEARCH, INFO and SLEEP stopped being tabs — plus whatever a
+    // fixture says must be absent (FIND's label with no rows under it).
+    for (const id of ['btn-exit', 'tab-search', 'tab-info', 'tab-sleep', ...(window.__absent || [])]) {
+      if (document.querySelector(`[data-id="${id}"]`)) v(`absent ${id}: element exists`);
     }
   };
 

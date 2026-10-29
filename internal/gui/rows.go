@@ -46,6 +46,14 @@ type StationRow struct {
 	LoveCount  int    `json:"loveCount"`
 }
 
+// DiscoveryRow is one line of FIND's "pick up where you left off": the
+// phrase (or the song a link started from) and when it was last listened to.
+type DiscoveryRow struct {
+	UUID     string `json:"uuid"`
+	Name     string `json:"name"`
+	LastAtMs int64  `json:"lastAtMs"`
+}
+
 // DaypartRow is one "when you listen" bar.
 type DaypartRow struct {
 	Name string `json:"name"`
@@ -149,6 +157,34 @@ func stationRows(entries []core.SavedStation) []StationRow {
 			PresetSlot: e.PresetSlot,
 			LoveCount:  e.LoveCount,
 		}
+	}
+	return out
+}
+
+func discoveryRows(entries []core.DiscoveryRow) []DiscoveryRow {
+	out := make([]DiscoveryRow, len(entries))
+	for i, e := range entries {
+		out[i] = DiscoveryRow{UUID: e.UUID, Name: e.Name, LastAtMs: unixMs(e.LastAt)}
+	}
+	return out
+}
+
+// radioRows keeps the first n listen-time leaders that are radio stations,
+// and borrows each one's preset slot and love count from the saved list.
+func radioRows(tops []core.HistEntry, saved map[string]core.SavedStation, n int) []StationRow {
+	out := make([]StationRow, 0, n)
+	for _, e := range tops {
+		if len(out) == n {
+			break
+		}
+		if core.IsCustom(e.UUID) || core.IsDiscovery(e.UUID) {
+			continue
+		}
+		row := StationRow{UUID: e.UUID, Name: e.Name, TotalSec: int64(e.Total / time.Second)}
+		if s, ok := saved[e.UUID]; ok {
+			row.PresetSlot, row.LoveCount = s.PresetSlot, s.LoveCount
+		}
+		out = append(out, row)
 	}
 	return out
 }

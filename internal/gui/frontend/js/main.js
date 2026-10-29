@@ -2,6 +2,7 @@
 // Listening behaviour lives in the Go engine — this file only reads the
 // snapshot and calls bridge intents.
 import bridge from './bridge.js';
+import { ui } from './console.js';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -11,7 +12,7 @@ const els = {
   volTrack: $('volTrack'), volFill: $('volFill'), volThumb: $('volThumb'),
   volValue: $('volValue'),
   btnNext: $('btnNext'), btnLove: $('btnLove'), btnPause: $('btnPause'),
-  btnMore: $('btnMore'), btnExit: $('btnExit'),
+  btnMore: $('btnMore'), btnClose: $('btnClose'),
 };
 
 const BARS = 12;
@@ -94,8 +95,10 @@ const bucket = (s) => {
 // mockup's "● Live 00:42 · tag: ambient". Feedback takes the whole slot:
 // split on the first double space, the lead word lands in the state-word
 // position and the rest becomes the detail. Otherwise the detail follows
-// Note > syncing > sleep > reason — and reason only where the phase
-// shows it at all (tuning-family states put it in the track row).
+// Note > syncing > sleep > new-to-you > reason — and reason only where the
+// phase shows it at all (tuning-family states put it in the track row). A
+// discovery's reason is the session's own text, rendered as given; "new to
+// you" takes its seat while the song's artist is one never heard here.
 const detail = (rest) => rest ? '  ·  ' + rest : '';
 const statusParts = (s) => {
   if (s.feedback) {
@@ -114,6 +117,7 @@ const statusParts = (s) => {
   const note = s.note
     || (s.syncing ? 'SYNCING DIRECTORY…' : '')
     || (s.sleepAtMs ? 'SLEEP ' + Math.max(0, Math.ceil((s.sleepAtMs - bridge.now()) / 60000)) + ' MIN' : '')
+    || (s.newToYou ? 'NEW TO YOU' : '')
     || '';
   let word, cls = 'peach', reason = '';
   if (s.reconnecting) word = '◌ RECONNECTING';
@@ -236,8 +240,14 @@ function render() {
 els.btnNext.addEventListener('click', () => { if (bucket(snap || {}) !== 'stopped') bridge.Next(); });
 els.btnLove.addEventListener('click', () => { const b = bucket(snap || {}); if (b !== 'offline' && b !== 'stopped') bridge.Love(); });
 els.btnPause.addEventListener('click', () => { if (bucket(snap || {}) !== 'stopped') bridge.TogglePause(); });
-els.btnMore.addEventListener('click', () => bridge.SetUnfolded(!unfolded()));
-els.btnExit.addEventListener('click', () => bridge.Quit());
+// MORE opens the console on FIND, whichever tab it was last left on; LESS
+// folds it. ✕ quits, like Q.
+els.btnMore.addEventListener('click', () => {
+  if (unfolded()) { bridge.SetUnfolded(false); return; }
+  ui.openFind();
+  bridge.SetUnfolded(true);
+});
+els.btnClose.addEventListener('click', () => bridge.Quit());
 
 // The whole 14-px track row is the click/drag target; there is no range
 // input and no wheel listener on the slider. SetVolume persists to SQLite,

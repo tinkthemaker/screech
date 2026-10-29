@@ -148,17 +148,19 @@ func tail(s string) string {
 
 // A keytest step: what keys-test.js recorded after one scripted event.
 type keyStep struct {
-	Name          string   `json:"name"`
-	Calls         []string `json:"calls"`
-	Sel           int      `json:"sel"`
-	Top           int      `json:"top"`
-	Tab           string   `json:"tab"`
-	Unf           bool     `json:"unf"`
-	RowTop        *string  `json:"rowTop"`
-	Remove        *string  `json:"remove"`
-	FilterInput   bool     `json:"filterInput"`
-	SearchFocused bool     `json:"searchFocused"`
-	Prevented     bool     `json:"prevented"`
+	Name        string   `json:"name"`
+	Calls       []string `json:"calls"`
+	Sel         int      `json:"sel"`
+	Top         int      `json:"top"`
+	Tab         string   `json:"tab"`
+	Unf         bool     `json:"unf"`
+	RowTop      *string  `json:"rowTop"`
+	Remove      *string  `json:"remove"`
+	FilterInput bool     `json:"filterInput"`
+	BarFocused  bool     `json:"barFocused"`
+	BarValue    *string  `json:"barValue"`
+	RowLit      bool     `json:"rowLit"`
+	Prevented   bool     `json:"prevented"`
 }
 
 type keyResult struct {
@@ -172,15 +174,19 @@ var keysPreRE = regexp.MustCompile(`(?s)<pre id="keys"[^>]*>(.*?)</pre>`)
 // must have made (a panel reload's data read counts), and the face state
 // it must have left. nil fields go unchecked.
 type keyWant struct {
-	calls         []string
-	sel           *int
-	top           *int
-	tab           string
-	remove        string
-	filterInput   *bool
-	searchFocused *bool
-	prevented     *bool
+	calls       []string
+	sel         *int
+	top         *int
+	tab         string
+	remove      string
+	filterInput *bool
+	barFocused  *bool
+	barValue    *string // the FIND/RADIO bar's text
+	rowLit      *bool   // a FIND/RADIO row is highlighted
+	prevented   *bool
 }
+
+func sp(s string) *string { return &s }
 
 func ip(i int) *int   { return &i }
 func bp(b bool) *bool { return &b }
@@ -240,9 +246,11 @@ func TestKeyboardMap(t *testing.T) {
 		"slash-filter", "filter-letter", "filter-type",
 		"esc-filter-text", "esc-filter-close",
 		"filter-leftover", "esc-filter-leftover",
-		"i-again", "slash-search", "search-letter", "search-space",
-		"search-space-repeat", "search-type", "search-enter",
-		"esc-search", "esc-fold",
+		"i-again", "slash-find", "find-letter", "find-blank-enter", "find-type",
+		"find-tab", "radio-space", "radio-space-repeat", "radio-type", "radio-enter",
+		"radio-shift-tab", "find-down", "find-up", "find-down-again", "find-row-next",
+		"find-row-enter", "find-row-click", "slash-find-again", "find-enter",
+		"find-type-2", "esc-find-text", "esc-fold",
 	}
 	if len(order) != len(wantOrder) {
 		t.Fatalf("driver ran %d steps, want %d: got %v", len(order), len(wantOrder), order)
@@ -278,10 +286,11 @@ func TestKeyboardMap(t *testing.T) {
 		"vol-up":       {calls: []string{"StepVolume(5)"}},
 		"q":            {calls: []string{"Quit()"}},
 
-		// Tabs: TAB cycles the six views; h/H/i jump straight to a view.
+		// Tabs: TAB cycles the seven views; h/H/i jump straight to a view
+		// (i is MORE, which is where INFO went).
 		"tab":          {calls: []string{`Stations("")`}, tab: "stations", sel: ip(0)},
 		"shift-tab":    {calls: []string{`Loved("")`}, tab: "loved"},
-		"i":            {calls: []string{"Info()"}, tab: "info"},
+		"i":            {calls: []string{"Info()"}, tab: "more"},
 		"h":            {calls: []string{"Recent()"}, tab: "recent"},
 		"enter-recent": {calls: []string{}, tab: "recent"},
 		"H":            {calls: []string{`Loved("")`}, tab: "loved"},
@@ -316,18 +325,46 @@ func TestKeyboardMap(t *testing.T) {
 		"filter-leftover":     {calls: []string{`Loved("ab")`}, filterInput: bp(false)},
 		"esc-filter-leftover": {calls: []string{`Loved("")`}, filterInput: bp(false)},
 
-		// Search: / from another tab lands focused; letters are the input's;
-		// an empty input's space is the virgin wildcard (once, not per
-		// repeat); Enter seeds; ESC clears then the next ESC folds.
-		"i-again":             {calls: []string{"Info()"}, tab: "info"},
-		"slash-search":        {calls: []string{}, tab: "search", searchFocused: bp(true)},
-		"search-letter":       {calls: []string{}},
-		"search-space":        {calls: []string{"Wildcard()"}},
-		"search-space-repeat": {calls: []string{}},
-		"search-type":         {calls: []string{}},
-		"search-enter":        {calls: []string{`Seed("ambient")`}},
-		"esc-search":          {calls: []string{}, searchFocused: bp(false)},
-		"esc-fold":            {calls: []string{"SetUnfolded(false)"}},
+		// FIND: / from another tab lands on it with the bar focused;
+		// letters are the bar's, and Enter on an empty bar does nothing.
+		"i-again":          {calls: []string{"Info()"}, tab: "more"},
+		"slash-find":       {calls: []string{"RecentDiscoveries()"}, tab: "find", barFocused: bp(true)},
+		"find-letter":      {calls: []string{}, barFocused: bp(true)},
+		"find-blank-enter": {calls: []string{}, barFocused: bp(true)},
+		"find-type":        {calls: []string{}, barValue: sp("swedish death metal")},
+
+		// Tab carries the bar's focus from FIND to RADIO. An empty RADIO bar's
+		// space is the virgin wildcard (once, not per repeat); Enter there is
+		// today's search, and like FIND's it folds the console.
+		"find-tab":           {calls: []string{"RadioTop()"}, tab: "radio", barFocused: bp(true)},
+		"radio-space":        {calls: []string{"Wildcard()"}},
+		"radio-space-repeat": {calls: []string{}},
+		"radio-type":         {calls: []string{}, barValue: sp("ambient")},
+		"radio-enter":        {calls: []string{`Seed("ambient")`, "SetUnfolded(false)"}},
+
+		// Back on FIND the phrase waits; ↓ hands over to the rows (lit),
+		// ↑ from the first row gives the bar back. Enter or a click on a row
+		// resumes it and folds.
+		"radio-shift-tab": {calls: []string{"RecentDiscoveries()"}, tab: "find", barFocused: bp(true),
+			barValue: sp("swedish death metal")},
+		"find-down":       {calls: []string{}, barFocused: bp(false), rowLit: bp(true), sel: ip(0)},
+		"find-up":         {calls: []string{}, barFocused: bp(true), rowLit: bp(false)},
+		"find-down-again": {calls: []string{}, barFocused: bp(false), rowLit: bp(true), sel: ip(0)},
+		"find-row-next":   {calls: []string{}, sel: ip(1)},
+		"find-row-enter": {calls: []string{`ResumeDiscovery("disc:0000000000000002")`, "SetUnfolded(false)"},
+			rowLit: bp(true)},
+		"find-row-click": {calls: []string{`ResumeDiscovery("disc:0000000000000001")`, "SetUnfolded(false)"}},
+
+		// / with the rows in hand returns to the bar; Enter starts a
+		// discovery station from what is typed, empties the bar and folds.
+		"slash-find-again": {calls: []string{}, barFocused: bp(true), rowLit: bp(false)},
+		"find-enter": {calls: []string{`Discover("swedish death metal")`, "SetUnfolded(false)"},
+			barValue: sp(""), barFocused: bp(false)},
+
+		// ESC unwinds the bar's text first; the next ESC folds.
+		"find-type-2":   {calls: []string{}, barValue: sp("x"), barFocused: bp(true)},
+		"esc-find-text": {calls: []string{}, barValue: sp(""), barFocused: bp(true)},
+		"esc-fold":      {calls: []string{"SetUnfolded(false)"}},
 	}
 
 	for _, name := range wantOrder {
@@ -351,8 +388,14 @@ func TestKeyboardMap(t *testing.T) {
 		if w.filterInput != nil && got.FilterInput != *w.filterInput {
 			t.Errorf("%s: filterInput %v, want %v", name, got.FilterInput, *w.filterInput)
 		}
-		if w.searchFocused != nil && got.SearchFocused != *w.searchFocused {
-			t.Errorf("%s: searchFocused %v, want %v", name, got.SearchFocused, *w.searchFocused)
+		if w.barFocused != nil && got.BarFocused != *w.barFocused {
+			t.Errorf("%s: barFocused %v, want %v", name, got.BarFocused, *w.barFocused)
+		}
+		if w.barValue != nil && (got.BarValue == nil || *got.BarValue != *w.barValue) {
+			t.Errorf("%s: bar value %v, want %q", name, got.BarValue, *w.barValue)
+		}
+		if w.rowLit != nil && got.RowLit != *w.rowLit {
+			t.Errorf("%s: rowLit %v, want %v", name, got.RowLit, *w.rowLit)
 		}
 		if w.prevented != nil && got.Prevented != *w.prevented {
 			t.Errorf("%s: prevented %v, want %v", name, got.Prevented, *w.prevented)
@@ -392,16 +435,29 @@ func TestKeyboardMapFolded(t *testing.T) {
 	for _, e := range res.Errors {
 		t.Errorf("page error during folded keytest: %s", e)
 	}
-	wantNames := []string{"folded-x", "folded-x", "folded-Enter", "folded-j", "folded-r"}
+	// Five row keys, then the two ways in: "/" and the MORE button open the
+	// console and land on FIND, whatever tab it was last left on.
+	wantNames := []string{
+		"folded-x", "folded-x", "folded-Enter", "folded-j", "folded-r",
+		"folded-slash", "folded-back-to-loved", "folded-more-click",
+	}
 	if len(res.Steps) != len(wantNames) {
 		t.Fatalf("folded driver ran %d steps, want %d: %+v", len(res.Steps), len(wantNames), res.Steps)
 	}
+	opens := map[string]string{"folded-slash": "find", "folded-more-click": "find"}
 	for i, s := range res.Steps {
 		if s.Name != wantNames[i] {
 			t.Fatalf("folded step %d is %q, want %q", i, s.Name, wantNames[i])
 		}
-		if len(s.Calls) != 0 {
+		if tab, opening := opens[s.Name]; opening {
+			if !reflect.DeepEqual(s.Calls, []string{"SetUnfolded(true)"}) || s.Tab != tab {
+				t.Errorf("%s: calls %v tab %q, want [SetUnfolded(true)] on %q", s.Name, s.Calls, s.Tab, tab)
+			}
+		} else if len(s.Calls) != 0 {
 			t.Errorf("%s: calls %v, want none — row keys must not act folded", s.Name, s.Calls)
+		}
+		if s.Name == "folded-back-to-loved" && s.Tab != "loved" {
+			t.Errorf("%s: tab %q, want loved", s.Name, s.Tab)
 		}
 		if s.Unf {
 			t.Errorf("%s: reported unfolded", s.Name)

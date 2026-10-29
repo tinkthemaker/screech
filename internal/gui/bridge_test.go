@@ -365,9 +365,10 @@ func TestEventsBeforeEmitterDropped(t *testing.T) {
 
 func TestBoundSurface(t *testing.T) {
 	want := []string{
-		"Attach", "Current", "CycleSleep", "Info", "Love", "Loved",
-		"MoreFromArtist", "Next", "Quit", "RecallPreset", "Recent",
-		"RemoveLoved", "RemoveStation", "ReturnToStation", "Seed",
+		"Attach", "Current", "CycleSleep", "Discover", "Info", "Love", "Loved",
+		"MoreFromArtist", "Next", "Quit", "RadioTop", "RecallPreset", "Recent",
+		"RecentDiscoveries", "RemoveLoved", "RemoveStation", "ResumeDiscovery",
+		"ReturnToStation", "Seed",
 		"SetEmitter", "SetUnfolded", "SetVolume", "Sink", "Stations",
 		"StepVolume", "Taste", "TogglePause", "TogglePreset", "TuneSaved",
 		"Wildcard", "Prefs", "Rescaled",

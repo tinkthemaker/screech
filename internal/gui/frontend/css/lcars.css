@@ -19,11 +19,11 @@ html, body { margin: 0; background: var(--bg); overflow: hidden; }
 body { width: 480px; height: 100vh; }
 
 body {
-  --frame: var(--o); --segB: var(--tan); --segC: var(--lav);
+  --frame: var(--o); --segB: var(--tan);
   --stn-c: var(--tan); --trk-c: var(--ice); --meta-c: var(--lav);
 }
 body[data-state="offline"] {
-  --frame: var(--a1); --segB: var(--a2); --segC: var(--a3);
+  --frame: var(--a1); --segB: var(--a2);
   --stn-c: var(--a3); --trk-c: var(--a2); --meta-c: var(--a2);
 }
 body[data-state="offline"] #volLabel { color: var(--a2); }
@@ -44,8 +44,17 @@ body[data-state="offline"] #volValue { color: var(--a3); }
 .frame { position: absolute; background: var(--frame); }
 #blk { left: 0; top: 0; width: 96px; height: 128px; border-radius: 48px 0 0 48px; }
 #barA { left: 96px; top: 0; width: 232px; height: 12px; }
-#barB { left: 332px; top: 0; width: 80px; height: 12px; background: var(--segB); }
-#barC { left: 416px; top: 0; width: 64px; height: 12px; background: var(--segC); border-radius: 0 6px 6px 0; }
+#barB { left: 332px; top: 0; width: 96px; height: 12px; background: var(--segB); }
+/* The top bar's last segment grows into a small red cap that quits like Q.
+   It is a control, so it is never a drag region. */
+#btnClose {
+  position: absolute; left: 432px; top: 0; width: 48px; height: 20px;
+  background: #FF5555; border-radius: 0 10px 10px 0; color: #000;
+  font: 700 13px/1 var(--font-labels);
+  display: flex; align-items: center; justify-content: center;
+  box-sizing: border-box; cursor: pointer;
+}
+#btnClose > span { display: block; }
 .ic { width: 24px; height: 24px; }
 .ic::after { content: ""; position: absolute; inset: 0; background: var(--bg); }
 .ic.tl::after { border-top-left-radius: 24px; }
@@ -57,7 +66,7 @@ body[data-state="offline"] #volValue { color: var(--a3); }
 /* Wails drags the window by regions marked with this custom property —
    frame pieces only, never buttons, tabs, rows, pills, inputs or the
    slider. The wordmark inside #blk inherits it. */
-#blk, #barA, #barB, #barC, #sideCap, #elbow, #barD, #barE {
+#blk, #barA, #barB, #sideCap, #elbow, #barD, #barE {
   --wails-draggable: drag;
 }
 
@@ -77,18 +86,19 @@ body[data-state="offline"] #volValue { color: var(--a3); }
   cursor: pointer;
 }
 .s > span { display: block; }
-#btnPause { left: 124px; width: 96px; background: var(--lav); }
-#btnNext { left: 224px; width: 88px; background: var(--peach); }
-#btnLove { left: 316px; width: 64px; background: var(--coral); }
-#btnMore { left: 384px; width: 48px; background: var(--blue); }
-#btnExit { left: 436px; width: 44px; background: var(--a2); border-radius: 0 14px 14px 0; padding-right: 8px; }
+/* EXIT is gone (the ✕ cap took its job), so MORE/LESS takes its room and
+   the row is front-door-v6's: three 80-px buttons, then a 104-px MORE. */
+#btnPause { left: 124px; width: 80px; background: var(--lav); }
+#btnNext { left: 208px; width: 80px; background: var(--peach); }
+#btnLove { left: 292px; width: 80px; background: var(--coral); }
+#btnMore { left: 376px; width: 104px; background: var(--blue); border-radius: 0 14px 14px 0; }
 
 #btnLove.loved { background: #FF8A8A; }
 body[data-state="paused"] #btnPause { background: #F0D0F0; }
 body[data-state="offline"] #btnNext { background: var(--a2); }
 body[data-state="offline"] #btnPause,
 body[data-state="offline"] #btnMore { background: var(--a3); }
-body[data-state="offline"] #btnExit { background: var(--a1); color: #fff; }
+body[data-state="offline"] #btnClose { background: var(--a1); color: #fff; }
 body[data-state="offline"] #btnLove { background: var(--dead); color: var(--dead-fg); }
 body[data-state="stopped"] #btnNext,
 body[data-state="stopped"] #btnLove,
@@ -195,13 +205,13 @@ body.unfolded #blk { border-radius: 48px 0 0 0; }
   padding: 0 8px 4px 0; box-sizing: border-box;
   cursor: pointer;
 }
-#tabRecent { top: 28px; background: var(--blue); }
-#tabLoved { top: 60px; background: var(--blue); }
-#tabStations { top: 92px; background: var(--blue); }
-#tabTaste { top: 124px; background: var(--blue); }
-#tabSearch { top: 156px; background: var(--tan); }
-#tabInfo { top: 188px; background: var(--tan); }
-#tabSleep { top: 220px; background: var(--peach); }
+#tabFind { top: 28px; background: var(--blue); }
+#tabRadio { top: 60px; background: var(--blue); }
+#tabRecent { top: 92px; background: var(--blue); }
+#tabLoved { top: 124px; background: var(--blue); }
+#tabStations { top: 156px; background: var(--blue); }
+#tabTaste { top: 188px; background: var(--blue); }
+#tabMore { top: 220px; background: var(--tan); }
 #console .tab.sel { background: var(--ice); }
 
 /* Red alert reaches the console's frame too: lilac members go a3, the
@@ -211,13 +221,13 @@ body[data-state="offline"] #elbow,
 body[data-state="offline"] #curveD,
 body[data-state="offline"] #barD { background: var(--a3); }
 body[data-state="offline"] #barE { background: var(--a2); }
+body[data-state="offline"] #tabFind,
+body[data-state="offline"] #tabRadio,
 body[data-state="offline"] #tabRecent,
 body[data-state="offline"] #tabLoved,
 body[data-state="offline"] #tabStations,
-body[data-state="offline"] #tabTaste,
-body[data-state="offline"] #tabSleep { background: var(--a2); }
-body[data-state="offline"] #tabSearch,
-body[data-state="offline"] #tabInfo { background: var(--a3); }
+body[data-state="offline"] #tabTaste { background: var(--a2); }
+body[data-state="offline"] #tabMore { background: var(--a3); }
 body[data-state="offline"] #console .tab.sel { background: #FFD6D6; }
 body[data-state="offline"] #presetsLabel { color: var(--a2); }
 
@@ -251,6 +261,8 @@ body[data-state="offline"] #presetsLabel { color: var(--a2); }
   white-space: nowrap;
 }
 .filterpill { left: 392px; top: 12px; width: 72px; padding: 0; font-size: 11px; }
+/* MORE's sleep pill takes the filter pill's seat; peach is SLEEP's old tab. */
+.sleeppill { left: 392px; top: 12px; width: 72px; padding: 0; font-size: 11px; background: var(--peach); }
 
 .qin {
   position: absolute; height: 20px; box-sizing: border-box;
@@ -261,9 +273,52 @@ body[data-state="offline"] #presetsLabel { color: var(--a2); }
 }
 .qin::placeholder { color: #5A7A99; }
 .qin.hdrfilter { left: 304px; top: 12px; width: 160px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-.qin.searchin { left: 136px; top: 40px; width: 328px; }
-.searchnote { position: absolute; left: 136px; top: 68px; width: 328px; height: 14px; }
-.sleephint { position: absolute; left: 136px; top: 68px; width: 328px; height: 14px; }
+
+/* ---- the front door --------------------------------------------------
+   FIND and RADIO share one bar at 136–464 × 148–184 (page px): a left cap
+   with the word, a black field with a 2-px border, a right cap with GO.
+   The border is a pseudo-element over the whole bar so the caps, which sit
+   on top of it, hide its ends and the field reads as one pill. */
+.findbar {
+  position: absolute; left: 136px; top: 20px; width: 328px; height: 36px;
+  --bar: var(--o);
+  border-radius: 18px; background: var(--bg);
+}
+.findbar.radio { --bar: var(--blue); }
+.findbar::before {
+  content: ""; position: absolute; inset: 0;
+  border: 2px solid var(--bar); border-radius: 18px; pointer-events: none;
+}
+.barcap {
+  position: absolute; top: 0; width: 52px; height: 36px;
+  background: var(--bar); color: #000;
+  font: 600 13px/1 var(--font-labels); text-transform: uppercase; letter-spacing: .08em;
+  display: flex; align-items: center; justify-content: center;
+  box-sizing: border-box;
+}
+.barcap.l { left: 0; border-radius: 18px 0 0 18px; }
+.barcap.r { right: 0; border-radius: 0 18px 18px 0; cursor: pointer; }
+.barcap > span { display: block; }
+/* Typed text is ice at 16 px, the placeholder lilac at 15; the input is
+   the field between the caps, text starting at x=204. */
+.findin {
+  position: absolute; left: 56px; top: 4px; width: 216px; height: 28px;
+  box-sizing: border-box; padding: 0 4px 0 12px; border: 0; background: transparent;
+  color: var(--ice); caret-color: var(--ice); outline: none;
+  font: 16px/28px var(--font-names); letter-spacing: .01em; text-transform: none;
+}
+.findin::placeholder { color: var(--lav); font-size: 15px; opacity: 1; }
+.findlbl {
+  position: absolute; left: 136px; top: 76px; width: 328px; height: 16px;
+  font: 11px/16px var(--font-labels); color: var(--peach);
+  text-transform: uppercase; letter-spacing: .08em;
+}
+.findhint {
+  position: absolute; left: 124px; top: 220px; width: 340px; height: 16px;
+  font: 11px/16px var(--font-labels); color: #777; text-align: center;
+  text-transform: uppercase; letter-spacing: .08em;
+}
+.findhint b { color: var(--ice); font-weight: 500; }
 
 /* list panels: 28-px rows at x=124, six visible from local y=40. Rows
    are flex: the track takes what it needs, the side text can grow to

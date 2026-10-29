@@ -197,8 +197,10 @@ func windowOutline(w, h int, scale float64, unfolded bool) []w32Point {
 	}
 	limit := min(w, h) / 2
 	left := min(round(48*scale), limit)
-	topRight := min(round(6*scale), limit)
-	bottomRight := topRight
+	// The ✕ cap at the top right is a 10-px quarter-round; the bar that
+	// closes the console is 6, the folded button row's end 14.
+	topRight := min(round(10*scale), limit)
+	bottomRight := min(round(6*scale), limit)
 	if !unfolded {
 		bottomRight = min(round(14*scale), limit)
 	}

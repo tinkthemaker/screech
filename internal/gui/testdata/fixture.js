@@ -21,6 +21,8 @@ export default async function fixtureBridge(name) {
   const unfoldedNow = window.innerHeight >= 200;
   window.__expect = Object.assign({}, fx.expect, unfoldedNow ? fx.expectUnfolded : null);
   window.__expectStyle = fx.expectStyle || {};
+  window.__expectRect = fx.expectRect || {};
+  window.__absent = fx.absent || [];
   const call = (n, args) => window.__calls.push([n, ...args]);
   const chk = (n, a) => {
     if (!(n in arity)) window.__errors.push('call to unbound method ' + n);
@@ -46,6 +48,8 @@ export default async function fixtureBridge(name) {
   b.Recent = (...a) => { chk('Recent', a); call('Recent', a); return Promise.resolve(fx.recent || []); };
   b.Loved = (...a) => { chk('Loved', a); call('Loved', a); return Promise.resolve(fx.loved || []); };
   b.Stations = (...a) => { chk('Stations', a); call('Stations', a); return Promise.resolve(fx.stations || []); };
+  b.RecentDiscoveries = (...a) => { chk('RecentDiscoveries', a); call('RecentDiscoveries', a); return Promise.resolve(fx.discoveries || []); };
+  b.RadioTop = (...a) => { chk('RadioTop', a); call('RadioTop', a); return Promise.resolve(fx.radioTop || []); };
   b.Taste = (...a) => { chk('Taste', a); call('Taste', a); return Promise.resolve(fx.taste); };
   b.Info = (...a) => { chk('Info', a); call('Info', a); return Promise.resolve(fx.info || {}); };
   b.Current = (...a) => { chk('Current', a); return Promise.resolve(fx.snapshot); };
