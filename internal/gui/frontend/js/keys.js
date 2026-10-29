@@ -1,7 +1,9 @@
 // The terminal's key map, one to one. Listening behaviour stays in the
 // session engine — keys only send bridge intents and drive the console's
-// face state (tabs, selection, filter). Only the two inputs are
-// focusable; while one has focus, keys go to it except ESC and ENTER.
+// face state (tabs, selection, filter). Only the inputs are focusable (the
+// list filter and the FIND/RADIO bar); while one has focus, keys go to it
+// except ESC — and the bar's own Enter, Tab, ↓ and space, which it handles
+// itself before this map ever sees them.
 import bridge from './bridge.js';
 import { ui } from './console.js';
 
@@ -51,7 +53,8 @@ window.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.altKey || e.metaKey) return;
 
   const active = document.activeElement;
-  const inInput = active && active.classList && active.classList.contains('qin');
+  const inInput = active && active.classList &&
+    (active.classList.contains('qin') || active.classList.contains('findin'));
   if (e.key === 'Escape') { ui.escape(); e.preventDefault(); return; }
   if (inInput) return; // inputs own every other key, Enter included
 
@@ -62,19 +65,21 @@ window.addEventListener('keydown', (e) => {
     case 'l': if (phase() !== 'offline' && !stopped()) { bridge.Love(); flash($('btnLove')); } break;
     case 'f': bridge.TogglePreset(); flash($('presetSave')); break;
     case 'p': case 'P': if (!stopped()) { bridge.TogglePause(); flash($('btnPause')); } break;
-    case 'z': case 'Z': bridge.CycleSleep(); flash($('tabSleep')); break;
+    case 'z': case 'Z': bridge.CycleSleep(); flash($('sleepPill')); break;
+    // "/" opens FIND with the caret in its bar; on a list that has a
+    // filter it still opens the filter, which is what "/" means there.
     case '/':
       if (stopped()) break;
       if (ui.unfolded() && (ui.state.tab === 'loved' || ui.state.tab === 'stations')) {
         ui.openFilter();
       } else {
         if (!ui.unfolded()) bridge.SetUnfolded(true);
-        ui.setTab('search');
+        ui.setTab('find');
       }
       break;
     case 'h': ui.setTab('recent'); if (!ui.unfolded()) bridge.SetUnfolded(true); break;
     case 'H': ui.setTab('loved'); if (!ui.unfolded()) bridge.SetUnfolded(true); break;
-    case 'i': case 'I': ui.setTab('info'); if (!ui.unfolded()) bridge.SetUnfolded(true); break;
+    case 'i': case 'I': ui.setTab('more'); if (!ui.unfolded()) bridge.SetUnfolded(true); break;
     case '-': case '[': bridge.StepVolume(-5); break;
     case '+': case '=': case ']': bridge.StepVolume(5); break;
     case 'Tab':

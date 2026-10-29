@@ -104,6 +104,17 @@
       }
     }
 
+    // Rule 3c: a button's label is never cut. The labels carry the
+    // ellipsis class so a stray long string cannot spill, which also
+    // silences Rule 3 — and PAUSE, NEXT and LOVE shrank to 80 px when EXIT
+    // gave its room to MORE, so RESUME and RETRY NOW must still fit whole.
+    for (const el of document.querySelectorAll('.btn [data-text], .barcap [data-text]')) {
+      if (gone(el)) continue;
+      if (el.scrollWidth > el.clientWidth + 1) {
+        v(`label ${tag(el)}: "${words(el.textContent)}" is clipped (${el.scrollWidth} > ${el.clientWidth})`);
+      }
+    }
+
     // Rule 4: [data-leaf] elements never intersect, ignoring
     // ancestor/descendant pairs.
     const leaves = [...document.querySelectorAll('[data-leaf]')];
