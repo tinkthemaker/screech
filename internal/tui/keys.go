@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/tinkthemaker/screech/internal/core"
@@ -37,8 +35,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.s.Phase == session.Stopped {
 			return m, nil
 		}
-		m.prompt = true
-		m.buf = nil
+		m.openFind()
 		return m, nil
 
 	case "?":
@@ -130,43 +127,55 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.quit()
 
 	case tea.KeyEsc:
-		m.prompt = false
-		m.buf = nil
+		m.closePrompt()
 		return m, nil
 
 	case tea.KeyEnter:
-		q := strings.TrimSpace(string(m.buf))
-		m.prompt = false
-		m.buf = nil
-		if q == "" {
+		m, msgs := m.submitPrompt()
+		if len(msgs) == 0 {
 			return m, nil
 		}
-		return m.intent(session.Seed{Query: q})
+		return m.intent(msgs...)
+
+	case tea.KeyTab, tea.KeyShiftTab:
+		m.switchPromptMode()
+		return m, nil
+
+	case tea.KeyDown, tea.KeyUp:
+		// Arrows walk the recent list; with no list on screen they have
+		// nothing to move. Down from no selection lands on the newest; up
+		// from none stays on none, and up from the first row stays there.
+		if n := m.findShown(); n > 0 {
+			switch {
+			case msg.Type == tea.KeyDown:
+				m.findPos = minI(m.findPos+1, n-1)
+			case m.findPos >= 0:
+				m.findPos = maxI(m.findPos-1, 0)
+			}
+		}
+		return m, nil
 
 	case tea.KeyBackspace:
 		if len(m.buf) > 0 {
 			m.buf = m.buf[:len(m.buf)-1]
+		}
+		if len(m.buf) == 0 {
+			// The list is back; it starts over, with nothing selected.
+			m.findPos = noFindRow
 		}
 		return m, nil
 
 	case tea.KeySpace:
 		// Virgin shortcut: empty prompt + space = wildcard tune.
 		if m.s.Virgin && !m.s.HaveStation && len(m.buf) == 0 {
-			m.prompt = false
+			m.closePrompt()
 			return m.intent(session.Wildcard{})
 		}
-		if len(m.buf) < maxQuery {
-			m.buf = append(m.buf, ' ')
-		}
+		m.typePrompt([]rune{' '})
 		return m, nil
 
 	case tea.KeyRunes:
-		for _, r := range msg.Runes {
-			if len(m.buf) >= maxQuery {
-				break
-			}
-			m.buf = append(m.buf, r)
-		}
+		m.typePrompt(msg.Runes)
 		return m, nil
 	}
 	return m, nil

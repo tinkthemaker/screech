@@ -122,7 +122,8 @@ func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 	sort.Slice(heard, func(i, j int) bool { return means[heard[i].st.UUID] > means[heard[j].st.UUID] })
 	take(heard, poolHeardSlice, func(cd candidate) bool { return means[cd.st.UUID] > 0.5 })
 
-	// The listener's own stations: links pasted into config.toml. Until
+	// The listener's own stations: links pasted into config.toml, and the
+	// discovery stations they started or kept. They share the seats. Until
 	// they're heard they carry no directory tags and no fingerprint, so
 	// neither slice above can find them, and the random slice draws a
 	// dozen from twenty thousand. A few seats per pick let Thompson
@@ -134,7 +135,7 @@ func (c *Core) buildPool(now time.Time, rng *rand.Rand) []candidate {
 	// (0.604 -> 0.609). More links than seats rotate through at random.
 	var custom []candidate
 	for _, cd := range cands {
-		if IsCustom(cd.st.UUID) {
+		if IsCustom(cd.st.UUID) || IsDiscovery(cd.st.UUID) {
 			custom = append(custom, cd)
 		}
 	}
@@ -296,6 +297,9 @@ func (c *Core) posteriorMean(cd candidate, daypart string, now time.Time) float6
 
 func (c *Core) reason(cd candidate, daypart string, now time.Time) string {
 	switch {
+	case IsDiscovery(cd.st.UUID):
+		// The listener's phrase says more than any statistic would.
+		return discoveringReason(cd.st.Name)
 	case cd.matches == 1:
 		return "plays an artist you love"
 	case cd.matches > 1:

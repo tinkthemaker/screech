@@ -1,21 +1,21 @@
 package player
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/tinkthemaker/screech/internal/ytdlp"
 )
 
 // Page links (a YouTube video, a SoundCloud track) aren't streams: mpv runs
 // with --ytdl=no so a dead radio URL fails fast instead of waiting on
 // yt-dlp, which means pages are resolved here, in the tune path, under a
-// timeout of our own. Off unless the listener sets ytdlp_path.
+// timeout of our own. On whenever yt-dlp is found (ytdlp_path), off when the
+// listener turned it off or none is installed.
 
 // ErrResolve wraps every failure to turn a page link into a stream. Play
 // returns it, and the session treats it like any rejected URL: a strike,
@@ -50,88 +50,40 @@ type Extractor interface {
 	Extract(ctx context.Context, page string) (Resolved, error)
 }
 
-// YTDLP runs yt-dlp at Path once per extraction.
-type YTDLP struct{ Path string }
-
-// ytdlpPrefix marks the --print lines; whatever else yt-dlp prints that
-// parses as an http(s) URL is the stream, so the parse doesn't depend on
-// the order --get-url and --print come out in.
-const ytdlpPrefix = "screech-"
-
-func ytdlpArgs(page string) []string {
-	return []string{
-		// bestaudio first; YouTube live streams only offer muxed HLS, and
-		// mpv plays those audio-only under --no-video.
-		"-f", "bestaudio/best",
-		"--no-playlist", "--playlist-items", "1",
-		"--no-warnings",
-		"--get-url",
-		"--print", ytdlpPrefix + "artist:%(artist|)s",
-		"--print", ytdlpPrefix + "track:%(track|)s",
-		"--print", ytdlpPrefix + "title:%(title|)s",
-		"--", page,
-	}
+// YTDLP resolves a page link through yt-dlp, by way of ytdlp.Runner: the one
+// place Screech runs it, so a tune's lookup takes its turn behind whatever
+// yt-dlp is already running, and under the same working folder, JS runtime
+// and child protection as discovery's.
+type YTDLP struct {
+	// Path runs yt-dlp as it is, with nothing else set, for a caller that
+	// has only a path. Runner, when its Path is set, is used instead.
+	Path   string
+	Runner ytdlp.Runner
 }
 
 func (y YTDLP) Extract(ctx context.Context, page string) (Resolved, error) {
-	cmd := exec.CommandContext(ctx, y.Path, ytdlpArgs(page)...)
-	// yt-dlp's standalone build is a launcher with a child holding the
-	// pipes; once the context kills the launcher, don't wait on the child.
-	cmd.WaitDelay = time.Second
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	configureCmd(cmd)
-	if err := cmd.Start(); err != nil {
-		return Resolved{}, fmt.Errorf("starting yt-dlp (%s): %w", y.Path, err)
+	r := y.Runner
+	if r.Path == "" {
+		r.Path = y.Path
 	}
-	afterStart(cmd)
-	err := cmd.Wait()
-	if ctx.Err() != nil {
-		return Resolved{}, fmt.Errorf("yt-dlp gave up: %w", ctx.Err())
-	}
+	// Extract is only ever the tune path (pageResolver.resolve): the
+	// listener is waiting on it, so it goes ahead of discovery's prefetches.
+	m, err := r.Resolve(ytdlp.Foreground(ctx), page)
 	if err != nil {
-		return Resolved{}, fmt.Errorf("yt-dlp: %s", lastLine(stderr.String(), err.Error()))
+		return Resolved{}, err
 	}
-	return parseYTDLP(stdout.String())
+	return resolvedFrom(m), nil
 }
 
-// parseYTDLP reads yt-dlp's output: the stream URL, and the tagged artist,
-// track and title lines. A real track ("Artist - Track") beats the page
-// title, which for a video is often the uploader's own wording.
-func parseYTDLP(out string) (Resolved, error) {
-	var r Resolved
-	meta := map[string]string{}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if kv, ok := strings.CutPrefix(line, ytdlpPrefix); ok {
-			if k, v, ok := strings.Cut(kv, ":"); ok {
-				meta[k] = strings.TrimSpace(v)
-			}
-			continue
-		}
-		if r.URL == "" && validStreamURL(line) {
-			r.URL = line
-		}
+// resolvedFrom reads the title a page link shows: a real track ("Artist -
+// Track") beats the page title, which for a video is often the uploader's
+// own wording.
+func resolvedFrom(m ytdlp.Media) Resolved {
+	r := Resolved{URL: m.URL, Title: m.Title}
+	if m.Artist != "" && m.Track != "" {
+		r.Title = m.Artist + " - " + m.Track
 	}
-	if r.URL == "" {
-		return Resolved{}, errors.New("yt-dlp printed no stream URL")
-	}
-	switch {
-	case meta["artist"] != "" && meta["track"] != "":
-		r.Title = meta["artist"] + " - " + meta["track"]
-	default:
-		r.Title = meta["title"]
-	}
-	return r, nil
-}
-
-func lastLine(s, fallback string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return fallback
-	}
-	return s[strings.LastIndexByte(s, '\n')+1:]
+	return r
 }
 
 // validStreamURL is Play's rule for what mpv may be handed.

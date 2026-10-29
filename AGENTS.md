@@ -6,6 +6,8 @@ placement, handoff, message boxes; every file `//go:build windows`),
 `internal/app` (shared startup: config, per-OS single-instance lock, log,
 database, mpv), `internal/core` (SQLite store, bandit, fingerprints,
 radio-browser client), `internal/player` (mpv over JSON IPC),
+`internal/ytdlp` (every yt-dlp process), `internal/discover` (the discovery
+song queue),
 `internal/streamurl` (mpv's filename rule and the page-link hosts, shared
 by player, core and config),
 `internal/session` (the listening state machine every face drives),

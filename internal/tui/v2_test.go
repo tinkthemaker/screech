@@ -203,40 +203,6 @@ func TestVolumeSliderRendersInReceiverFaceplate(t *testing.T) {
 	}
 }
 
-// Regression: the wide receiver faceplate must host the seed prompt too.
-// Pressing / set m.prompt and the footer showed ENTER tune / ESC cancel,
-// but receiverRows never rendered promptRow — the user typed blind.
-func TestSeedPromptRendersInReceiverFaceplate(t *testing.T) {
-	m := testModel(t)
-	m.w, m.h = 110, 32
-	m.start = m.now.Add(-time.Minute)
-
-	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	m = mm.(Model)
-	if !m.prompt || !strings.Contains(m.View(), "SEED") {
-		t.Fatal("/ should open the seed prompt in the wide receiver layout")
-	}
-	if !strings.Contains(m.View(), "genre or artist") {
-		t.Fatalf("empty prompt should show the hint:\n%s", m.View())
-	}
-
-	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ambient")})
-	m = mm.(Model)
-	if !strings.Contains(m.View(), "ambient") {
-		t.Fatalf("typed query should render in the receiver prompt:\n%s", m.View())
-	}
-	assertFits(t, m.View(), 110, 32)
-
-	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = mm.(Model)
-	if m.prompt {
-		t.Fatal("esc should close the seed prompt")
-	}
-	if strings.Contains(m.View(), "SEED") {
-		t.Fatal("closing should restore the status readout")
-	}
-}
-
 func TestVolumeSliderClampsAndFitsTinyTerminals(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 20, 6

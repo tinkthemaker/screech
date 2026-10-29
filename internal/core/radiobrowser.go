@@ -251,11 +251,12 @@ func toStation(r rbStation) (Station, bool) {
 
 // Click reports a tune-in to radio-browser (their etiquette; improves their
 // popularity data). Fire and forget; errors are irrelevant. Seed stations
-// (seed: prefix) and the listener's own (custom:) are screech-local and
-// never reported: the directory doesn't know them, and a hash of a private
-// link is nobody else's business.
+// (seed: prefix), the listener's own (custom:) and their discoveries
+// (disc:) are screech-local and never reported: the directory doesn't know
+// them, and a hash of a private link or search is nobody else's business.
 func (rb *RadioBrowser) Click(stationUUID string) {
-	if stationUUID == "" || len(stationUUID) > 64 || strings.HasPrefix(stationUUID, "seed:") || IsCustom(stationUUID) {
+	if stationUUID == "" || len(stationUUID) > 64 || strings.HasPrefix(stationUUID, "seed:") ||
+		IsCustom(stationUUID) || IsDiscovery(stationUUID) {
 		return
 	}
 	go func() {

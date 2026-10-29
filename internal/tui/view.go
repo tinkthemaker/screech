@@ -46,6 +46,10 @@ func (m Model) View() string {
 		body = m.infoRows(iw, contentH)
 	} else if m.themeOpen {
 		body = m.themeRows(iw, contentH)
+	} else if m.prompt {
+		// Same precedence as Update: the prompt takes keys before the
+		// library does.
+		body = m.findRows(iw, contentH)
 	} else if m.history {
 		body = m.historyRows(iw, compact, contentH)
 	} else {

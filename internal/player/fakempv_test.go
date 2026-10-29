@@ -92,6 +92,11 @@ func runFakeMPV(args []string) int {
 	}
 
 	var cur string
+	// lateStart models a file whose start-file mpv has not reported yet: a
+	// loadfile for ".../late" is accepted but reports nothing until a stop
+	// (or another loadfile) forces the issue, the way a radio tune that is
+	// only milliseconds old looks to a client that has since sent stop.
+	var lateStart bool
 	var paused bool
 	// setPause mirrors how mpv treats the property: pause idles the output
 	// even with a file loaded, so a change is followed by a core-idle flip.
@@ -124,7 +129,13 @@ func runFakeMPV(args []string) int {
 
 		switch name {
 		case "stop":
-			// Like mpv: the loaded file ends with reason stop, then idle.
+			// Like mpv: the loaded file ends with reason stop, then idle. A
+			// file that was still waiting to start reports its start-file
+			// first: its end-file can't come before it.
+			if lateStart {
+				send(`{"event":"start-file"}`)
+				lateStart = false
+			}
 			if cur != "" {
 				send(`{"event":"end-file","reason":"stop"}`)
 				cur = ""
@@ -146,6 +157,12 @@ func runFakeMPV(args []string) int {
 					}
 				}
 			}
+			if lateStart {
+				// Replaced before it ever started: mpv reports nothing for
+				// it, no start-file and no end-file.
+				lateStart = false
+				cur = ""
+			}
 			if cur != "" {
 				// Deliberately the worst case: the replaced file's end-file
 				// lands inside the new load's window. The client must
@@ -161,6 +178,8 @@ func runFakeMPV(args []string) int {
 			case "error":
 				send(`{"event":"start-file"}`)
 				send(`{"event":"end-file","reason":"error","file_error":"loading failed"}`)
+			case "late":
+				lateStart = true
 			case "crash":
 				fmt.Fprintln(os.Stderr, "fake mpv: boom")
 				return 3
@@ -207,6 +226,23 @@ func runFakeMPV(args []string) int {
 					send(`{"event":"end-file","reason":"stop"}`)
 					cur = ""
 					send(`{"event":"property-change","name":"core-idle","data":true}`)
+				case "end-eof":
+					// The loaded file plays out on its own: end-file eof,
+					// then idle (--idle=yes). What a song reaching its last
+					// second looks like to the client.
+					if cur != "" {
+						send(`{"event":"end-file","reason":"eof"}`)
+						cur = ""
+						send(`{"event":"property-change","name":"core-idle","data":true}`)
+					}
+				case "end-error":
+					// The loaded file dies mid-song (a signed URL expiring,
+					// a server hanging up).
+					if cur != "" {
+						send(`{"event":"end-file","reason":"error","file_error":"loading failed"}`)
+						cur = ""
+						send(`{"event":"property-change","name":"core-idle","data":true}`)
+					}
 				case "idle-flip":
 					send(`{"event":"property-change","name":"core-idle","data":false}`)
 				case "cache-flip":

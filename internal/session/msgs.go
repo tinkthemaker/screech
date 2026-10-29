@@ -30,6 +30,9 @@ type TuneTo struct {
 	Reason string // shown as the pick reason
 }
 type Wildcard struct{} // the virgin first-run shortcut: pick anything
+
+// Discover starts a discovery station from a phrase or a link: FIND's Enter.
+type Discover struct{ Query string }
 type RefreshPresets struct{}
 type Touch struct{} // any sign of life; clears the startup notice
 type Quit struct{}
@@ -91,6 +94,7 @@ func (SetVolume) isMsg()      {}
 func (Seed) isMsg()           {}
 func (TuneTo) isMsg()         {}
 func (Wildcard) isMsg()       {}
+func (Discover) isMsg()       {}
 func (RefreshPresets) isMsg() {}
 func (Touch) isMsg()          {}
 func (Quit) isMsg()           {}

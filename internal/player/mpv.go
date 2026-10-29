@@ -63,6 +63,12 @@ type MPV struct {
 	page    string
 	playSeq int
 
+	// openSource opens a discovery station's songs (nil: the discover:
+	// sentinel is rejected like any non-http(s) URL). queue is the walk
+	// through them while one plays, nil for radio. See queue.go.
+	openSource func(seed string) (SongSource, error)
+	queue      *songQueue
+
 	mpvPath string
 	dataDir string
 	volume  int // survives restarts: spawn passes it back as --volume
@@ -224,6 +230,9 @@ func (m *MPV) spawn() error {
 	m.exited, m.ipcPath, m.stderr = exited, path, stderr
 	m.reqID = reqID
 	m.loadPending = false
+	// A walk through songs belongs to the process that was playing it; the
+	// session re-plays the station on the new one.
+	m.dropQueueLocked()
 	m.sawIcy, m.sawL, m.sawR = false, false, false
 	m.junkTitles, m.mpvFilename = nil, ""
 	m.paused, m.coreIdle = false, true
@@ -249,12 +258,18 @@ func (m *MPV) SetExtractor(ex Extractor) {
 }
 
 func (m *MPV) Play(streamURL string) error {
+	if IsDiscoverURL(streamURL) {
+		return m.playQueue(strings.TrimPrefix(streamURL, discoverScheme))
+	}
 	if !validStreamURL(streamURL) {
 		return fmt.Errorf("invalid stream URL %q: only http/https are supported", streamURL)
 	}
 	m.mu.Lock()
 	m.playSeq++
 	seq, pages := m.playSeq, m.pages
+	// A radio station ends any discovery walk: its songs must stop
+	// advancing, and its stream's end is a dropped stream again.
+	m.dropQueueLocked()
 	m.mu.Unlock()
 
 	target, title, page := streamURL, "", ""
@@ -293,10 +308,8 @@ func (m *MPV) Play(streamURL string) error {
 	load := []any{"loadfile", target}
 	if title != "" {
 		// A resolved URL carries no ICY metadata and its filename is junk,
-		// so the page's own title rides the media-title path instead. %n%
-		// is mpv's length-prefixed quoting: commas, quotes and '=' in a
-		// title can't break the option list.
-		load = append(load, "replace", -1, fmt.Sprintf("force-media-title=%%%d%%%s", len(title), title))
+		// so the page's own title rides the media-title path instead.
+		load = append(load, "replace", -1, forceTitleOption(title))
 	}
 	// Sent under the lock that checked playSeq, so a newer Play can't slip
 	// its loadfile in between and be replaced by this older one.
@@ -306,6 +319,13 @@ func (m *MPV) Play(streamURL string) error {
 	// mpv's pause survives loadfile; choosing a station must never start
 	// silent, whoever paused it.
 	return m.sendLocked("set_property", "pause", false)
+}
+
+// forceTitleOption is loadfile's per-file option that pins mpv's media-title.
+// %n% is mpv's length-prefixed quoting: commas, quotes and '=' in a title
+// can't break the option list.
+func forceTitleOption(title string) string {
+	return fmt.Sprintf("force-media-title=%%%d%%%s", len(title), title)
 }
 
 func (m *MPV) SetVolume(percent int) error {
@@ -363,6 +383,7 @@ func (m *MPV) Close() error {
 		return nil
 	}
 	m.closed = true
+	m.dropQueueLocked()
 	conn, cmd, path := m.conn, m.cmd, m.ipcPath
 	m.mu.Unlock()
 	_ = m.send("quit")
@@ -441,9 +462,35 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 			switch msg.Reason {
 			case "stop":
 				// mpv's `stop` command — the OS media flyout's Stop
-				// button sends it. Screech never does.
+				// button sends it. Screech sends one only to silence the
+				// old station while the next one is found: playQueue does
+				// for a discovery station's first song, and Play does for a
+				// page link while yt-dlp resolves it. loadPending vouches
+				// for these stops, but not always: the old file's late
+				// start-file can clear it before the stop takes effect.
+				// For a queue that is enough to tell: while it is still
+				// looking for its first song, this end-file is that stop,
+				// never the listener's, and dropping the queue for it would
+				// cancel the lookup and read as a failed station. (A page
+				// link's Play has already dropped any queue by then, so
+				// only loadPending stands between its stop and the
+				// listener's.)
+				m.mu.Lock()
+				if q := m.queue; q != nil && !q.haveCur && !q.dead {
+					m.mu.Unlock()
+					continue
+				}
+				// Otherwise nothing is loaded any more, so a discovery walk
+				// must not load behind it.
+				m.dropQueueLocked()
+				m.mu.Unlock()
 				emit(events, Event{Type: EventStopped})
 			case "error":
+				// A song that fails is skipped; only the station's third
+				// failure in a row is a stream error.
+				if m.queueSongEnded(events, true, msg.FileError) {
+					continue
+				}
 				m.forgetPage()
 				err := fmt.Errorf("stream failed")
 				if msg.FileError != "" {
@@ -451,6 +498,10 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 				}
 				emit(events, Event{Type: EventStreamError, Err: err})
 			case "eof":
+				// A song that ends is just the next one starting.
+				if m.queueSongEnded(events, false, "") {
+					continue
+				}
 				m.forgetPage()
 				emit(events, Event{Type: EventStreamEnded})
 			}
@@ -458,6 +509,11 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 	}
 	m.mu.Lock()
 	closed := m.closed
+	if m.events == events {
+		// Before the channel closes: a lookup running for the queue emits
+		// only while the queue is registered, under this lock.
+		m.dropQueueLocked()
+	}
 	m.mu.Unlock()
 	if !closed {
 		// stderr is fully drained only when cmd.Wait returns (exited
@@ -487,6 +543,15 @@ func (m *MPV) forgetPage() {
 func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 	switch msg.Name {
 	case "metadata":
+		m.mu.Lock()
+		queued := m.queue != nil
+		m.mu.Unlock()
+		if queued {
+			// A song's title is the source's, forced onto media-title; an
+			// ICY title would also mute the media-title path below for
+			// every song after it.
+			return
+		}
 		var meta map[string]string
 		if json.Unmarshal(msg.Data, &meta) != nil {
 			return
@@ -526,6 +591,7 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 				break
 			}
 		}
+		newToYou := m.queue != nil && m.queue.haveCur && m.queue.cur.NewToYou
 		m.mu.Unlock()
 		// Until an ICY title lands, mpv reports a URL-derived filename —
 		// the last path segment, or decoded text after the last '/' of the
@@ -534,7 +600,7 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 			return
 		}
 		if !saw && title != "" && !isURLish(title) {
-			emit(events, Event{Type: EventTitle, Title: title})
+			emit(events, Event{Type: EventTitle, Title: title, NewToYou: newToYou})
 		}
 	case "pause":
 		var paused bool
@@ -567,6 +633,12 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 		m.mu.Lock()
 		m.coreIdle = idle
 		paused := m.paused
+		if !idle && m.queue != nil {
+			// Audio is flowing: the song got past resolving and opening, so
+			// whatever failed before it was a bad run of luck, not a
+			// broken station.
+			m.queue.fails = 0
+		}
 		m.mu.Unlock()
 		if !idle && !paused {
 			emit(events, Event{Type: EventPlaying})

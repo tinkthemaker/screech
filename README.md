@@ -89,8 +89,8 @@ directory says they're healthy again. Presets, loved stations, and anything
 you've listened to are never pruned.
 
 Something wrong? `screech doctor` checks each dependency in turn (config,
-database, mpv, the IPC handshake, yt-dlp if you set it up, the directory)
-and reports what it finds.
+database, mpv, the IPC handshake, yt-dlp and its JavaScript runtime,
+Bandcamp, the directory) and reports what it finds.
 Every run also writes a log next to the config file, and startup errors hold
 the window open instead of vanishing with the message.
 
@@ -129,23 +129,83 @@ back out. Its listening history stays, so adding the same link again picks
 up where it left off.
 
 A link is normally the stream itself: an Icecast or Shoutcast mount, an
-`.mp3`, `.aac` or `.m3u8` URL, or a `.pls`/`.m3u` playlist.
+`.mp3`, `.aac` or `.m3u8` URL, or a `.pls`/`.m3u` playlist. A YouTube video
+link is the exception: `screech add` makes it a
+[discovery station](#discovery-stations) seeded from that video.
 
 **Page links, with yt-dlp (optional).** A YouTube, SoundCloud, Vimeo,
 Mixcloud, Bandcamp or Twitch link is a web page, not a stream. Screech can
-play one if you install [yt-dlp](https://github.com/yt-dlp/yt-dlp) and point
-`ytdlp_path` at it in `config.toml`, above any `[[stations]]` table:
+play one through [yt-dlp](https://github.com/yt-dlp/yt-dlp), and it finds
+yt-dlp on its own: first on your PATH, then beside `screech.exe`, then in
+its data folder. If yours lives somewhere else, point `ytdlp_path` at it in
+`config.toml`, above any `[[stations]]` table. `""` (the default) means
+find it, and `"off"` means never run it:
 
 ```toml
-ytdlp_path = "yt-dlp"   # or its full path
+ytdlp_path = ""   # "" finds yt-dlp; a full path names it; "off" turns it off
 ```
 
 Each time such a station is tuned, Screech asks yt-dlp for the audio
 stream, giving it at most 6 seconds; a page that won't resolve is skipped
 like a dead stream. The track line shows the artist and track yt-dlp
-reports, or the video's title. Leave `ytdlp_path` empty (the default) and
-yt-dlp is never run. `screech doctor` checks it when it's set. Screech
-plays one stream per page: a playlist link plays its first entry.
+reports, or the video's title. `screech doctor` says where it found
+yt-dlp, its version, and the JavaScript runtime it will use, and suggests
+`yt-dlp -U` when the release is over 60 days old. Screech plays one stream
+per page: a playlist link plays its first entry.
+
+## Discovery stations
+
+Type a genre, an artist or a song, or paste a YouTube link, and Screech
+starts a discovery station: an endless mix that keeps finding new bands in
+that sound, with a well-known track now and then. The songs come from
+YouTube Music and Bandcamp, and the status line shows each one's real title.
+
+Start one from **FIND**, the front door of the [window](#the-window-windows),
+or with **`/`** in the terminal. FIND is a single bar: Enter starts a
+station from what you typed. Under the bar, your most recent discovery
+stations wait under "pick up where you left off", and a click, or the down
+arrow then Enter, picks one up again. Tab in the terminal, or the RADIO tab in the
+window, switches the bar to radio search instead.
+
+The mix is discoveries and anchors. Discoveries are bands you probably
+haven't heard, smaller and newer. Anchors are the genre's well-known tracks,
+about one song in five; a run of quick skips brings more of them for a
+while, and loving a discovery brings fewer (loving an anchor doesn't). A song
+never comes round again on the same station within its last 200 songs, and the
+same band never plays twice in a row. Songs run from 90 seconds to 12 minutes,
+so mixes and full albums are left out.
+
+**NEW TO YOU** marks a band you've never heard or loved on Screech. Those
+bands come first among the discoveries, and the status line shows the
+label while one plays.
+
+**NEXT** on a discovery station plays the next song. The station stays
+where it is, and the skip isn't counted against it; paused, NEXT resumes with
+the next song. Press NEXT again within 3 seconds and it changes station, as
+NEXT always has. The status line suggests exactly that. **LOVE** loves the
+song, as it does on any station.
+
+**yt-dlp, and a JavaScript runtime.** YouTube songs need
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), which Screech doesn't install or
+update; `screech doctor` says when to run `yt-dlp -U`. Without yt-dlp, a
+station plays from Bandcamp alone, and a YouTube link can't start one (the
+status line says why, and points at `screech doctor`). A link that isn't a
+YouTube video can't start one either. yt-dlp also wants a JavaScript runtime
+to get past YouTube's challenges, and a runtime is recommended: deno, node or bun on
+your PATH. Deno is used as it is; otherwise Screech hands yt-dlp node or
+bun. Bandcamp's feed is undocumented and may change without notice. When it
+stops answering, `screech doctor` says so, and stations lean on YouTube alone.
+
+A discovery station started from FIND is kept as history. Pressing `f` on
+one saves it as a preset, which keeps it for good. A station can also live
+in `config.toml`, with `discover` in place of `url`; `screech add --discover`
+writes one for you:
+
+```toml
+[[stations]]
+name = "Dungeon synth"
+discover = "dungeon synth"   # a phrase or a YouTube link, instead of url
+```
 
 ## Controls
 
@@ -224,7 +284,11 @@ its preset slot and its loves while leaving listen history and the taste
 model alone. In both searchable views, esc clears the search before it
 closes the library.
 
-**/** — seed the radio. Type a genre and screech tunes a matching station
+**/** — find something to play. The bar takes an artist, a song, a genre or
+a YouTube link, and Enter starts a [discovery station](#discovery-stations)
+from it. Your recent discovery stations sit under the bar, and the down
+arrow then Enter picks one up. **Tab** switches the bar to radio search, which is what
+`/` used to do: type a genre and screech tunes a matching station
 instantly: a tag in the local cache plays immediately, and a tag the cache
 doesn't carry (regional genres like "corridos" often aren't in the top-20k
 global slice) is searched against the directory, cached, and tuned. Type an
@@ -275,12 +339,15 @@ already playing.
 The strip is 480 × 128: the station and a level meter, the track, then a
 status row (`LIVE`, `TUNING`, `RECONNECTING`, `BUFFERING`, `PAUSED`, the
 pick reason, feedback such as `LEARNED  Fast skip noted`) ending in the
-volume slider, and the PAUSE, NEXT, LOVE, MORE and EXIT buttons. Long station
-and track names scroll once so you can read them in full. Offline turns the
-whole frame red and NEXT reads RETRY NOW. **Volume is the slider, or `-`/`+`
-(`[`/`]`); the mouse wheel never changes it**, so a stray scroll over a
-window sitting behind a game or a web page can't. EXIT, `q`, Alt+F4 or the
-taskbar's Close quits Screech and stops the radio. The window's outer corners
+volume slider, and the PAUSE, NEXT, LOVE and MORE buttons. A red ✕ in the
+top-right corner closes Screech. Long station and track names scroll once so
+you can read them in full. On a discovery station the track row shows the
+song, and the status shows `NEW TO YOU` for a band you haven't heard on
+Screech before. Offline turns the whole frame red and NEXT reads RETRY NOW.
+**Volume is the slider, or `-`/`+` (`[`/`]`); the mouse wheel never changes
+it**, so a stray scroll over a window sitting behind a game or a web page
+can't. The ✕, `q`, Alt+F4 or the taskbar's Close quits Screech and stops the
+radio. The window's outer corners
 follow the LCARS curves. Drag it by its frame (the top bar and the left block).
 
 ![The unfolded window: the LOVED tab with its actions, and the presets row](docs/screenshots/window.png)
@@ -289,16 +356,27 @@ follow the LCARS curves. Drag it by its frame (the top bar and the left block).
 `esc`) folds it back; nothing in the strip moves. Near the bottom of the
 screen, the window moves up by exactly as much as it needs to fit and moves
 back when you fold it, unless you dragged it in between. The tabs down the
-left are the terminal's views: **RECENT**, **LOVED**, **STATIONS** and
-**TASTE**, then **SEARCH** (`/` in the terminal), **INFO** (`i`) and
-**SLEEP**, which steps 15, 30, 45, 60 and 90 minutes and off like `z` and
-shows the minutes left. LOVED and STATIONS have a `/ FILTER` pill. The
+left are **FIND** and **RADIO**, the terminal's views **RECENT**, **LOVED**,
+**STATIONS** and **TASTE**, and **MORE**. MORE holds the station sheet (what
+`i` shows in the terminal) and a **SLEEP** pill, which steps 15, 30, 45, 60
+and 90 minutes and off like `z` and shows the minutes left. LOVED and
+STATIONS have a `/ FILTER` pill. The
 actions under a list are RETURN TO STATION, MORE FROM ARTIST and REMOVE on
 LOVED, and TUNE and REMOVE on STATIONS; REMOVE asks for a second press
 (it reads CONFIRM for three seconds), like `x` twice. The footer holds your
 nine presets (saved ones tan, the one playing orange; click one to tune it)
 and a SAVE pill that saves or frees the current station like `f`. The
 elbow at the bottom left shows the local time.
+
+**FIND** is where the console opens: one bar for starting a discovery
+station. Type an artist, a song, a genre or a YouTube link and press Enter
+or GO. The console folds, and the strip shows `TUNING` while the station
+starts. Under the bar, up to four of your recent discovery stations wait
+under PICK UP WHERE YOU LEFT OFF; a click, or the down arrow then Enter,
+picks one up.
+**RADIO** is the same bar in blue for radio search: Enter tunes the best
+match, and your most-listened radio stations sit below it. Tab moves between
+FIND and RADIO, and esc closes the console.
 
 When the window has focus, the terminal's keys work:
 
@@ -311,21 +389,21 @@ When the window has focus, the terminal's keys work:
 | `p` | pause and resume |
 | `z` | sleep timer |
 | `-` `[` / `+` `=` `]` | volume down / up by 5 |
-| `/` | open SEARCH and type; on LOVED or STATIONS, open the filter instead |
+| `/` | open FIND and type; on LOVED or STATIONS, open the filter instead |
 | `h`, `H` | unfold to RECENT, or to LOVED |
-| `i` | unfold to INFO |
+| `i` | unfold to MORE, the station sheet |
 | `tab`, `shift+tab` | next or previous tab, while unfolded |
 | `j` `k`, arrows, `pgup` `pgdn`, `home` `end` | move through the rows |
-| `enter` | the row's main action: MORE FROM ARTIST on LOVED, TUNE on STATIONS; in SEARCH, seed the radio |
+| `enter` | the row's main action: MORE FROM ARTIST on LOVED, TUNE on STATIONS; in FIND, start a discovery station; in RADIO, tune the best match |
 | `r` | return to the station a loved track came from |
 | `x` | remove the selected row (press twice) |
 | `esc` | clear the filter or the search box first, then fold |
 | `q` | quit |
 
 Holding a key repeats only the volume and row keys, so a held `space`
-skips one station. While the SEARCH or filter box has focus, keys type into
-it: `enter` submits and `esc` backs out. On a first launch, `space` in an
-empty SEARCH box tunes a wildcard, as it does in the terminal.
+skips one station. While the FIND, RADIO or filter box has focus, keys type
+into it: `enter` submits and `esc` backs out. On a first launch, `space` in
+an empty RADIO box tunes a wildcard.
 
 ## What it's doing underneath
 
@@ -395,8 +473,9 @@ Internet radio drops constantly, and none of it should need you.
 `~/.config/screech/config.toml` on Linux. First launch writes it with
 commented defaults covering the accent color, ASCII fallback, mpv path, data
 directory, ad hopping, directory cache size (`sync_limit`, at most
-50,000), the optional yt-dlp path for page links (`ytdlp_path`), and an
-example of [your own stations](#your-own-stations). Keep settings above
+50,000), where to find yt-dlp (`ytdlp_path`), and examples of
+[your own stations](#your-own-stations) and
+[discovery stations](#discovery-stations). Keep settings above
 the first `[[stations]]` table: in TOML, anything below one belongs to it.
 `data_dir` accepts `~` and paths relative to the config file.
 
@@ -414,9 +493,11 @@ Everything Screech learns lives there too.
 Everything stays on your machine: `config.toml`, `screech.db` (stations,
 listens, loved tracks, the taste model), and `screech.log` (the last run
 only). The network traffic is the streams you listen to and the
-radio-browser.info directory: the weekly catalog refresh, `/` searches, and
-the click report their etiquette asks for when a station starts. Nothing
-else, and no telemetry.
+radio-browser.info directory: the weekly catalog refresh, radio searches,
+and the click report their etiquette asks for when a station starts.
+Discovery stations also reach YouTube, through yt-dlp, and Bandcamp's
+discover feed. Their song links are never stored. Nothing else, and no
+telemetry.
 
 Your data is yours to take with you, without stopping the radio:
 
@@ -464,7 +545,7 @@ Run `screech doctor` for dependency, database, IPC, and network checks. It
 changes nothing on disk (the mpv handshake runs in a throwaway temp
 directory), reports files a fresh install hasn't created yet as `--` rather
 than failures, and exits with a bitmask of what failed: 1 config, 2
-database, 4 mpv, 8 IPC, 16 network.
+database, 4 mpv, 8 IPC, 16 network, 32 yt-dlp, 64 Bandcamp.
 
 Set `ascii = true` if terminal glyphs render poorly; everything on screen is
 then plain 7-bit text. Small windows are fine: the layout sheds detail step

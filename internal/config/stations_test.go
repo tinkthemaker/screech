@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -100,7 +102,7 @@ url = "https://typed.example/"
 		`[[stations]] #2 "FTP": url "ftp://files.example/song.mp3" is not an http(s) link; skipped`,
 		`[[stations]] #3 "No Host": url "https:///stream" has no host; skipped`,
 		`[[stations]] #4: needs a name; skipped`,
-		`[[stations]] #5 "No Link": needs a url; skipped`,
+		`[[stations]] #5 "No Link": needs a url or discover; skipped`,
 		`[[stations]] #6 "Shouty Duplicate": same url as #1; skipped`,
 		`[[stations]] #7: name must be a string; ignored`,
 		`[[stations]] #7: needs a name; skipped`,
@@ -274,27 +276,115 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// Page links need yt-dlp: while ytdlp_path is empty each one gets a
-// warning, and once it's set they are ordinary stations.
-func TestPageLinksNeedYtdlp(t *testing.T) {
-	body := `[[stations]]
+const pageLinkBody = `[[stations]]
 name = "Lofi"
 url = "https://www.youtube.com/watch?v=jfKfPfyJRdk"
 `
+
+// noYtdlpAnywhere points PATH and the executable's folder at empty
+// directories, so a yt-dlp installed on the machine running the tests can't
+// answer for the config under test.
+func noYtdlpAnywhere(t *testing.T) (exeDir string) {
+	t.Helper()
+	t.Setenv("PATH", t.TempDir())
+	exeDir = t.TempDir()
+	prev := executableDir
+	executableDir = func() string { return exeDir }
+	t.Cleanup(func() { executableDir = prev })
+	return exeDir
+}
+
+// touchYtdlp drops a stand-in yt-dlp in dir (Find only needs the file).
+func touchYtdlp(t *testing.T, dir string) {
+	t.Helper()
+	name := "yt-dlp"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Page links need yt-dlp: a page link that nothing will resolve gets a
+// warning, and once yt-dlp is findable (or named outright) they are
+// ordinary stations.
+func TestPageLinksNeedYtdlp(t *testing.T) {
+	noYtdlpAnywhere(t)
 	dir := t.TempDir()
-	writeConfig(t, dir, body)
+	writeConfig(t, dir, pageLinkBody)
 	cfg, _, _, err := readFrom(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Stations) != 1 || !contains(cfg.Warnings, `station "Lofi" is a page link, not a stream; it plays only with ytdlp_path set`) {
+	if len(cfg.Stations) != 1 || !contains(cfg.Warnings, `station "Lofi" is a page link, not a stream; it plays only with yt-dlp, and none was found (put it on PATH, beside screech or in its data folder)`) {
 		t.Fatalf("stations=%v warnings=%q", cfg.Stations, cfg.Warnings)
 	}
 
-	writeConfig(t, dir, `ytdlp_path = "  yt-dlp "`+"\n\n"+body)
+	writeConfig(t, dir, `ytdlp_path = "  yt-dlp "`+"\n\n"+pageLinkBody)
 	cfg, _, _, err = readFrom(dir)
 	if err != nil || cfg.YtdlpPath != "yt-dlp" || len(cfg.Warnings) != 0 {
 		t.Fatalf("ytdlp_path=%q warnings=%q err=%v", cfg.YtdlpPath, cfg.Warnings, err)
+	}
+}
+
+// "off" is the listener's word that yt-dlp is not to be used, whatever is
+// lying around, so a page link says so rather than waiting for a yt-dlp that
+// will never be asked.
+func TestYtdlpPathOffDisables(t *testing.T) {
+	exeDir := noYtdlpAnywhere(t)
+	dir := t.TempDir()
+	touchYtdlp(t, dir)    // in the data folder
+	touchYtdlp(t, exeDir) // and beside the executable
+	writeConfig(t, dir, `ytdlp_path = " OFF "`+"\n\n"+pageLinkBody+"\n"+`[[stations]]
+name = "Mine"
+url = "https://mine.example/live.mp3"
+`)
+	cfg, _, _, err := readFrom(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(cfg.YtdlpPath, "off") {
+		t.Errorf("ytdlp_path = %q, want it kept for Find to read", cfg.YtdlpPath)
+	}
+	want := `station "Lofi" is a page link, not a stream; it plays only with yt-dlp, which ytdlp_path = "off" turns off`
+	if len(cfg.Warnings) != 1 || cfg.Warnings[0] != want {
+		t.Fatalf("warnings = %q, want only %q (a stream link needs no yt-dlp)", cfg.Warnings, want)
+	}
+}
+
+// An empty ytdlp_path means "find it": on PATH, beside the executable, or in
+// the data folder. Finding it is what ends the page-link warning.
+func TestYtdlpPathEmptyFinds(t *testing.T) {
+	exeDir := noYtdlpAnywhere(t)
+	dir := t.TempDir()
+	writeConfig(t, dir, `ytdlp_path = ""`+"\n\n"+pageLinkBody)
+
+	read := func() Config {
+		t.Helper()
+		cfg, _, _, err := readFrom(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	if cfg := read(); len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "none was found") {
+		t.Fatalf("with no yt-dlp anywhere: warnings = %q, want one saying none was found", cfg.Warnings)
+	}
+	touchYtdlp(t, dir)
+	if cfg := read(); len(cfg.Warnings) != 0 || cfg.YtdlpPath != "" {
+		t.Fatalf("yt-dlp in the data folder: path=%q warnings=%q, want none", cfg.YtdlpPath, cfg.Warnings)
+	}
+
+	// Beside the executable counts too, and the data folder may be elsewhere.
+	other := t.TempDir()
+	writeConfig(t, dir, `data_dir = `+strconv.Quote(other)+"\n\n"+pageLinkBody)
+	if cfg := read(); len(cfg.Warnings) != 1 {
+		t.Fatalf("data_dir has no yt-dlp: warnings = %q, want the warning back", cfg.Warnings)
+	}
+	touchYtdlp(t, exeDir)
+	if cfg := read(); len(cfg.Warnings) != 0 {
+		t.Fatalf("yt-dlp beside the executable: warnings = %q, want none", cfg.Warnings)
 	}
 }
 

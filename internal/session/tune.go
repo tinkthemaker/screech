@@ -3,10 +3,12 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/core"
 	"github.com/tinkthemaker/screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/streamurl"
 )
 
 // tick runs the frame-clock watchdogs: a tune that never locks fails
@@ -73,9 +75,17 @@ func (s State) seeded(msg Seeded) (State, []Cmd) {
 // superseded one: a newer Play took the player while this one was still
 // resolving, which says nothing about the station, even when the listener
 // has come straight back to it.
+//
+// The exception is a lookup that failed because the network is down (a
+// discovery station's first song): that says nothing about the station
+// either, so it takes the road a stream that never locks takes, without the
+// strike, and three in a row mean offline.
 func (s State) playFailed(msg PlayFailed) (State, []Cmd) {
 	if !s.HaveStation || msg.UUID != s.Station.UUID || errors.Is(msg.Err, player.ErrSuperseded) {
 		return s, nil
+	}
+	if errors.Is(msg.Err, player.ErrSourceNetwork) {
+		return s.failTuneAs("song lookup failed", false)
 	}
 	s.core.MarkStationFailed(msg.UUID)
 	s.Note = "stream rejected " + s.dot() + " moving on"
@@ -91,6 +101,12 @@ func (s State) next() (State, []Cmd) {
 		// early rather than tuning away from the outage.
 		return s.offlineRetry()
 	}
+	if s2, cmds, ok := s.nextSongFromPause(); ok {
+		return s2, cmds
+	}
+	if cmd, ok := s.beginNextSong(); ok {
+		return s, []Cmd{cmd}
+	}
 	fb := "NEXT  Finding another station"
 	switch {
 	case s.Suspect:
@@ -104,6 +120,81 @@ func (s State) next() (State, []Cmd) {
 	// order is unspecified.
 	cmd := s.beginSkip(fb)
 	return s, []Cmd{cmd}
+}
+
+// beginNextSong is NEXT on a discovery station that is making sound: the
+// player moves on to the next song and the listen carries on untouched, so
+// the station is never charged a skip for a song change. It reports false
+// when NEXT should keep its old meaning, a station skip: on radio, before
+// the stream has locked (there is no song to leave), without a queue behind
+// the player, and for a second NEXT inside songNextWindow, which is the
+// listener asking for a different station. It mutates s, like beginSkip.
+func (s *State) beginNextSong() (Cmd, bool) {
+	if (s.Phase != Playing && s.Phase != Buffering) || !s.discovery() {
+		return nil, false
+	}
+	sq, ok := s.pl.(player.SongQueue)
+	if !ok {
+		return nil, false
+	}
+	if !s.lastSongNextAt.IsZero() && s.Now.Sub(s.lastSongNextAt) < songNextWindow {
+		s.lastSongNextAt = time.Time{} // the skip ends this run of NEXTs
+		return nil, false
+	}
+	s.lastSongNextAt = s.Now
+	s.setFeedback("NEXT SONG  Again for a new station")
+	dot := s.dot()
+	return func() Msg {
+		if err := sq.NextSong(); err != nil {
+			return Notify{Note: "next song failed " + dot + " " + err.Error()}
+		}
+		return nil
+	}, true
+}
+
+// nextSongFromPause is NEXT on a discovery station that is paused: the same
+// next-song a playing one gets, which also resumes, since a listener who
+// presses NEXT wants to hear it. Without it NEXT would tune a different
+// station out from under the pause. It reports false where beginNextSong
+// does: not a discovery station, no queue behind the player, or a second NEXT
+// inside songNextWindow.
+//
+// A short pause leaves the song loaded: the next song is asked for first and
+// the unpause follows in the same command, so the old song is not heard to
+// start again while its successor is already on its way. A long pause is
+// resumed by reloading the station, which opens at the next song on its own
+// (the queue never serves a song twice), so there is nothing more to ask.
+func (s State) nextSongFromPause() (State, []Cmd, bool) {
+	if s.Phase != Paused || !s.discovery() {
+		return s, nil, false
+	}
+	sq, ok := s.pl.(player.SongQueue)
+	if !ok {
+		return s, nil, false
+	}
+	if !s.lastSongNextAt.IsZero() && s.Now.Sub(s.lastSongNextAt) < songNextWindow {
+		s.lastSongNextAt = time.Time{} // the skip ends this run of NEXTs
+		return s, nil, false
+	}
+	inPlace := s.Now.Sub(s.PausedAt) < resumeInPlace && !s.pauseReload
+	pl, c, uuid, dot := s.pl, s.core, s.Station.UUID, s.dot()
+	s, cmds := s.resume(false)
+	s.lastSongNextAt = s.Now
+	s.setFeedback("NEXT SONG  Again for a new station")
+	if inPlace {
+		cmds = []Cmd{func() Msg {
+			nextErr := sq.NextSong()
+			if err := pl.SetPaused(false); err != nil {
+				return PauseSet{Err: err}
+			}
+			c.ResumeListen(uuid, time.Now())
+			if nextErr != nil {
+				return Notify{Note: "next song failed " + dot + " " + nextErr.Error()}
+			}
+			return nil
+		}}
+	}
+	return s, cmds, true
 }
 
 // tuneTo plays a station by identity — library rows and preset recall all
@@ -125,6 +216,54 @@ func (s State) seed(msg Seed) (State, []Cmd) {
 	s.Seeking = true
 	s.Note = ""
 	return s, []Cmd{s.seedCmd(msg.Query)}
+}
+
+// discover is FIND's Enter: a phrase or a link becomes a discovery station.
+// The pick comes back as Tuned like any other, so it lands through
+// applyPick; a blank query is nothing to start.
+func (s State) discover(msg Discover) (State, []Cmd) {
+	seed := strings.TrimSpace(msg.Query)
+	if seed == "" {
+		return s, nil
+	}
+	if why := s.cannotStart(seed); why != "" {
+		s.Note = why
+		return s, nil
+	}
+	return s, []Cmd{s.discoverCmd(seed)}
+}
+
+// cannotStart says why a seed cannot start a station, or "" when it can. It
+// runs before the station exists: a seed that is refused later, at the first
+// song, would already have a row, a strike and a place under "pick up where
+// you left off" for something that never played. A link is a YouTube video
+// or nothing; a playlist, a channel and every other site have no songs to
+// find, and a video needs yt-dlp. A phrase needs neither, and that includes
+// one that merely mentions a site.
+func (s State) cannotStart(seed string) string {
+	_, video := streamurl.YouTubeID(seed)
+	switch {
+	case !video && strings.Contains(seed, "://"):
+		return "can't start from that link " + s.dot() + " paste a YouTube video, or type a genre or artist"
+	case video && s.opts.NoYtdlp:
+		return "YouTube links need yt-dlp " + s.dot() + " see screech doctor"
+	}
+	return ""
+}
+
+// discoverCmd starts the station in core, which ends the current listen the
+// way TuneTo does. A seed core refuses is the listener's typo, not a failed
+// tune: Tuned's error branch would stop a session that has no station yet,
+// so the refusal rides Notify as a note instead.
+func (s State) discoverCmd(seed string) Cmd {
+	c, dot := s.core, s.dot()
+	return func() Msg {
+		pick, err := c.StartDiscovery(seed, time.Now())
+		if err != nil {
+			return Notify{Note: "could not start discovery " + dot + " " + err.Error()}
+		}
+		return Tuned{Pick: pick}
+	}
 }
 
 // wildcard is the virgin first-run shortcut: pick anything.
@@ -203,11 +342,20 @@ func (s State) applyPick(pick core.Pick) (State, []Cmd) {
 	s.Virgin = false
 	s.Note = ""
 	s.Reason = pick.Reason
+	if core.IsDiscovery(pick.Station.UUID) && strings.HasPrefix(pick.Reason, "discovering") {
+		// Core spells a discovery's reason with a literal middle dot. The
+		// separator is the session's to choose, so the terminal's ASCII
+		// mode stays seven-bit.
+		s.Reason = s.discoveringReason(pick.Station.Name)
+	}
 	s.Phase = Tuning
 	s.TuneAt = s.Now
 	s.Artist, s.Title, s.TrackKey = "", "", ""
 	s.HaveTrack = false
 	s.LovedTrack = false
+	s.NewToYou = false
+	s.named = false
+	s.lastSongNextAt = time.Time{}
 	s.Suspect = false
 	s.PlayStart = time.Time{}
 	s.drops = 0
@@ -238,6 +386,15 @@ func (s *State) beginSkip(feedback string) Cmd {
 // offline retry it extends the backoff instead of punishing the retried
 // station.
 func (s State) failTune(reason string) (State, []Cmd) {
+	return s.failTuneAs(reason, true)
+}
+
+// failTuneAs is failTune with the strike optional. A failure that is plainly
+// the network's (a discovery station's song lookup finding no connection)
+// still counts toward the offline streak and still moves on, but earns the
+// station nothing: there is no strike to forgive later, and a station that
+// did nothing wrong is not marked in the meantime.
+func (s State) failTuneAs(reason string, strike bool) (State, []Cmd) {
 	if s.retryN > 0 {
 		s.core.EndListen(time.Now())
 		s.RetryAt = s.Now.Add(retryBackoff(s.retryN))
@@ -247,15 +404,20 @@ func (s State) failTune(reason string) (State, []Cmd) {
 		s.Resuming = false
 		return s, nil
 	}
-	s.core.MarkStationFailed(s.Station.UUID)
-	s.failStreak = append(s.failStreak, s.Station.UUID)
-	if len(s.failStreak) >= offlineAfter {
+	if strike {
+		s.core.MarkStationFailed(s.Station.UUID)
+		s.failStreak = append(s.failStreak, s.Station.UUID)
+	} else {
+		s.netFails++
+	}
+	if len(s.failStreak)+s.netFails >= offlineAfter {
 		// Three different stations, three failures: it's the network.
 		// Forgive the strikes and wait for it to come back.
 		for _, uuid := range s.failStreak {
 			s.core.ForgiveFailure(uuid)
 		}
 		s.failStreak = nil
+		s.netFails = 0
 		s.core.EndListen(time.Now())
 		s.retryN = 1
 		s.RetryAt = s.Now.Add(retryBackoff(0))

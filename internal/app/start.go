@@ -7,7 +7,7 @@ package app
 import (
 	"errors"
 	"fmt"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -71,7 +71,10 @@ type Runtime struct {
 	// Notice reports a recovered database: "database was damaged; moved
 	// aside to <file> and started fresh", or "".
 	Notice string
-	Log    *Log
+	// NoYtdlp is true when startup found no yt-dlp (off, or nowhere to be
+	// found): YouTube links cannot start a station, phrases still can.
+	NoYtdlp bool
+	Log     *Log
 
 	release func() // single-instance lock
 }
@@ -117,10 +120,18 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 	// The listener's own stations come from config.toml on every launch:
 	// the file is their record, the database only a cache of it. A failure
 	// here costs those stations, never the radio.
-	if err := c.SetCustomStations(customStations(cfg.Stations), time.Now()); err != nil {
+	links, discoveries := customStations(cfg.Stations)
+	if err := c.SetCustomStations(links, time.Now()); err != nil {
 		log.Linef("custom stations: %v", err)
-	} else if n := len(cfg.Stations); n > 0 {
+	} else if n := len(links); n > 0 {
 		log.Linef("custom stations from config: %d", n)
+	}
+	// Discovery stations the config names are upserted but never deleted:
+	// the ones started from FIND live only in the database.
+	if err := c.SetDiscoveryStations(discoveries, time.Now()); err != nil {
+		log.Linef("discovery stations: %v", err)
+	} else if n := len(discoveries); n > 0 {
+		log.Linef("discovery stations from config: %d", n)
 	}
 	log.Linef("database open; %d stations cached", c.StationCount())
 
@@ -137,16 +148,7 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 		return nil, failStage(log, StageMpv, err)
 	}
 	log.Linef("mpv connected over IPC")
-	if cfg.YtdlpPath != "" {
-		pl.SetExtractor(player.YTDLP{Path: cfg.YtdlpPath})
-		if _, err := exec.LookPath(cfg.YtdlpPath); err != nil {
-			// Not fatal: only page links need it, and each one that can't
-			// resolve fails on its own like any dead stream.
-			log.Linef("yt-dlp not found (%v); page links will fail", err)
-		} else {
-			log.Linef("page links resolve through yt-dlp: %s", cfg.YtdlpPath)
-		}
-	}
+	haveYtdlp := wireDiscovery(pl, discoveryDeps{Config: cfg, ExeDir: executableDir(), Known: c.KnownArtist, Log: log})
 
 	// mpv boots at --volume=100; restore the persisted level now, on this
 	// thread, so the first Play can't beat the face's async volume command
@@ -155,18 +157,37 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 		log.Linef("volume restore failed: %v", err)
 	}
 
-	return &Runtime{Config: cfg, DBPath: dbPath, Core: c, Player: pl, Notice: notice, Log: log, release: release}, nil
+	return &Runtime{Config: cfg, DBPath: dbPath, Core: c, Player: pl, Notice: notice, NoYtdlp: !haveYtdlp, Log: log, release: release}, nil
 }
 
-// customStations hands config's [[stations]] to core, which fills in the
-// uuid, resolved URL and ad risk itself.
-func customStations(in []config.Station) []core.Station {
-	out := make([]core.Station, 0, len(in))
-	for _, s := range in {
-		out = append(out, core.Station{Name: s.Name, URL: s.URL, Tags: s.Tags,
-			Codec: s.Codec, Bitrate: s.Bitrate, Country: s.Country, Homepage: s.Homepage})
+// executableDir is the folder holding the running screech, one of the places
+// yt-dlp is looked for; "" when the OS won't say.
+func executableDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
 	}
-	return out
+	return filepath.Dir(exe)
+}
+
+// customStations splits config's [[stations]] into the two kinds core
+// keeps: links, and discoveries, whose sentinel URL carries their phrase
+// (or YouTube link) after "discover:". Core fills in the rest. They go to
+// different calls because SetCustomStations deletes the custom: rows the
+// file no longer names, and a discovery must never be on that list.
+func customStations(in []config.Station) (links, discoveries []core.Station) {
+	for _, s := range in {
+		st := core.Station{Name: s.Name, URL: s.URL, Tags: s.Tags,
+			Codec: s.Codec, Bitrate: s.Bitrate, Country: s.Country, Homepage: s.Homepage}
+		if s.Discover != "" {
+			st.UUID = core.DiscoveryUUID(s.Discover)
+			st.URL = core.DiscoverScheme + s.Discover
+			discoveries = append(discoveries, st)
+			continue
+		}
+		links = append(links, st)
+	}
+	return links, discoveries
 }
 
 // failStage reports a startup failure that isn't "already running": the

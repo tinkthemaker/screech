@@ -9,13 +9,41 @@ release pages.
 0.7.0 and 0.8.0 were never published; their changes ship here too, so this
 covers everything since 0.6.1.
 
+### New: discovery stations
+
+- **Discovery stations.** Type a genre, an artist or a song, or paste a
+  YouTube link, and Screech keeps finding new bands in that sound, from
+  YouTube Music and Bandcamp, with a well-known track now and then. A band
+  you've never heard on Screech is marked NEW TO YOU. NEXT plays the next
+  song (paused, it resumes with it), and pressing NEXT again within 3
+  seconds changes station. Every song
+  counts: loves, history and taste see all of them. Packaging such as
+  "(Official Audio)" and trailing "ft." credits is stripped from titles.
+- **The window's FIND tab.** The console opens on a search bar ("Artist, song,
+  genre or YouTube link"), with your recent discovery stations under it and a
+  RADIO tab beside it. INFO and SLEEP move under MORE, and a red ✕ in the
+  top-right corner closes Screech (EXIT is gone from the button row).
+- **The terminal's `/`.** It now finds a discovery station, and Tab switches
+  to radio search.
+- **yt-dlp finds itself.** Leave `ytdlp_path` empty and Screech looks for
+  yt-dlp on PATH, beside `screech.exe`, and in its data folder. Set it to
+  `"off"` to turn yt-dlp off. Screech hands yt-dlp your Node or Bun when
+  there's no Deno, and `screech doctor` says which, and when to run
+  `yt-dlp -U`. Without yt-dlp, discovery stations still play from Bandcamp,
+  and a YouTube link says it needs yt-dlp instead of starting a station that
+  can't play.
+- **Adding from the command line.** `screech add --discover "<phrase>"` keeps
+  a discovery station in `config.toml`, and `screech add <YouTube link>` now
+  makes a discovery station seeded from that link.
+
 ### New: a window for Windows
 
 - **The LCARS window.** `screech-gui.exe` opens a small window in the style
   of a starship panel: a 480 × 128 strip with the station, the track, a
-  level meter, a volume slider and PAUSE, NEXT, LOVE, MORE and EXIT buttons.
-  MORE unfolds it into a console with your library (RECENT, LOVED, STATIONS,
-  TASTE), SEARCH, INFO, the sleep timer and the nine presets. It sits behind
+  level meter, a volume slider and PAUSE, NEXT, LOVE and MORE buttons, and a
+  red ✕ to close it. MORE unfolds it into a console with FIND and RADIO for
+  finding music, your library (RECENT, LOVED, STATIONS, TASTE), the station
+  sheet and sleep timer under MORE, and the nine presets. It sits behind
   other windows like any other, remembers where you left it and whether it
   was unfolded, and opens centred if that spot is no longer on any screen.
   Windows only for now; the terminal works as it always has.
@@ -37,11 +65,11 @@ covers everything since 0.6.1.
 - **One Screech at a time.** Opening the window a second time brings the
   first to the front. The terminal refuses to start while the window is
   open, and the window says so if a terminal is already playing.
-- **A familiar player strip.** Playback controls start at the left, EXIT is
-  always visible at the right, and long station and track names scroll once
-  to show their full text. The outer window corners follow the LCARS frame.
-  EXIT, `q`, Alt+F4 and the taskbar's Close all stop the radio. Drag the
-  window by its top bar or the block at the left.
+- **A familiar player strip.** Playback controls start at the left, a red ✕
+  is always visible at the top right, and long station and track names scroll
+  once to show their full text. The outer window corners follow the LCARS
+  frame. The ✕, `q`, Alt+F4 and the taskbar's Close all stop the radio. Drag
+  the window by its top bar or the block at the left.
 - **Needs WebView2**, Microsoft's web view, which is built into Windows 10
   and 11. If it's missing, the window offers to install it.
 - `--reduced-motion`, `SCREECH_REDUCED_MOTION` and Windows' own animation
@@ -83,10 +111,10 @@ covers everything since 0.6.1.
   `screech doctor` counts them. The config file is all you need to keep: a
   fresh database rebuilds them from it.
 - **YouTube, SoundCloud and other page links, if you want them.** Install
-  yt-dlp and set `ytdlp_path` in `config.toml`, and your own stations can
-  be page links too: each tune asks yt-dlp for the audio (giving it 6
-  seconds at most) and shows the artist and track it reports. It's off
-  unless you set it, and `screech doctor` checks it when it's on.
+  yt-dlp, and your own stations can be page links too: each tune asks yt-dlp
+  for the audio (giving it 6 seconds at most) and shows the artist and track
+  it reports. Screech finds yt-dlp on its own, `ytdlp_path = "off"` turns it
+  off, and `screech doctor` checks it.
 - **Export**: `screech export loved` and `screech export heard` write CSV to
   stdout; `screech export backup <path>` writes a consistent copy of the
   database. All three work while the radio is playing.

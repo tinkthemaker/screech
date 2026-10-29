@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"time"
+
+	"github.com/tinkthemaker/screech/internal/player"
 )
 
 // love toggles love on the current station and, when one is parsed, the
@@ -22,6 +24,16 @@ func (s State) love() (State, []Cmd) {
 			s.setFeedback("LOVED  Track and station")
 		} else {
 			s.setFeedback("LOVED  Station")
+		}
+		// A discovery queue learns from a love as well: it leans toward
+		// the kind of song just loved. Taking a love back tells it nothing,
+		// and neither does a love that only reached the station, with no song
+		// named yet to have been loved.
+		if sq, ok := s.pl.(player.SongQueue); ok && s.discovery() && track {
+			return s, []Cmd{func() Msg {
+				sq.SongLoved()
+				return nil
+			}}
 		}
 	} else {
 		s.setFeedback("UNLOVED  Love returned")

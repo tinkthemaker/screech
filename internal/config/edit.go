@@ -21,9 +21,9 @@ import (
 // the change on its next launch.
 func AddStation(st Station) (string, Station, error) { return addStationIn(configDir(), st) }
 
-// RemoveStation deletes the [[stations]] table whose link or custom: id
-// matches key, with the comment lines directly above it, and returns the
-// file's path and the station removed.
+// RemoveStation deletes the [[stations]] table whose link, discover phrase
+// or custom:/disc: id matches key, with the comment lines directly above
+// it, and returns the file's path and the station removed.
 func RemoveStation(key string) (string, Station, error) { return removeStationIn(configDir(), key) }
 
 func addStationIn(dir string, st Station) (string, Station, error) {
@@ -48,7 +48,7 @@ func addStationIn(dir string, st Station) (string, Station, error) {
 	}
 	for _, have := range before.Stations {
 		if have.ID() == st.ID() {
-			return path, st, fmt.Errorf("%s is already in %s as %q", st.URL, path, have.Name)
+			return path, st, fmt.Errorf("%s is already in %s as %q", st.source(), path, have.Name)
 		}
 	}
 	block, err := encodeStation(st)
@@ -87,10 +87,15 @@ func removeStationIn(dir, key string) (string, Station, error) {
 	if err != nil {
 		return path, Station{}, fmt.Errorf("%s is not valid TOML, so it was left alone: %w", path, err)
 	}
+	// A key names a station three ways: the id `screech add` printed, a
+	// link, or a discovery's phrase. A link or phrase could be either kind
+	// of station (a YouTube link may be a url or a discover), so both ids
+	// are candidates; ids are hashes, so neither can match the other's.
 	key = strings.TrimSpace(key)
-	id := key
-	if !core.IsCustom(key) {
-		id = core.CustomUUID(core.CleanText(key))
+	targets := map[string]bool{key: true}
+	if !core.IsCustom(key) && !core.IsDiscovery(key) {
+		clean := core.CleanText(key)
+		targets = map[string]bool{core.CustomUUID(clean): true, core.DiscoveryUUID(clean): true}
 	}
 
 	text := string(data)
@@ -99,7 +104,7 @@ func removeStationIn(dir, key string) (string, Station, error) {
 	var removed Station
 	for _, sp := range stationBlocks(lines) {
 		st, ok := blockStation(strings.Join(lines[sp.header:sp.end], ""))
-		if !ok || core.CustomUUID(core.CleanText(st.URL)) != id {
+		if !ok || !targets[st.ID()] {
 			continue
 		}
 		if len(gone) == 0 {
@@ -109,7 +114,7 @@ func removeStationIn(dir, key string) (string, Station, error) {
 	}
 	if len(gone) == 0 {
 		for _, have := range before.Stations {
-			if have.ID() == id {
+			if targets[have.ID()] {
 				return path, have, fmt.Errorf("%q is in %s, but not as a [[stations]] table; remove it there by hand", have.Name, path)
 			}
 		}
@@ -121,12 +126,15 @@ func removeStationIn(dir, key string) (string, Station, error) {
 	}
 	text = strings.Join(lines, "")
 	want := ids(before.Stations)
-	delete(want, id)
+	for id := range targets {
+		delete(want, id)
+	}
 	if err := checkEdit(before, text, want); err != nil {
 		return path, removed, err
 	}
 	removed.Name = core.CleanText(removed.Name)
 	removed.URL = core.CleanText(removed.URL)
+	removed.Discover = core.CleanText(removed.Discover)
 	return path, removed, writeAtomic(path, text)
 }
 
@@ -188,8 +196,10 @@ func stationBlocks(lines []string) []span {
 func isBlank(l string) bool   { return strings.TrimSpace(l) == "" }
 func isComment(l string) bool { return strings.HasPrefix(strings.TrimSpace(l), "#") }
 
-// blockStation reads a lone [[stations]] table's name and url without
-// judging them, so an entry the loader skips can still be removed.
+// blockStation reads a lone [[stations]] table's name and url (or discover
+// phrase) without judging them, so an entry the loader skips can still be
+// removed. A table with both is read as its url, the way an old version
+// would have.
 func blockStation(block string) (Station, bool) {
 	var raw struct {
 		Stations []map[string]any `toml:"stations"`
@@ -198,8 +208,11 @@ func blockStation(block string) (Station, bool) {
 		return Station{}, false
 	}
 	name, _ := raw.Stations[0]["name"].(string)
-	link, ok := raw.Stations[0]["url"].(string)
-	return Station{Name: name, URL: link}, ok
+	if link, ok := raw.Stations[0]["url"].(string); ok {
+		return Station{Name: name, URL: core.CleanText(link)}, true
+	}
+	phrase, ok := raw.Stations[0]["discover"].(string)
+	return Station{Name: name, Discover: core.CleanText(phrase)}, ok
 }
 
 func ids(sts []Station) map[string]bool {

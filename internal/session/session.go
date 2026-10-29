@@ -49,6 +49,12 @@ const (
 // off the far end.
 var SleepSteps = []time.Duration{15 * time.Minute, 30 * time.Minute, 45 * time.Minute, 60 * time.Minute, 90 * time.Minute}
 
+// songNextWindow is how soon after a next-song NEXT another one stops
+// meaning "another song" and starts meaning "not this station": the
+// feedback line promises it, and a listener who is skipping through a bad
+// station presses fast.
+const songNextWindow = 3 * time.Second
+
 // autoHopCooldown bounds auto-hop: a run of stations all mid-break would
 // otherwise chain hops faster than a listener can follow; after one hop
 // the next break waits for the listener.
@@ -93,6 +99,10 @@ type Options struct {
 	Notice string
 	// Dot is the separator in notes and feedback; "" means "·".
 	Dot string
+	// NoYtdlp says this machine has no usable yt-dlp (off, or not found), so
+	// a YouTube link cannot start a station. The zero value assumes there is
+	// one; phrases never need it, since Bandcamp carries them.
+	NoYtdlp bool
 }
 
 // State is the whole listening session in one value. Faces read the
@@ -122,6 +132,10 @@ type State struct {
 	FeedbackAt                     time.Time
 	Quitting                       bool // a quit is in flight; backend death is expected noise
 
+	// NewToYou marks the playing song's artist as one this listener has
+	// never heard on Screech. Only a discovery queue's titles carry it.
+	NewToYou bool
+
 	core *core.Core
 	pl   player.Player
 	opts Options
@@ -135,6 +149,7 @@ type State struct {
 	lockAt     time.Time
 	bufferAt   time.Time
 	failStreak []string
+	netFails   int // failures in the same streak that cost no strike: the network's, not the station's
 	retryN     int
 	// RetryAt arms the offline retry; a face renders its countdown. Zero
 	// while a retry is in flight (or none is armed).
@@ -142,6 +157,12 @@ type State struct {
 	lastGood     core.Station
 	haveLastGood bool
 	restarts     []time.Time
+
+	// lastSongNextAt is when NEXT last meant next-song on this station; a
+	// second NEXT within songNextWindow means a different station. named
+	// is set once the station's first title has been offered as its name.
+	lastSongNextAt time.Time
+	named          bool
 
 	pauseReload bool      // resume must reload: backend restarted, or the stream stopped/ended while paused
 	sleepVol    int       // last faded volume sent to the player; -1 = none
@@ -221,6 +242,8 @@ func (s State) Update(msg Msg) (State, []Cmd) {
 		return s.seed(msg)
 	case Wildcard:
 		return s.wildcard()
+	case Discover:
+		return s.discover(msg)
 	case Touch:
 		return s.touch()
 	case Notify:
@@ -256,6 +279,11 @@ func (s State) CurrentSlot() int {
 	return 0
 }
 
+// discovery reports whether the station in hand is a discovery queue.
+func (s State) discovery() bool {
+	return s.HaveStation && core.IsDiscovery(s.Station.UUID)
+}
+
 func (s *State) setFeedback(text string) {
 	s.Feedback = text
 	s.FeedbackAt = s.Now
@@ -266,6 +294,13 @@ func (s State) dot() string {
 		return "·"
 	}
 	return s.opts.Dot
+}
+
+// discoveringReason is the WHY line of a discovery station. Core builds
+// its own copy with a literal middle dot; the session composes it again
+// here with the separator the face asked for.
+func (s State) discoveringReason(name string) string {
+	return "discovering " + s.dot() + " " + name
 }
 
 // syncCmd refreshes the station directory off the face's path, on the same

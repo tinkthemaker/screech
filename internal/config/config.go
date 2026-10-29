@@ -13,6 +13,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/tinkthemaker/screech/internal/streamurl"
+	"github.com/tinkthemaker/screech/internal/ytdlp"
 )
 
 type Config struct {
@@ -22,8 +23,11 @@ type Config struct {
 	DataDir    string `toml:"data_dir"`
 	AutoHopAds bool   `toml:"auto_hop_ads"`
 	SyncLimit  int    `toml:"sync_limit"`
-	// YtdlpPath turns on page links (YouTube, SoundCloud…) among the
-	// listener's own stations; "" leaves them off.
+	// YtdlpPath says which yt-dlp Screech uses, for discovery stations and
+	// for page links (YouTube, SoundCloud…) among the listener's own
+	// stations. "" means find it (PATH, beside the executable, the data
+	// folder), "off" means don't use it, anything else is the path as given.
+	// The setting is kept as written; ytdlp.Find reads it.
 	YtdlpPath string `toml:"ytdlp_path"`
 
 	// Stations are the listener's own streams, the [[stations]] tables.
@@ -78,16 +82,21 @@ auto_hop_ads = false
 # The directory refreshes in the background weekly.
 sync_limit = 20000
 
-# Page links among your own stations - YouTube, SoundCloud, Vimeo,
-# Mixcloud, Bandcamp, Twitch - play only through yt-dlp, which you install
-# yourself. Empty = off. "yt-dlp" if it's on PATH, else its full path.
-# Each tune of a page link runs it once, for at most 6 seconds.
+# yt-dlp, which you install yourself, finds songs on YouTube Music for
+# discovery stations and plays page links among your own stations -
+# YouTube, SoundCloud, Vimeo, Mixcloud, Bandcamp, Twitch. Empty = find it
+# (on PATH, beside screech, or in the data folder). "off" = never use it;
+# discovery stations then play from Bandcamp alone. Or a full path.
+# YouTube also wants a JavaScript runtime (deno, node or bun) on PATH.
 ytdlp_path = ""
 
 # Your own stations: any http or https stream link, one [[stations]] table
 # each. "screech add <link>" writes one for you. name and url are required;
 # tags, codec, bitrate, country and homepage are optional. They join the
 # rotation the next time Screech starts and survive every directory refresh.
+# Instead of a url, a station can be a discovery: discover = "<phrase or
+# YouTube link>" finds songs from that sound, song after song.
+# "screech add --discover <phrase>" writes one.
 # Keep every setting above this point: in TOML, a line below a [[stations]]
 # header belongs to that station.
 #
@@ -95,6 +104,10 @@ ytdlp_path = ""
 # name = "My station"
 # url = "https://example.com/stream.mp3"
 # tags = "jazz, late night"
+#
+# [[stations]]
+# name = "Dungeon synth"
+# discover = "dungeon synth"
 `
 
 // Read finds an existing config and returns it along with the resolved
@@ -130,6 +143,7 @@ func readFrom(dir string) (Config, string, string, error) {
 		return cfg, filepath.Join(dir, "screech.db"), dir, err
 	}
 	dataDir := resolveDataDir(cfg.DataDir, dir)
+	cfg.Warnings = append(cfg.Warnings, pageLinkWarnings(cfg, dataDir)...)
 	return cfg, filepath.Join(dataDir, "screech.db"), dataDir, nil
 }
 
@@ -173,14 +187,42 @@ func decode(data []byte) (Config, error) {
 	cfg.Stations, warns = parseStations(raw.Stations)
 	cfg.Warnings = append(cfg.Warnings, warns...)
 	cfg.YtdlpPath = strings.TrimSpace(cfg.YtdlpPath)
-	if cfg.YtdlpPath == "" {
-		for _, st := range cfg.Stations {
-			if streamurl.IsPage(st.URL) {
-				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("station %q is a page link, not a stream; it plays only with ytdlp_path set", st.Name))
-			}
+	return cfg, nil
+}
+
+// executableDir is the folder holding the running screech, one of the three
+// places yt-dlp is looked for. A variable so tests can aim it elsewhere.
+var executableDir = func() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Dir(exe)
+}
+
+// pageLinkWarnings says which of the listener's own stations are page links
+// that nothing will resolve. It waits for the data folder (one of the places
+// yt-dlp is looked for), so it runs after the file is decoded, not inside
+// decode.
+//
+// Only "off" and "not found" warn. A path the listener wrote out is theirs
+// to get right, and doctor and the startup log say when it doesn't run, so a
+// stale path doesn't also dress every page link in a warning here.
+func pageLinkWarnings(cfg Config, dataDir string) []string {
+	if _, ok := ytdlp.Find(cfg.YtdlpPath, executableDir(), dataDir); ok {
+		return nil
+	}
+	why := "and none was found (put it on PATH, beside screech or in its data folder)"
+	if strings.EqualFold(cfg.YtdlpPath, "off") {
+		why = `which ytdlp_path = "off" turns off`
+	}
+	var warns []string
+	for _, st := range cfg.Stations {
+		if streamurl.IsPage(st.URL) {
+			warns = append(warns, fmt.Sprintf("station %q is a page link, not a stream; it plays only with yt-dlp, %s", st.Name, why))
 		}
 	}
-	return cfg, nil
+	return warns
 }
 
 func loadFrom(dir string) (Config, string, error) {
