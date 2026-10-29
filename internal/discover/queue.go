@@ -44,9 +44,20 @@ var ErrPaced = errors.New("discover: bandcamp is pacing its requests; try again 
 // outage says nothing about them.
 var ErrNetwork = errors.New("discover: network unreachable")
 
+// isNetworkError reports whether err says the network, and not the song, was
+// the trouble. A context ending is neither: context.DeadlineExceeded happens
+// to satisfy net.Error (it has Timeout), so without this check a lookup that
+// merely ran out of time would read as an outage. Only the sources' own mark
+// (ErrNetwork) outranks it.
 func isNetworkError(err error) bool {
+	if errors.Is(err, ErrNetwork) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
 	var ne net.Error
-	return errors.Is(err, ErrNetwork) || errors.As(err, &ne)
+	return errors.As(err, &ne)
 }
 
 // Song is one playable song.
@@ -95,7 +106,18 @@ const (
 	// When the only thing between Next and a song is the Bandcamp gap, Next
 	// waits it out, at most this many times.
 	maxPaceWaits = 2
+
+	// When Bandcamp is tried before YouTube and YouTube is there to fall back
+	// on, Bandcamp may spend this fraction of what the caller has left (a
+	// tune's 8 s gives it 2 s). Its tag walk is up to four requests and a
+	// host that hangs would otherwise take the whole first-song budget.
+	bcShare = 4
 )
+
+// errBCSlow is the cause of the sub-deadline Bandcamp runs under, so bcFetch
+// can tell "Bandcamp took its share" (a failure of Bandcamp) from "the caller
+// gave up" (no verdict on it).
+var errBCSlow = errors.New("discover: bandcamp took its share of the lookup")
 
 type source int
 
@@ -304,19 +326,52 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// pick tries the sources in turn for one kind of song. The two take turns
-// first, so a station is about half and half; Bandcamp goes first on the very
-// first ask because it needs no yt-dlp and so answers fastest.
+// ytLeads reports whether YouTube is asked before Bandcamp for this kind of
+// song. The two take turns, so a station is about half and half, and Bandcamp
+// starts: it needs no yt-dlp, so with a tag settled it answers from a cache
+// read. Two cases put YouTube first.
+//
+// Until Bandcamp has a tag, its answer is a walk of up to four requests, and
+// the first song of a station has 8 s in all: nothing has played yet and
+// nothing is cached, so YouTube leads, as the spec says ("Bandcamp first when
+// it has a cached tag result, YouTube otherwise"). And a Bandcamp that failed
+// stays behind YouTube until its gap has passed; inside the gap it would only
+// hand back its old failure.
+func (q *Queue) ytLeads(k int) bool {
+	if q.ytFirst[k] {
+		return true
+	}
+	if q.yt == nil || q.bc == nil {
+		return false
+	}
+	if len(q.recent) == 0 && q.bcTag == "" {
+		return true
+	}
+	return q.bcErr != nil && q.now().Sub(q.bcLast) < bcGap
+}
+
+// bcContext is the context Bandcamp is asked under: the caller's, narrowed to
+// a share of what is left when YouTube is waiting behind it.
+func (q *Queue) bcContext(ctx context.Context, fallback bool) (context.Context, context.CancelFunc) {
+	dl, ok := ctx.Deadline()
+	if !ok || !fallback {
+		return ctx, func() {}
+	}
+	return context.WithTimeoutCause(ctx, time.Until(dl)/bcShare, errBCSlow)
+}
+
+// pick tries the sources in turn for one kind of song; see ytLeads for who
+// goes first.
 func (q *Queue) pick(ctx context.Context, anchor bool, r *run) (Song, bool) {
 	k := 0
 	if anchor {
 		k = 1
 	}
 	order := [2]source{srcBC, srcYT}
-	if q.ytFirst[k] {
+	if q.ytLeads(k) {
 		order = [2]source{srcYT, srcBC}
 	}
-	for _, src := range order {
+	for i, src := range order {
 		if r.down[src] {
 			continue
 		}
@@ -326,7 +381,11 @@ func (q *Queue) pick(ctx context.Context, anchor bool, r *run) (Song, bool) {
 			err error
 		)
 		if src == srcBC {
-			s, ok, err = q.pickBC(ctx, anchor)
+			// Ahead of a YouTube that has not been tried, Bandcamp gets only
+			// its share of the time; last, it gets what is left.
+			bctx, stop := q.bcContext(ctx, i == 0 && q.yt != nil && !r.down[srcYT])
+			s, ok, err = q.pickBC(bctx, anchor)
+			stop()
 		} else {
 			s, ok, err = q.pickYT(ctx, anchor, r)
 		}
@@ -477,6 +536,12 @@ func (q *Queue) prepare(ctx context.Context) error {
 			q.seedSong = &s
 		}
 		q.probesFromTags(m.Tags)
+		if q.phrase == "" {
+			// A video with no tags still names its artist: without a phrase
+			// the station would have no anchors, no Bandcamp, and only the
+			// Mix's few dozen songs before running dry.
+			q.probesFromMedia(m)
+		}
 	case !strings.Contains(seed, "://"):
 		// Some other link is not a phrase to search for.
 		q.phrase = core.CleanText(seed)
@@ -510,6 +575,26 @@ func (q *Queue) probesFromTags(tags []string) {
 				q.bcProbes = append(q.bcProbes, bcProbe{tag: t, phrase: tag})
 			}
 		}
+	}
+}
+
+// probesFromMedia gives a linked video that carries no tags a phrase of its
+// own: the artist it resolved to, or the cleaned title when it names none (the
+// spec has "its title and tags supply the phrase"). The phrase is what YouTube
+// is searched for and what Bandcamp is tried with, as for a typed artist.
+func (q *Queue) probesFromMedia(m YTMedia) {
+	artist, title := mediaNames(m)
+	artist, title = CleanTitle(artist, title)
+	phrase := artist
+	if phrase == "" {
+		phrase = title
+	}
+	if phrase == "" {
+		return
+	}
+	q.phrase = phrase
+	for _, t := range BandcampTags(phrase) {
+		q.bcProbes = append(q.bcProbes, bcProbe{tag: t})
 	}
 }
 

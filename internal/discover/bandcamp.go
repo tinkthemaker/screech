@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -120,6 +121,12 @@ func (c BandcampClient) Tag(ctx context.Context, tag, slice string) ([]BCItem, e
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			// The client's own timeout, with the caller still waiting: the host
+			// never answered, which is the network's doing. A deadline that
+			// came from the caller's context stays a plain deadline.
+			err = fmt.Errorf("%w: %w", ErrNetwork, err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -227,11 +234,15 @@ func (q *Queue) bcFetch(ctx context.Context, tag, slice string, free bool) ([]BC
 	q.bcLast = now
 	items, err := q.bc.Tag(ctx, tag, slice)
 	if err != nil {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), errBCSlow) {
 			// The caller gave up, which says nothing about Bandcamp.
 			q.bcLast = prev
 			return nil, time.Time{}, err
 		}
+		// A real failure, or Bandcamp using up its share of the lookup with
+		// YouTube waiting: either way the gap holds it back, and its failure
+		// is what it answers with meanwhile, so a host that hangs costs one
+		// wait and not one per ask.
 		q.bcErr = err
 		return nil, time.Time{}, err
 	}

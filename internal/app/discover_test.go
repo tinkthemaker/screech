@@ -371,8 +371,9 @@ func TestNetworkErrorsMapToErrSourceNetwork(t *testing.T) {
 		{"dns", dns, true},
 		{"http transport", post, true},
 		{"joined with another source's failure", fmt.Errorf("discover: %w", errors.Join(errors.New("yt-dlp: Video unavailable"), post)), true},
-		{"the lookup's own deadline", fmt.Errorf("discover: %w", context.DeadlineExceeded), true},
 		{"the queue's own network mark", fmt.Errorf("discover: %w", fmt.Errorf("resolving: %w", discover.ErrNetwork)), true},
+		{"a mark over a deadline", fmt.Errorf("discover: %w", fmt.Errorf("%w: %w", discover.ErrNetwork, context.DeadlineExceeded)), true},
+		{"a mark beside the lookup's own deadline", fmt.Errorf("discover: %w", errors.Join(fmt.Errorf("yt-dlp: %w", discover.ErrNetwork), context.DeadlineExceeded)), true},
 		{"bandcamp pacing", fmt.Errorf("discover: %w", discover.ErrPaced), true},
 		{"a timeout from deeper in", fmt.Errorf("x: %w", &url.Error{Op: "Get", URL: "https://bandcamp.com/", Err: os.ErrDeadlineExceeded}), true},
 		{"already marked", fmt.Errorf("%w: x", player.ErrSourceNetwork), true},
@@ -383,6 +384,8 @@ func TestNetworkErrorsMapToErrSourceNetwork(t *testing.T) {
 		{"a refused status", fmt.Errorf("discover: %w", &discover.StatusError{Code: 403}), false},
 		{"a throttling status", fmt.Errorf("discover: %w", &discover.StatusError{Code: 429}), false},
 		{"yt-dlp wouldn't start", errors.New("starting yt-dlp (x): file not found"), false},
+		{"a lookup that ran out of time", fmt.Errorf("discover: %w", context.DeadlineExceeded), false},
+		{"out of time over a bandcamp transport failure", fmt.Errorf("discover: %w", errors.Join(post, context.DeadlineExceeded)), false},
 		{"cancelled", fmt.Errorf("discover: %w", context.Canceled), false},
 		{"cancelled over a dns failure", errors.Join(context.Canceled, dns), false},
 	} {
@@ -445,8 +448,8 @@ func TestNewBandcampClient(t *testing.T) {
 	if !ok {
 		t.Fatalf("newBandcamp() = %T, want discover.BandcampClient", newBandcamp())
 	}
-	if c.HTTP == nil || c.HTTP.Timeout != 8*time.Second {
-		t.Errorf("HTTP client = %+v, want an 8 s timeout", c.HTTP)
+	if c.HTTP == nil || c.HTTP.Timeout != 4*time.Second {
+		t.Errorf("HTTP client = %+v, want a 4 s timeout, well inside the first song's 8", c.HTTP)
 	}
 	if c.UserAgent != versionpkg.UserAgent() || !strings.HasPrefix(c.UserAgent, "screech/") {
 		t.Errorf("UserAgent = %q, want %q", c.UserAgent, versionpkg.UserAgent())

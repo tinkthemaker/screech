@@ -44,8 +44,10 @@ type discoveryDeps struct {
 }
 
 // bandcampTimeout bounds one request to Bandcamp. A tune gives the whole
-// first-song lookup 8 s, and Bandcamp is the quick half of it.
-const bandcampTimeout = 8 * time.Second
+// first-song lookup 8 s, and the queue hands Bandcamp a quarter of that when
+// YouTube is waiting; a request that can outlast the whole budget would make
+// the budget the thing that fails.
+const bandcampTimeout = 4 * time.Second
 
 // newBandcamp is the client discovery stations ask Bandcamp's genre pages
 // with.
@@ -184,11 +186,17 @@ func sourceError(err error) error {
 }
 
 // isNetworkFailure reads discover's error, which joins what each source
-// said. Bandcamp's are Go's own (DNS, dial, a timeout, any transport error,
-// all net.Error), yt-dlp's are marked discover.ErrNetwork by ytAdapter, and
-// our own deadline expiring counts too: a lookup that ran out of time went
-// nowhere useful, and that is the network's doing far more often than a
-// station's. A cancelled lookup is neither; the player dropped it on purpose.
+// said. Bandcamp's are Go's own (DNS, dial, any transport error, all
+// net.Error), and yt-dlp's are marked discover.ErrNetwork by ytAdapter. A
+// cancelled lookup is neither; the player dropped it on purpose.
+//
+// A lookup that merely ran out of time is not an outage either, though
+// context.DeadlineExceeded satisfies net.Error and errors.As would say so: the
+// song or the tune failed and is struck like any other, where an outage would
+// have the station wait and retry. Only a source's own words (ErrNetwork)
+// make a deadline an outage, as when yt-dlp could not reach YouTube before the
+// clock ran out. Bandcamp's own client timeout, with the caller still waiting,
+// is marked that way by the client.
 func isNetworkFailure(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
@@ -199,6 +207,9 @@ func isNetworkFailure(err error) bool {
 	// than strike a station that did nothing wrong.
 	if errors.Is(err, discover.ErrNetwork) || errors.Is(err, discover.ErrPaced) {
 		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
 	var ne net.Error
 	return errors.As(err, &ne)

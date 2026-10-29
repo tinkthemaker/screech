@@ -2,7 +2,6 @@ package discover
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"time"
 
@@ -80,43 +79,61 @@ func watchURL(id string) string { return "https://www.youtube.com/watch?v=" + id
 func VideoID(link string) (string, bool) { return streamurl.YouTubeID(link) }
 
 type ytEntry struct {
-	hits []YTHit
-	at   time.Time
+	hits  []YTHit
+	at    time.Time
+	asked int // how many results the fetch asked for: fewer back means there were no more
 }
 
 // search is Songs behind the 6-hour cache. An empty answer is kept too, but
 // for five minutes only: it may be yt-dlp having a bad moment rather than the
 // genre having no songs.
+//
+// A phrase is one entry whatever count it was asked for, holding the longest
+// answer so far: the anchors' five come from the discoveries' fifty, and
+// never cost a yt-dlp process of their own.
 func (q *Queue) search(ctx context.Context, query string, n int) ([]YTHit, error) {
-	return q.cachedHits(strconv.Itoa(n)+"\x00"+query, func() ([]YTHit, error) {
+	return q.cachedHits(query, n, func(n int) ([]YTHit, error) {
 		return q.yt.Songs(ctx, query, n)
 	})
 }
 
 // mix is Mix behind the same cache.
 func (q *Queue) mix(ctx context.Context, id string) ([]YTHit, error) {
-	return q.cachedHits("mix\x00"+id, func() ([]YTHit, error) {
-		return q.yt.Mix(ctx, id, searchSize)
+	return q.cachedHits("mix\x00"+id, searchSize, func(n int) ([]YTHit, error) {
+		return q.yt.Mix(ctx, id, n)
 	})
 }
 
-func (q *Queue) cachedHits(key string, fetch func() ([]YTHit, error)) ([]YTHit, error) {
+// cachedHits returns the first n hits under key. The entry serves any ask for
+// as many or fewer than it was fetched for; a bigger ask, or an entry that
+// has expired, fetches again, for the larger of the two counts so the entry
+// never shrinks.
+func (q *Queue) cachedHits(key string, n int, fetch func(n int) ([]YTHit, error)) ([]YTHit, error) {
 	now := q.now()
+	ask := n
 	if e, ok := q.ytCache[key]; ok {
 		ttl := searchTTL
 		if len(e.hits) == 0 {
 			ttl = emptyTTL
 		}
-		if now.Sub(e.at) < ttl {
-			return e.hits, nil
+		if now.Sub(e.at) < ttl && e.asked >= n {
+			return head(e.hits, n), nil
 		}
+		ask = max(n, e.asked)
 	}
-	hits, err := fetch()
+	hits, err := fetch(ask)
 	if err != nil {
 		return nil, err
 	}
-	q.ytCache[key] = ytEntry{hits: hits, at: now}
-	return hits, nil
+	q.ytCache[key] = ytEntry{hits: hits, at: now, asked: ask}
+	return head(hits, n), nil
+}
+
+func head(hits []YTHit, n int) []YTHit {
+	if len(hits) > n {
+		return hits[:n]
+	}
+	return hits
 }
 
 // ytMemo is what resolving one video said, kept for mediaTTL.
@@ -176,7 +193,11 @@ func (q *Queue) ytCandidates(ctx context.Context, anchor bool) ([]cand, error) {
 		if err != nil {
 			return nil, err
 		}
-		return q.ytFilter(hits), nil
+		if c := q.ytFilter(hits); len(c) > 0 {
+			return c, nil
+		}
+		// The Mix is a few dozen songs, cached for hours: used up (or empty),
+		// the station carries on as a phrase's would, rather than end.
 	}
 	if q.phrase == "" {
 		return nil, nil

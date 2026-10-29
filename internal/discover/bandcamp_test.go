@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestBandcampTags(t *testing.T) {
@@ -220,5 +221,38 @@ func TestBandcampClientFailures(t *testing.T) {
 	c := BandcampClient{HTTP: srv.Client(), Endpoint: srv.URL}
 	if _, err := c.Tag(ctx, "metal", "new"); err == nil {
 		t.Error("want an error from a cancelled context")
+	}
+}
+
+// A host that never answers is the network's doing when it is the client's
+// own timeout that ends the wait, and the lookup's own clock when it is the
+// caller's deadline: only the first is marked as an outage.
+func TestBandcampClientTimeoutIsAnOutageButTheCallersDeadlineIsNot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	own := BandcampClient{HTTP: &http.Client{Timeout: 50 * time.Millisecond}, Endpoint: srv.URL}
+	_, err := own.Tag(context.Background(), "metal", "new")
+	if !errors.Is(err, ErrNetwork) {
+		t.Errorf("the client's own timeout = %v, want it marked ErrNetwork", err)
+	}
+	if !isNetworkError(err) {
+		t.Errorf("isNetworkError(%v) = false for a host that never answered", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	callers := BandcampClient{HTTP: srv.Client(), Endpoint: srv.URL}
+	_, err = callers.Tag(ctx, "metal", "new")
+	if err == nil || errors.Is(err, ErrNetwork) {
+		t.Errorf("the caller's deadline = %v, want a plain failure that is not marked ErrNetwork", err)
+	}
+	if isNetworkError(err) {
+		t.Errorf("isNetworkError(%v) = true for the caller's own deadline", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -104,6 +105,13 @@ func hitsFor(prefix string, count int) []YTHit {
 	}
 	return out
 }
+
+// blankRows are rows with no id, which the queue skips: they stand for the
+// first results of a listing (the anchors and the middling ones) in tests
+// that are about what comes after them. A search answers a longer ask with the
+// same head as a shorter one, so a fake cannot say "no anchors" for five
+// results and then list ten for fifty.
+func blankRows(n int) []YTHit { return make([]YTHit, n) }
 
 func idOf(page string) string { return strings.TrimPrefix(page, watch) }
 
@@ -345,7 +353,7 @@ func knownBandsYT(clk *clock, resolvedAt map[string]time.Time, ids ...string) *f
 			if n == 5 || query != "dungeon synth" {
 				return nil
 			}
-			hits := hitsFor("pad", 10)
+			hits := blankRows(10)
 			for _, id := range ids {
 				hits = append(hits, YTHit{ID: id})
 			}
@@ -381,7 +389,7 @@ func TestQueueNewToYouLooksPastKnownYouTube(t *testing.T) {
 			if n == 5 {
 				return nil // no anchors: every song is a discovery
 			}
-			return append(hitsFor("pad", 10), YTHit{ID: "aaa"}, YTHit{ID: "zzz"})
+			return append(blankRows(10), YTHit{ID: "aaa"}, YTHit{ID: "zzz"})
 		},
 		resolve: func(ctx context.Context, page string) (YTMedia, error) { return media[idOf(page)], nil },
 	}
@@ -425,7 +433,7 @@ func TestQueueDoesNotHuntAmongBandsTheTitleCallsKnown(t *testing.T) {
 			if n == 5 || query != "dungeon synth" {
 				return nil
 			}
-			return append(hitsFor("pad", 10),
+			return append(blankRows(10),
 				YTHit{ID: "k1", Title: "Plain"},
 				YTHit{ID: "g1", Title: "Known Band - Song"})
 		},
@@ -557,7 +565,7 @@ func TestQueueRelabelsPopularDiscovery(t *testing.T) {
 			if query != "dungeon synth" {
 				return nil // variants add nothing here
 			}
-			return append(hitsFor("pad", 10), YTHit{ID: "pop"}, YTHit{ID: "small"})
+			return append(blankRows(10), YTHit{ID: "pop"}, YTHit{ID: "small"})
 		},
 		resolve: func(ctx context.Context, page string) (YTMedia, error) {
 			m := defaultMedia(page)
@@ -586,11 +594,12 @@ func TestQueueYouTubeDiscoveriesSkipTheAnchorsAndTryVariants(t *testing.T) {
 	// those run dry the phrase is searched again with a word added.
 	yt := &fakeYT{
 		songs: func(query string, n int) []YTHit {
-			if n == 5 {
-				return hitsFor("top", 5)
-			}
 			if query == "dungeon synth" {
-				return hitsFor("base", 12) // two past the cut
+				// The head of the listing is the same whatever the count asked
+				// for: five anchors, five middling, then two discoveries.
+				hits := append(hitsFor("top", 5), hitsFor("mid", 5)...)
+				hits = append(hits, YTHit{ID: "base10"}, YTHit{ID: "base11"})
+				return head(hits, n)
 			}
 			return hitsFor(strings.ReplaceAll(query, " ", "_")+"-", 3)
 		},
@@ -622,10 +631,8 @@ func TestQueueYouTubeDiscoveriesSkipTheAnchorsAndTryVariants(t *testing.T) {
 		t.Errorf("%d songs played, want 16", len(songs))
 	}
 	for _, s := range songs {
-		if strings.HasPrefix(s.Key, "yt:base") {
-			if n := strings.TrimPrefix(s.Key, "yt:base"); n != "10" && n != "11" {
-				t.Errorf("%s is inside the first ten results, which are not discoveries", s.Key)
-			}
+		if strings.HasPrefix(s.Key, "yt:mid") {
+			t.Errorf("%s is inside the first ten results, which are not discoveries", s.Key)
 		}
 	}
 	songsLog, _, _ := yt.logs()
@@ -652,7 +659,7 @@ func TestQueueYouTubeTitleGuessOrdersCandidates(t *testing.T) {
 			if n == 5 || query != "dungeon synth" {
 				return nil
 			}
-			hits := hitsFor("pad", 10)
+			hits := blankRows(10)
 			for _, id := range order {
 				hits = append(hits, YTHit{ID: id, Title: titles[id]})
 			}
@@ -1042,7 +1049,7 @@ func TestQueueDropsAVideoThatFailsTwice(t *testing.T) {
 	gone := errors.New("video unavailable")
 	yt := &fakeYT{
 		songs: func(query string, n int) []YTHit {
-			if n == 5 {
+			if query == "dungeon synth" {
 				return []YTHit{{ID: "dead"}}
 			}
 			return nil
@@ -1200,7 +1207,7 @@ func TestQueueNetworkFailuresDoNotDropVideos(t *testing.T) {
 	calls := 0
 	yt := &fakeYT{
 		songs: func(query string, n int) []YTHit {
-			if n == 5 {
+			if query == "dungeon synth" {
 				return []YTHit{{ID: "only"}}
 			}
 			return nil
@@ -1235,16 +1242,17 @@ func TestQueueEmptySearchesAreRemembered(t *testing.T) {
 		}
 		clk.Advance(time.Minute)
 	}
-	// Anchors, the plain search and its three variants: one round, once.
-	if songsLog, _, _ := yt.logs(); len(songsLog) != 5 {
-		t.Errorf("three asks ran %d searches (%v), want one round of 5", len(songsLog), songsLog)
+	// The plain search and its three variants: one round, once. The anchors'
+	// five come out of the plain search's answer and cost no search of their own.
+	if songsLog, _, _ := yt.logs(); len(songsLog) != 4 {
+		t.Errorf("three asks ran %d searches (%v), want one round of 4", len(songsLog), songsLog)
 	}
 
 	clk.Advance(6 * time.Minute)
 	if _, err := q.Next(context.Background()); !errors.Is(err, ErrNoSources) {
 		t.Fatalf("late Next = %v, want ErrNoSources", err)
 	}
-	if songsLog, _, _ := yt.logs(); len(songsLog) <= 5 {
+	if songsLog, _, _ := yt.logs(); len(songsLog) <= 4 {
 		t.Errorf("an empty answer more than five minutes old must be asked for again, searches = %d", len(songsLog))
 	}
 }
@@ -1699,5 +1707,392 @@ func TestVideoID(t *testing.T) {
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("VideoID(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.ok)
 		}
+	}
+}
+
+// --- the first song's budget (F1) --------------------------------------------------
+
+// hangBC is a Bandcamp that never answers: each request waits for its own
+// context to end, as a connection to a dead host does, and then fails the way
+// net/http reports it.
+type hangBC struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (h *hangBC) Tag(ctx context.Context, tag, slice string) ([]BCItem, error) {
+	h.mu.Lock()
+	h.calls = append(h.calls, tag+"|"+slice)
+	h.mu.Unlock()
+	<-ctx.Done()
+	return nil, &url.Error{Op: "Post", URL: "https://bandcamp.com/api/discover/1/discover_web", Err: ctx.Err()}
+}
+
+func (h *hangBC) log() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.calls...)
+}
+
+// An artist's name is not a Bandcamp tag, and finding that out is a walk of
+// requests. The first song of a station whose Bandcamp has no tag settled
+// comes from YouTube without asking Bandcamp first, so the walk is never
+// inside the 8 s a tune has.
+func TestQueueFirstSongGoesToYouTubeWhileBandcampHasNoTag(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	bc := &fakeBC{} // answers empty for every tag: "chelsea-wolfe", then "wolfe"
+	yt := plentifulYT()
+	q, _ := newTestQueue("chelsea wolfe", yt, bc, nil)
+
+	s, err := q.Next(ctx)
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if !strings.HasPrefix(s.Key, "yt:") {
+		t.Errorf("first song = %+v, want one from YouTube", s)
+	}
+	if calls := bc.log(); len(calls) != 0 {
+		t.Errorf("the first ask walked Bandcamp's tags (%v) before it had a song", calls)
+	}
+	songsLog, _, resolveLog := yt.logs()
+	if len(songsLog) == 0 || len(resolveLog) == 0 {
+		t.Errorf("YouTube was not asked: searches %v, resolves %v", songsLog, resolveLog)
+	}
+}
+
+// A Bandcamp that has a tag settled still goes first: its answer is a cache
+// read, and the spec's rule is "Bandcamp first when it has a cached tag
+// result".
+func TestQueueFirstSongKeepsBandcampFirstOnceItsTagIsSettled(t *testing.T) {
+	bc := plentifulBC()
+	q, _ := newTestQueue("death metal", plentifulYT(), bc, nil)
+	// Settle the tag the way an earlier ask would have.
+	if err := q.prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if tag, err := q.bcTagFor(context.Background()); err != nil || tag != "death-metal" {
+		t.Fatalf("bcTagFor = %q, %v", tag, err)
+	}
+	s, err := q.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(s.Key, "bc:") {
+		t.Errorf("first song = %+v, want one from Bandcamp, whose tag is cached", s)
+	}
+}
+
+// A Bandcamp that hangs takes a quarter of what the caller has left and then
+// YouTube answers; and once it has hung, the next ask does not wait on it
+// again while it is still inside its gap.
+func TestQueueHangingBandcampDoesNotEatTheBudget(t *testing.T) {
+	bc := &hangBC{}
+	q, clk := newTestQueue("swedish death metal", plentifulYT(), bc, nil)
+
+	// The first ask goes to YouTube by itself and never touches Bandcamp.
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if calls := bc.log(); len(calls) != 0 {
+		t.Fatalf("Bandcamp was asked on the first ask: %v", calls)
+	}
+	clk.Advance(15 * time.Second)
+
+	// The second is Bandcamp's turn. It hangs; it may cost a quarter of the
+	// time left, and the song still comes, inside the deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := q.Next(ctx)
+	if err != nil {
+		t.Fatalf("second Next with a hanging Bandcamp: %v", err)
+	}
+	if !strings.HasPrefix(s.Key, "yt:") {
+		t.Errorf("second song = %+v, want one from YouTube", s)
+	}
+	if ctx.Err() != nil {
+		t.Errorf("the deadline passed (%v): Bandcamp ate the budget", ctx.Err())
+	}
+	if n := len(bc.log()); n != 1 {
+		t.Fatalf("Bandcamp was asked %d times (%v), want the one probe that hung", n, bc.log())
+	}
+
+	// A hang is a failure, not a cancelled probe nobody remembers: the gap
+	// holds Bandcamp back, so the next ask costs no wait at all.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	start := time.Now()
+	if _, err := q.Next(ctx2); err != nil {
+		t.Fatalf("third Next: %v", err)
+	}
+	if took := time.Since(start); took > 250*time.Millisecond {
+		t.Errorf("the third ask took %v: it waited on a Bandcamp that was still failing", took)
+	}
+	if n := len(bc.log()); n != 1 {
+		t.Errorf("Bandcamp was asked again inside its gap: %v", bc.log())
+	}
+}
+
+// With no YouTube to fall through to, Bandcamp is the whole station and keeps
+// all the time the caller has.
+func TestQueueBandcampAloneKeepsTheWholeBudget(t *testing.T) {
+	q, _ := newTestQueue("death metal", nil, &hangBC{}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := q.Next(ctx)
+	if err == nil {
+		t.Fatal("Next succeeded against a Bandcamp that never answers")
+	}
+	if took := time.Since(start); took < 350*time.Millisecond {
+		t.Errorf("gave up after %v of a 400 ms budget: with no other source there was nothing to hand over to", took)
+	}
+}
+
+// --- a station from a link keeps going (F2) ------------------------------------------
+
+// shortMix is a Mix of eight songs, which a station from a link burns through
+// in its first dozen: the stand-in for "about 50 songs, then nothing".
+func shortMix(yt *fakeYT) {
+	yt.mix = func(id string, n int) []YTHit { return hitsFor("mix-"+id+"-", 8) }
+}
+
+// A video with no tags used to leave its station with no phrase: no anchors,
+// no Bandcamp, and a Mix that ran out. The phrase now comes from the artist
+// the video resolved to.
+func TestQueueLinkSeedWithoutTagsKeepsServingPastTheMix(t *testing.T) {
+	const link = "https://www.youtube.com/watch?v=abcdefghijk"
+	yt := plentifulYT()
+	shortMix(yt)
+	yt.resolve = func(ctx context.Context, page string) (YTMedia, error) {
+		m := defaultMedia(page)
+		if idOf(page) == "abcdefghijk" {
+			m.Artist, m.Track, m.Tags = "Dismember", "Dreaming In Red", nil
+		}
+		return m, nil
+	}
+	bc := &fakeBC{}
+	q, clk := newTestQueue(link, yt, bc, nil)
+
+	songs := drain(t, q, clk, 40)
+	checkNoRepeats(t, songs)
+	if songs[0].Key != "yt:abcdefghijk" {
+		t.Errorf("first song = %+v, want the linked one", songs[0])
+	}
+	if q.phrase != "Dismember" {
+		t.Errorf("phrase = %q, want the video's artist", q.phrase)
+	}
+	songsLog, mixLog, _ := yt.logs()
+	if len(mixLog) == 0 {
+		t.Error("the Mix was never asked")
+	}
+	var anchors, discoveries int
+	for _, l := range songsLog {
+		switch l {
+		case "Dismember#5":
+			anchors++
+		case "Dismember#50":
+			discoveries++
+		}
+	}
+	if anchors+discoveries == 0 {
+		t.Errorf("phrase searches = %v, want the artist searched for", songsLog)
+	}
+	// Past the Mix, the songs come from searches for the artist.
+	fromSearch := 0
+	for _, s := range songs[1:] {
+		if strings.HasPrefix(s.Key, "yt:Dismember") {
+			fromSearch++
+		}
+	}
+	if fromSearch == 0 {
+		t.Errorf("no song came from a phrase search: %+v", songs)
+	}
+	// The artist is also what Bandcamp is asked about.
+	if calls := bc.log(); len(calls) == 0 || calls[0] != "dismember|new" {
+		t.Errorf("Bandcamp probes = %v, want the artist first", calls)
+	}
+}
+
+// With no artist at all, the cleaned title stands in.
+func TestQueueLinkSeedPhraseFallsBackToTheCleanedTitle(t *testing.T) {
+	const link = "https://youtu.be/abcdefghijk"
+	yt := plentifulYT()
+	yt.resolve = func(ctx context.Context, page string) (YTMedia, error) {
+		m := defaultMedia(page)
+		if idOf(page) == "abcdefghijk" {
+			m.Artist, m.Track, m.Channel, m.Tags = "", "", "", nil
+			m.Title = "Slow Dreaming (Official Video)"
+		}
+		return m, nil
+	}
+	q, _ := newTestQueue(link, yt, nil, nil)
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q.phrase != "Slow Dreaming" {
+		t.Errorf("phrase = %q, want the title without its packaging", q.phrase)
+	}
+}
+
+// Tags, when the video has them, still win: they name a sound, where an
+// artist's name names a band.
+func TestQueueLinkSeedTagsStillSupplyThePhrase(t *testing.T) {
+	const link = "https://youtu.be/abcdefghijk"
+	yt := plentifulYT()
+	yt.resolve = func(ctx context.Context, page string) (YTMedia, error) {
+		m := defaultMedia(page)
+		if idOf(page) == "abcdefghijk" {
+			m.Artist, m.Track, m.Tags = "Dismember", "Dreaming In Red", []string{"swedish death metal"}
+		}
+		return m, nil
+	}
+	q, _ := newTestQueue(link, yt, nil, nil)
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q.phrase != "swedish death metal" {
+		t.Errorf("phrase = %q, want the first tag", q.phrase)
+	}
+}
+
+// A link whose video won't resolve has no artist to search for; it still has
+// the Mix, and says so plainly when that is gone.
+func TestQueueLinkSeedMixAloneStillEndsInNoSources(t *testing.T) {
+	const link = "https://youtu.be/abcdefghijk"
+	yt := plentifulYT()
+	shortMix(yt)
+	boom := errors.New("sign in to confirm you are not a bot")
+	yt.resolve = func(ctx context.Context, page string) (YTMedia, error) {
+		if idOf(page) == "abcdefghijk" {
+			return YTMedia{}, boom
+		}
+		return defaultMedia(page), nil
+	}
+	q, clk := newTestQueue(link, yt, nil, nil)
+	_, _ = q.Next(context.Background()) // the blip
+	var err error
+	for i := 0; i < 40 && err == nil; i++ {
+		_, err = q.Next(context.Background())
+		clk.Advance(15 * time.Second)
+	}
+	if !errors.Is(err, ErrNoSources) {
+		t.Errorf("a Mix with nothing behind it ended with %v, want ErrNoSources", err)
+	}
+}
+
+// --- the search cache (F10) ------------------------------------------------------------
+
+// One phrase is one cache entry whatever the count asked for: a 50-result
+// answer serves the anchors' five too, with no second yt-dlp process.
+func TestQueueSearchCacheServesSmallerAsksFromTheLongest(t *testing.T) {
+	yt := plentifulYT()
+	q, clk := newTestQueue("dungeon synth", yt, nil, nil)
+	ctx := context.Background()
+
+	long, err := q.search(ctx, "dungeon synth", 50)
+	if err != nil || len(long) != 50 {
+		t.Fatalf("search 50 = %d hits, %v", len(long), err)
+	}
+	short, err := q.search(ctx, "dungeon synth", 5)
+	if err != nil || len(short) != 5 {
+		t.Fatalf("search 5 = %d hits, %v", len(short), err)
+	}
+	if short[0] != long[0] || short[4] != long[4] {
+		t.Errorf("the short answer is not the head of the long one: %v vs %v", short, long[:5])
+	}
+	if songsLog, _, _ := yt.logs(); len(songsLog) != 1 {
+		t.Errorf("%d searches ran (%v), want the one for 50", len(songsLog), songsLog)
+	}
+
+	// The other way round, the longer ask needs a longer answer; after that
+	// the five come out of it.
+	yt2 := plentifulYT()
+	q2, _ := newTestQueue("dungeon synth", yt2, nil, nil)
+	if h, _ := q2.search(ctx, "x", 5); len(h) != 5 {
+		t.Fatalf("search 5 = %d hits", len(h))
+	}
+	if h, _ := q2.search(ctx, "x", 50); len(h) != 50 {
+		t.Fatalf("search 50 after 5 = %d hits, want the longer answer", len(h))
+	}
+	if h, _ := q2.search(ctx, "x", 5); len(h) != 5 {
+		t.Fatalf("search 5 again = %d hits", len(h))
+	}
+	if songsLog, _, _ := yt2.logs(); len(songsLog) != 2 {
+		t.Errorf("searches = %v, want #5 then #50 and nothing after", songsLog)
+	}
+
+	// An expired entry is asked for again at the longest count it ever had,
+	// so the cache never shrinks back to the short answer.
+	clk.Advance(7 * time.Hour)
+	if h, _ := q.search(ctx, "dungeon synth", 5); len(h) != 5 {
+		t.Fatalf("search 5 after expiry = %d hits", len(h))
+	}
+	songsLog, _, _ := yt.logs()
+	if len(songsLog) != 2 || songsLog[1] != "dungeon synth#50" {
+		t.Errorf("searches = %v, want the refresh at 50", songsLog)
+	}
+	if h, _ := q.search(ctx, "dungeon synth", 50); len(h) != 50 {
+		t.Fatalf("search 50 after the refresh = %d hits", len(h))
+	}
+	if songsLog, _, _ := yt.logs(); len(songsLog) != 2 {
+		t.Errorf("a refreshed 50 should still cover the ask for 50: %v", songsLog)
+	}
+}
+
+// A phrase with fewer songs than asked for is not asked again for want of
+// more: the answer was short because there are no more.
+func TestQueueSearchCacheDoesNotRepeatAShortAnswer(t *testing.T) {
+	yt := &fakeYT{songs: func(query string, n int) []YTHit { return hitsFor("few", 7) }}
+	q, _ := newTestQueue("x", yt, nil, nil)
+	for i := 0; i < 3; i++ {
+		if h, err := q.search(context.Background(), "x", 50); err != nil || len(h) != 7 {
+			t.Fatalf("search = %d hits, %v", len(h), err)
+		}
+	}
+	if songsLog, _, _ := yt.logs(); len(songsLog) != 1 {
+		t.Errorf("searches = %v, want one", songsLog)
+	}
+}
+
+// --- what counts as an outage (F5-lite) -----------------------------------------------------
+
+func TestIsNetworkError(t *testing.T) {
+	dns := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "bandcamp.com", IsNotFound: true}}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"our mark", fmt.Errorf("resolving: %w", ErrNetwork), true},
+		{"a net error", dns, true},
+		{"a net error inside a url error", &url.Error{Op: "Post", URL: "https://bandcamp.com/", Err: dns}, true},
+		{"the caller's deadline", context.DeadlineExceeded, false},
+		{"the caller's deadline, wrapped", fmt.Errorf("discover: %w", context.DeadlineExceeded), false},
+		{"a deadline inside a url error", &url.Error{Op: "Post", URL: "https://bandcamp.com/", Err: context.DeadlineExceeded}, false},
+		{"a cancel", fmt.Errorf("discover: %w", context.Canceled), false},
+		{"a mark over a deadline", fmt.Errorf("%w: %w", ErrNetwork, context.DeadlineExceeded), true},
+		{"an ordinary failure", errors.New("Video unavailable"), false},
+	} {
+		if got := isNetworkError(tc.err); got != tc.want {
+			t.Errorf("%s: isNetworkError(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+// A resolve that timed out is a failed lookup, not a network outage: it
+// counts against the video like any other failure, and a video that times out
+// twice is dropped.
+func TestQueueDeadlineIsNotAnOutageForAVideo(t *testing.T) {
+	yt := &fakeYT{
+		songs:   func(query string, n int) []YTHit { return hitsFor("slow", 3) },
+		resolve: func(ctx context.Context, page string) (YTMedia, error) { return YTMedia{}, context.DeadlineExceeded },
+	}
+	q, _ := newTestQueue("dungeon synth", yt, nil, nil)
+	for i := 0; i < 3; i++ {
+		_, _ = q.Next(context.Background())
+	}
+	if len(q.bad) == 0 {
+		t.Errorf("a video that timed out twice was never dropped: fails = %v", q.fails)
 	}
 }
