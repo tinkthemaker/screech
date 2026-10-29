@@ -2096,3 +2096,46 @@ func TestQueueDeadlineIsNotAnOutageForAVideo(t *testing.T) {
 		t.Errorf("a video that timed out twice was never dropped: fails = %v", q.fails)
 	}
 }
+
+// Bandcamp tracks are held to the same 90 s to 12 min as YouTube's: a
+// station's songs are songs, not intros, loops or whole sets. A track whose
+// feed gives no duration at all is let through rather than guessed at.
+func TestQueueBandcampTracksAreHeldToTheSongLength(t *testing.T) {
+	durations := map[int64]float64{
+		1: 30, 2: 89.9, 3: 90, 4: 200, 5: 720, 6: 720.1, 7: 3600, 8: 0,
+	}
+	bc := &fakeBC{items: func(tag, slice string) []BCItem {
+		if slice != "new" {
+			return nil
+		}
+		var out []BCItem
+		for id := int64(1); id <= 8; id++ {
+			out = append(out, BCItem{
+				TrackID: id, Artist: fmt.Sprintf("Band %d", id), Title: fmt.Sprintf("Cut %d", id),
+				StreamURL: fmt.Sprintf("https://t4.bcbits.com/stream/%d", id), Duration: durations[id],
+			})
+		}
+		return out
+	}}
+	q, clk := newTestQueue("dungeon synth", nil, bc, nil)
+
+	got := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		s, err := q.Next(context.Background())
+		if err != nil {
+			break
+		}
+		got[s.Key] = true
+		clk.Advance(15 * time.Second)
+	}
+	for _, id := range []string{"bc:3", "bc:4", "bc:5", "bc:8"} {
+		if !got[id] {
+			t.Errorf("%s is a song (or of unknown length) and was left out; served %v", id, got)
+		}
+	}
+	for _, id := range []string{"bc:1", "bc:2", "bc:6", "bc:7"} {
+		if got[id] {
+			t.Errorf("%s is outside 90 s to 12 min and was served", id)
+		}
+	}
+}

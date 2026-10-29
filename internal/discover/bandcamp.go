@@ -317,6 +317,11 @@ func (q *Queue) pickBC(ctx context.Context, anchor bool) (Song, bool, error) {
 			if have[key] || q.ruledOut(key) {
 				continue
 			}
+			// Songs only, as on YouTube. A feed that gave no duration is
+			// not evidence of a bad length, so it passes.
+			if it.Duration > 0 && (it.Duration < minSeconds || it.Duration > maxSeconds) {
+				continue
+			}
 			have[key] = true
 			artist, title := CleanTitle(it.Artist, it.Title)
 			ak := core.NormalizeArtist(artist)
