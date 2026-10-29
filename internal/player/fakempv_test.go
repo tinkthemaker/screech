@@ -207,6 +207,23 @@ func runFakeMPV(args []string) int {
 					send(`{"event":"end-file","reason":"stop"}`)
 					cur = ""
 					send(`{"event":"property-change","name":"core-idle","data":true}`)
+				case "end-eof":
+					// The loaded file plays out on its own: end-file eof,
+					// then idle (--idle=yes). What a song reaching its last
+					// second looks like to the client.
+					if cur != "" {
+						send(`{"event":"end-file","reason":"eof"}`)
+						cur = ""
+						send(`{"event":"property-change","name":"core-idle","data":true}`)
+					}
+				case "end-error":
+					// The loaded file dies mid-song (a signed URL expiring,
+					// a server hanging up).
+					if cur != "" {
+						send(`{"event":"end-file","reason":"error","file_error":"loading failed"}`)
+						cur = ""
+						send(`{"event":"property-change","name":"core-idle","data":true}`)
+					}
 				case "idle-flip":
 					send(`{"event":"property-change","name":"core-idle","data":false}`)
 				case "cache-flip":
