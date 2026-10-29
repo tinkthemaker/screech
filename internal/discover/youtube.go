@@ -55,11 +55,10 @@ const (
 	discoveryFrom = 10
 	searchSize    = 50
 
-	// A station tries at most this many resolves per song asked for, and
-	// at most newTries of them hunting for a band the listener hasn't heard.
-	// Every resolve is a yt-dlp process, and those come one at a time.
+	// A station spends at most this many resolves per song asked for. Every
+	// resolve is a yt-dlp process, and those come one at a time app-wide with
+	// the first song on an 8 s budget.
 	maxResolves = 6
-	newTries    = 3
 )
 
 // ytVariants widen a search once its plain results are used up: the same
@@ -115,8 +114,9 @@ type ytEntry struct {
 	at   time.Time
 }
 
-// search is Songs behind the 6-hour cache. An empty answer is not kept: it is
-// more likely yt-dlp having a bad moment than the genre having no songs.
+// search is Songs behind the 6-hour cache. An empty answer is kept too, but
+// for five minutes only: it may be yt-dlp having a bad moment rather than the
+// genre having no songs.
 func (q *Queue) search(ctx context.Context, query string, n int) ([]YTHit, error) {
 	return q.cachedHits(strconv.Itoa(n)+"\x00"+query, func() ([]YTHit, error) {
 		return q.yt.Songs(ctx, query, n)
@@ -132,17 +132,54 @@ func (q *Queue) mix(ctx context.Context, id string) ([]YTHit, error) {
 
 func (q *Queue) cachedHits(key string, fetch func() ([]YTHit, error)) ([]YTHit, error) {
 	now := q.now()
-	if e, ok := q.ytCache[key]; ok && now.Sub(e.at) < searchTTL {
-		return e.hits, nil
+	if e, ok := q.ytCache[key]; ok {
+		ttl := searchTTL
+		if len(e.hits) == 0 {
+			ttl = emptyTTL
+		}
+		if now.Sub(e.at) < ttl {
+			return e.hits, nil
+		}
 	}
 	hits, err := fetch()
 	if err != nil {
 		return nil, err
 	}
-	if len(hits) > 0 {
-		q.ytCache[key] = ytEntry{hits: hits, at: now}
-	}
+	q.ytCache[key] = ytEntry{hits: hits, at: now}
 	return hits, nil
+}
+
+// ytMemo is what resolving one video said, kept for mediaTTL.
+type ytMemo struct {
+	media  YTMedia
+	at     time.Time // when it was resolved: the age of the signed URL
+	artist string    // NormalizeArtist of the name it would be shown under
+}
+
+// remembered returns a video's memo if it is still fresh.
+func (q *Queue) remembered(id string) (ytMemo, bool) {
+	e, ok := q.media[id]
+	if !ok {
+		return ytMemo{}, false
+	}
+	if q.now().Sub(e.at) >= mediaTTL {
+		delete(q.media, id)
+		return ytMemo{}, false
+	}
+	return e, true
+}
+
+// remember keeps a resolve, and forgets the ones that have gone stale so the
+// map stays about as big as one search.
+func (q *Queue) remember(id string, m YTMedia, at time.Time) {
+	for k, e := range q.media {
+		if at.Sub(e.at) >= mediaTTL {
+			delete(q.media, k)
+		}
+	}
+	artist, title := mediaNames(m)
+	artist, _ = CleanTitle(artist, title)
+	q.media[id] = ytMemo{media: m, at: at, artist: core.NormalizeArtist(artist)}
 }
 
 // ytCandidates lists the videos the next YouTube song may come from, minus
@@ -175,6 +212,11 @@ func (q *Queue) ytCandidates(ctx context.Context, anchor bool) ([]cand, error) {
 		return nil, nil
 	}
 	for stage := 0; stage <= len(ytVariants); stage++ {
+		// Each stage can be a yt-dlp process; a caller who has given up
+		// shouldn't pay for the stages after the one that timed out.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		query := q.phrase
 		if stage > 0 {
 			query += " " + ytVariants[stage-1]
@@ -197,8 +239,10 @@ func (q *Queue) ytCandidates(ctx context.Context, anchor bool) ([]cand, error) {
 	return nil, nil
 }
 
-// ytFilter drops what has played, what failed, and what the title already
-// says is by the band that just played.
+// ytFilter drops what has played, what failed, and what is already known to
+// be by the band that just played. A video resolved within mediaTTL carries
+// the band it resolved to, not a guess from its title, and is marked cached:
+// it costs no yt-dlp process to look at again.
 func (q *Queue) ytFilter(hits []YTHit) []cand {
 	var out []cand
 	for _, h := range hits {
@@ -210,6 +254,9 @@ func (q *Queue) ytFilter(hits []YTHit) []cand {
 			continue
 		}
 		c := cand{key: key, id: h.ID, artist: guessArtist(h.Title)}
+		if e, ok := q.remembered(h.ID); ok {
+			c.artist, c.cached = e.artist, true
+		}
 		if c.artist != "" && c.artist == q.lastArtist {
 			continue
 		}
@@ -233,9 +280,16 @@ func guessArtist(title string) string {
 // pickYT resolves candidates until one is a song worth playing.
 //
 // A discovery whose band the listener already knows is held back while there
-// are tries left to find a new one, because a search result can't say who it
-// is by until it has been resolved. If none turns up, the held song plays:
-// a known band beats a silent station.
+// is a chance of a new one, because a search result can't say who it is by
+// until it has been resolved. That chance is one more resolve, no more: with
+// a song in hand, a second yt-dlp process is the most a song may cost. If it
+// turns up nothing, the held song plays, since a known band beats a silent
+// station.
+//
+// Every resolve is remembered for mediaTTL. A video that lost the draw is
+// therefore ranked by the band it resolved to, last if the band is known, and
+// when its turn comes it is read from the memory instead of costing another
+// process.
 func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, error) {
 	if q.yt == nil {
 		return Song{}, false, nil
@@ -245,24 +299,40 @@ func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, er
 		return Song{}, false, err
 	}
 	var held *Song
-	tries := 0
-	for len(cands) > 0 && r.left > 0 {
+	hunted := false
+	for len(cands) > 0 {
 		i := q.choose(cands, !anchor)
 		c := cands[i]
+		if held != nil && c.artist != "" && q.isKnown(c.artist) {
+			// The best of what is left is a known band too: nothing to hunt for.
+			break
+		}
+		if !c.cached {
+			if r.left <= 0 {
+				break
+			}
+			if held != nil {
+				if hunted {
+					break
+				}
+				hunted = true
+			}
+		}
 		cands = append(cands[:i], cands[i+1:]...)
-		r.left--
-		tries++
 
-		m, err := q.yt.Resolve(ctx, watchURL(c.id))
+		m, at, err := q.resolve(ctx, c, r)
 		if err != nil {
 			if ctx.Err() != nil {
 				break
 			}
-			q.failed(c.key)
+			if !isNetworkError(err) {
+				// An outage says nothing about the video.
+				q.failed(c.key)
+			}
 			r.errs = append(r.errs, err)
 			continue
 		}
-		s, ok := q.ytSong(c.id, m, anchor)
+		s, ok := q.ytSong(c.id, m, anchor, at)
 		if !ok {
 			q.rule(c.key)
 			continue
@@ -277,9 +347,6 @@ func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, er
 		if held == nil {
 			held = &s
 		}
-		if tries >= newTries {
-			break
-		}
 	}
 	if held != nil {
 		return *held, true, nil
@@ -287,9 +354,28 @@ func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, er
 	return Song{}, false, nil
 }
 
+// resolve returns a candidate's media and when it was resolved, from the
+// memory if it is there and from a yt-dlp process (which costs one of the
+// run's resolves) if not.
+func (q *Queue) resolve(ctx context.Context, c cand, r *run) (YTMedia, time.Time, error) {
+	if e, ok := q.remembered(c.id); ok {
+		return e.media, e.at, nil
+	}
+	r.left--
+	m, err := q.yt.Resolve(ctx, watchURL(c.id))
+	if err != nil {
+		return YTMedia{}, time.Time{}, err
+	}
+	at := q.now()
+	q.remember(c.id, m, at)
+	return m, at, nil
+}
+
 // ytSong builds the Song for a resolved video, or reports false if it is not
-// one to play: no media URL, or not 90 s to 12 min long.
-func (q *Queue) ytSong(id string, m YTMedia, anchor bool) (Song, bool) {
+// one to play: no media URL, or not 90 s to 12 min long. at is when it was
+// resolved, which is the age of its signed URL; whether the band is new is
+// judged now, against what the listener has heard by now.
+func (q *Queue) ytSong(id string, m YTMedia, anchor bool, at time.Time) (Song, bool) {
 	if m.URL == "" || m.Duration < minSeconds || m.Duration > maxSeconds {
 		return Song{}, false
 	}
@@ -306,7 +392,7 @@ func (q *Queue) ytSong(id string, m YTMedia, anchor bool) (Song, bool) {
 		URL:      m.URL,
 		Anchor:   anchor,
 		NewToYou: !anchor && q.isNew(core.NormalizeArtist(artist)),
-		Resolved: q.now(),
+		Resolved: at,
 	}, true
 }
 
