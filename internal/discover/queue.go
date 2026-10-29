@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,24 @@ import (
 // is down, yt-dlp crashed) Next returns that error instead, so the caller can
 // tell "nothing to play" from "couldn't ask".
 var ErrNoSources = errors.New("discover: no source has songs for this seed")
+
+// ErrPaced means Next found nothing to play only because Bandcamp may not be
+// asked again yet (one request per 10 s per station) and the caller's context
+// leaves no room to wait. It is retryable and is never ErrNoSources: the
+// songs are there, a few seconds on.
+var ErrPaced = errors.New("discover: bandcamp is pacing its requests; try again shortly")
+
+// ErrNetwork marks a lookup that failed because the network is unreachable.
+// A source adapter wraps its connection failures with it (yt-dlp reports them
+// only as text), and the queue also recognises any net.Error by itself. The
+// queue never counts such a failure against a video or a linked seed: an
+// outage says nothing about them.
+var ErrNetwork = errors.New("discover: network unreachable")
+
+func isNetworkError(err error) bool {
+	var ne net.Error
+	return errors.Is(err, ErrNetwork) || errors.As(err, &ne)
+}
 
 // Song is one playable song.
 type Song struct {
@@ -62,6 +81,20 @@ const (
 	lovedBy    = 0.03
 
 	searchTTL = 6 * time.Hour
+
+	// A search with no results is remembered briefly, so a phrase nobody has
+	// sung about costs one round of searches, not one per song asked for.
+	// Short, because an empty answer may be yt-dlp having a bad moment.
+	emptyTTL = 5 * time.Minute
+
+	// A resolved video is remembered this long: who it is by, and the media
+	// URL itself, so a known band's video that lost the draw is not resolved
+	// (a yt-dlp process) a second time when its turn comes.
+	mediaTTL = 10 * time.Minute
+
+	// When the only thing between Next and a song is the Bandcamp gap, Next
+	// waits it out, at most this many times.
+	maxPaceWaits = 2
 )
 
 type source int
@@ -77,14 +110,17 @@ type cand struct {
 	key    string
 	artist string // NormalizeArtist key; "" when not known before resolving
 	id     string // YouTube id
+	cached bool   // YouTube: resolved lately, so artist is certain and looking again is free
 	song   Song   // Bandcamp
 }
 
 // run is the working state of one Next.
 type run struct {
-	left int     // resolves still allowed
-	errs []error // lookups that failed
-	down [2]bool // sources that failed this time and aren't asked again
+	left  int       // resolves still allowed
+	errs  []error   // lookups that failed
+	down  [2]bool   // sources that failed this time and aren't asked again
+	held  bool      // a Bandcamp request was held back by the gap, so a song may be a wait away
+	until time.Time // when the gap lets it go
 }
 
 // Queue is the endless song queue of one discovery station.
@@ -95,6 +131,7 @@ type Queue struct {
 	known Known
 	rng   *rand.Rand
 	now   func() time.Time
+	sleep func(context.Context, time.Duration) error // waits out the Bandcamp gap; tests replace it
 
 	// The queue is safe for concurrent use, and its two halves are guarded
 	// separately so that no lock is ever held across a lookup.
@@ -129,6 +166,7 @@ type Queue struct {
 	bcErr    error
 	bcCache  map[string]bcEntry
 	ytCache  map[string]ytEntry
+	media    map[string]ytMemo // video id: what resolving it said, for mediaTTL
 
 	recent     []string
 	seen       map[string]struct{}
@@ -159,10 +197,12 @@ func NewQueue(seed string, yt YouTube, bc Bandcamp, known Known, rng *rand.Rand,
 		known:   known,
 		rng:     rng,
 		now:     now,
+		sleep:   sleepCtx,
 		base:    anchorStart,
 		slot:    make(chan struct{}, 1),
 		bcCache: map[string]bcEntry{},
 		ytCache: map[string]ytEntry{},
+		media:   map[string]ytMemo{},
 		seen:    map[string]struct{}{},
 		bad:     map[string]struct{}{},
 		fails:   map[string]int{},
@@ -175,7 +215,9 @@ func NewQueue(seed string, yt YouTube, bc Bandcamp, known Known, rng *rand.Rand,
 // A source that fails does not fail the station while another can answer. If
 // nothing can, the error is the lookup's own (wrapped, so errors.Is sees
 // through it) when a lookup failed, and ErrNoSources when every source simply
-// had nothing.
+// had nothing. If the only thing in the way is Bandcamp's 10 s gap, Next waits
+// it out while ctx allows (up to twice), and otherwise returns ErrPaced, which
+// is retryable and never reads as an exhausted station.
 //
 // Next may be called from any goroutine, alongside Skipped, Loved and
 // AnchorShare. Two Next calls run one after the other; the second waits for
@@ -191,7 +233,7 @@ func (q *Queue) Next(ctx context.Context) (Song, error) {
 		return Song{}, ctx.Err()
 	}
 
-	share := q.tick()
+	share := q.peekShare()
 	if q.yt == nil && q.bc == nil {
 		return Song{}, ErrNoSources
 	}
@@ -207,11 +249,17 @@ func (q *Queue) Next(ctx context.Context) (Song, error) {
 	q.memo = map[string]bool{}
 	r := &run{left: maxResolves}
 	anchor := q.rng.Float64() < share
-	for _, kind := range [2]bool{anchor, !anchor} {
-		if s, ok := q.pick(ctx, kind, r); ok {
-			return q.serve(s), nil
+	for waits := 0; ; waits++ {
+		r.held = false
+		for _, kind := range [2]bool{anchor, !anchor} {
+			if s, ok := q.pick(ctx, kind, r); ok {
+				return q.serve(s), nil
+			}
+			if ctx.Err() != nil {
+				break
+			}
 		}
-		if ctx.Err() != nil {
+		if !q.waitOutGap(ctx, r, waits) {
 			break
 		}
 	}
@@ -221,7 +269,39 @@ func (q *Queue) Next(ctx context.Context) (Song, error) {
 	if len(r.errs) > 0 {
 		return Song{}, fmt.Errorf("discover: %w", errors.Join(r.errs...))
 	}
+	if r.held {
+		return Song{}, ErrPaced
+	}
 	return Song{}, ErrNoSources
+}
+
+// waitOutGap decides whether a Next that found nothing should try again after
+// the Bandcamp gap, and sleeps until it opens. A song that is only seconds
+// away is not "no sources": waiting is better than failing the song, as long
+// as the caller's context has the time. It reports whether to try again.
+func (q *Queue) waitOutGap(ctx context.Context, r *run, waits int) bool {
+	if !r.held || ctx.Err() != nil || waits >= maxPaceWaits {
+		return false
+	}
+	d := r.until.Sub(q.now())
+	if d <= 0 {
+		return true
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < d {
+		return false
+	}
+	return q.sleep(ctx, d) == nil
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // pick tries the sources in turn for one kind of song. The two take turns
@@ -251,7 +331,11 @@ func (q *Queue) pick(ctx context.Context, anchor bool, r *run) (Song, bool) {
 			s, ok, err = q.pickYT(ctx, anchor, r)
 		}
 		if err != nil {
-			if !errors.Is(err, errPaced) {
+			if errors.Is(err, ErrPaced) {
+				// Not a failure: the gap has this source waiting.
+				r.held = true
+				r.until = q.bcLast.Add(bcGap)
+			} else {
 				r.errs = append(r.errs, err)
 				r.down[src] = true
 			}
@@ -266,8 +350,11 @@ func (q *Queue) pick(ctx context.Context, anchor bool, r *run) (Song, bool) {
 	return Song{}, false
 }
 
-// serve records a song as played and hands it back.
+// serve records a song as played and hands it back. Only a song that is
+// handed out counts against the raised share and the run of quick skips: a
+// Next that failed took nothing from either.
 func (q *Queue) serve(s Song) Song {
+	q.settleShare()
 	q.recent = append(q.recent, s.Key)
 	q.seen[s.Key] = struct{}{}
 	if len(q.recent) > recentSize {
@@ -371,6 +458,12 @@ func (q *Queue) prepare(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return err
 			}
+			if isNetworkError(err) {
+				// An outage says nothing about the video. Fail this call and
+				// try the whole preparation again on the next one, however
+				// many times the network is down.
+				return fmt.Errorf("discover: resolving the linked video: %w", err)
+			}
 			// The first failure may be a blip, so the call fails and the
 			// next tries again. The second means the video won't resolve;
 			// its Mix can still carry the station, without its tags.
@@ -380,7 +473,7 @@ func (q *Queue) prepare(ctx context.Context) error {
 			}
 			break
 		}
-		if s, ok := q.ytSong(id, m, true); ok {
+		if s, ok := q.ytSong(id, m, true, q.now()); ok {
 			q.seedSong = &s
 		}
 		q.probesFromTags(m.Tags)
@@ -422,21 +515,27 @@ func (q *Queue) probesFromTags(tags []string) {
 
 // --- the adaptive share ---------------------------------------------------------
 
-// tick settles the share before a roll and returns it. A Next that comes with
+// peekShare is the share a roll should use now. It changes nothing: whether
+// this ask counts as a song is only known once it has served one.
+func (q *Queue) peekShare() float64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.shareLocked()
+}
+
+// settleShare is the bookkeeping of a song handed out. A song that comes with
 // no skip since the last one means the listener let a song play out, which
 // ends any run of quick skips; and the raised share ages by one song.
-func (q *Queue) tick() float64 {
+func (q *Queue) settleShare() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if !q.skipped {
 		q.quick = 0
 	}
 	q.skipped = false
-	share := q.shareLocked()
 	if q.boost > 0 {
 		q.boost--
 	}
-	return share
 }
 
 func (q *Queue) shareLocked() float64 {

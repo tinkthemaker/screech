@@ -24,8 +24,11 @@ var (
 	// Credits are cut only where they are plainly credits. "ft." and "feat."
 	// need their dot: "10 ft Tall" and "Feat of Strength" are titles, and a
 	// false cut loses part of a name, where a missed credit costs nothing.
+	//
+	// An unbracketed credit runs up to the next bracket or the end, not to the
+	// end regardless: "Song ft. Y (Remastered 2019)" keeps its remaster note.
 	featBracket = regexp.MustCompile(`(?i)\s*[(\[]\s*(?:ft\.|feat\.|featuring)\s[^()\[\]]*[)\]]`)
-	featTrail   = regexp.MustCompile(`(?i)\s+(?:ft\.|feat\.|featuring)\s.*$`)
+	featTrail   = regexp.MustCompile(`(?i)\s+(?:ft\.|feat\.|featuring)\s[^(\[]*`)
 
 	// YouTube names an artist's auto-generated channel "<Artist> - Topic".
 	topicSuffix = regexp.MustCompile(`(?i)\s+-\s+topic$`)
@@ -58,7 +61,9 @@ func cleanName(s string, isTitle bool) string {
 		out = topicSuffix.ReplaceAllString(out, "")
 	}
 	out = featBracket.ReplaceAllString(out, "")
-	out = featTrail.ReplaceAllString(out, "")
+	// Replaced by a space, not nothing: the credit's own trailing space is in
+	// the match, and what follows it (a kept note) must not run into the title.
+	out = featTrail.ReplaceAllString(out, " ")
 	out = strings.Join(strings.Fields(out), " ")
 	if out != orig {
 		// A separator the packaging hung from ("Song - (Official Video)").

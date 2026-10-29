@@ -3,6 +3,7 @@ package discover
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -178,13 +179,14 @@ func (b rewriteTo) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestBandcampClientFailures(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
+		name     string
+		status   int
+		body     string
+		wantCode int // the StatusError code; 0 when the answer was a 200
 	}{
-		{"server error", http.StatusInternalServerError, "boom"},
-		{"throttled", http.StatusTooManyRequests, "slow down"},
-		{"not json", http.StatusOK, "<html>nope</html>"},
+		{"server error", http.StatusInternalServerError, "boom", http.StatusInternalServerError},
+		{"throttled", http.StatusTooManyRequests, "slow down", http.StatusTooManyRequests},
+		{"not json", http.StatusOK, "<html>nope</html>", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -193,8 +195,17 @@ func TestBandcampClientFailures(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := BandcampClient{HTTP: srv.Client(), Endpoint: srv.URL}
-			if items, err := c.Tag(context.Background(), "metal", "new"); err == nil {
-				t.Errorf("want an error, got %+v", items)
+			items, err := c.Tag(context.Background(), "metal", "new")
+			if err == nil {
+				t.Fatalf("want an error, got %+v", items)
+			}
+			// A caller can tell a throttle from an outage from a changed feed.
+			var se *StatusError
+			switch gotStatus := errors.As(err, &se); {
+			case tc.wantCode != 0 && (!gotStatus || se.Code != tc.wantCode):
+				t.Errorf("error %v: want a *StatusError with code %d", err, tc.wantCode)
+			case tc.wantCode == 0 && gotStatus:
+				t.Errorf("error %v: a 200 with a bad body is not a StatusError", err)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"runtime"
 	"strings"
 	"sync"
@@ -335,15 +336,42 @@ func TestQueueNewToYouFirst(t *testing.T) {
 	checkNoRepeats(t, songs)
 }
 
+// knownBandsYT offers the given ids as discoveries (no anchors), each by a
+// different band the listener knows. resolvedAt records when each page was
+// resolved, to tell a memory read from a second yt-dlp process.
+func knownBandsYT(clk *clock, resolvedAt map[string]time.Time, ids ...string) *fakeYT {
+	return &fakeYT{
+		songs: func(query string, n int) []YTHit {
+			if n == 5 || query != "dungeon synth" {
+				return nil
+			}
+			hits := hitsFor("pad", 10)
+			for _, id := range ids {
+				hits = append(hits, YTHit{ID: id})
+			}
+			return hits
+		},
+		resolve: func(ctx context.Context, page string) (YTMedia, error) {
+			id := idOf(page)
+			resolvedAt[id] = clk.Now()
+			m := defaultMedia(page)
+			m.Artist = "Known " + id
+			return m, nil
+		},
+	}
+}
+
+func knownByPrefix(key string) bool { return strings.HasPrefix(key, "known ") }
+
 func TestQueueNewToYouLooksPastKnownYouTube(t *testing.T) {
 	// A search result carries no artist, so the queue can only tell after it
-	// resolves. It must not settle for the first known band it meets.
+	// resolves. With one known band in hand it spends one more resolve on
+	// the chance of a new one, so of two candidates it always finds the
+	// fresh band, whichever it met first.
 	media := map[string]YTMedia{}
-	for _, id := range []string{"aaa", "bbb"} {
-		m := defaultMedia(watch + id)
-		m.Artist = "Known " + id
-		media[id] = m
-	}
+	known := defaultMedia(watch + "aaa")
+	known.Artist = "Known aaa"
+	media["aaa"] = known
 	fresh := defaultMedia(watch + "zzz")
 	fresh.Artist = "Fresh Band"
 	media["zzz"] = fresh
@@ -353,13 +381,11 @@ func TestQueueNewToYouLooksPastKnownYouTube(t *testing.T) {
 			if n == 5 {
 				return nil // no anchors: every song is a discovery
 			}
-			hits := hitsFor("pad", 10)
-			return append(hits, YTHit{ID: "aaa"}, YTHit{ID: "bbb"}, YTHit{ID: "zzz"})
+			return append(hitsFor("pad", 10), YTHit{ID: "aaa"}, YTHit{ID: "zzz"})
 		},
 		resolve: func(ctx context.Context, page string) (YTMedia, error) { return media[idOf(page)], nil },
 	}
-	known := func(key string) bool { return strings.HasPrefix(key, "known ") }
-	q, _ := newTestQueue("dungeon synth", yt, nil, known)
+	q, _ := newTestQueue("dungeon synth", yt, nil, knownByPrefix)
 
 	s, err := q.Next(context.Background())
 	if err != nil {
@@ -367,6 +393,125 @@ func TestQueueNewToYouLooksPastKnownYouTube(t *testing.T) {
 	}
 	if s.Key != "yt:zzz" || !s.NewToYou {
 		t.Errorf("got %s NewToYou=%v, want the fresh band first", s.Key, s.NewToYou)
+	}
+}
+
+func TestQueueHuntsForANewBandOnlyOnce(t *testing.T) {
+	// Four videos, all by bands the listener knows. A song costs the first
+	// resolve and one more hunting for a new band, never a third: yt-dlp runs
+	// one process at a time and the first song has 8 seconds.
+	clk := newClock()
+	at := map[string]time.Time{}
+	yt := knownBandsYT(clk, at, "k1", "k2", "k3", "k4")
+	q := NewQueue("dungeon synth", yt, nil, knownByPrefix, rand.New(rand.NewSource(7)), clk.Now)
+
+	s, err := q.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if s.NewToYou {
+		t.Errorf("%+v: nothing in the pool was new", s)
+	}
+	if _, _, resolved := yt.logs(); len(resolved) != 2 {
+		t.Errorf("one song cost %d resolves (%v), want 2", len(resolved), resolved)
+	}
+}
+
+func TestQueueDoesNotHuntAmongBandsTheTitleCallsKnown(t *testing.T) {
+	// With a known band in hand, the one hunting resolve is not spent on a
+	// video whose own title already names a band the listener knows.
+	yt := &fakeYT{
+		songs: func(query string, n int) []YTHit {
+			if n == 5 || query != "dungeon synth" {
+				return nil
+			}
+			return append(hitsFor("pad", 10),
+				YTHit{ID: "k1", Title: "Plain"},
+				YTHit{ID: "g1", Title: "Known Band - Song"})
+		},
+		resolve: func(ctx context.Context, page string) (YTMedia, error) {
+			m := defaultMedia(page)
+			m.Artist = "Known " + idOf(page)
+			return m, nil
+		},
+	}
+	q, _ := newTestQueue("dungeon synth", yt, nil, knownByPrefix)
+
+	s, err := q.Next(context.Background())
+	if err != nil || s.Key != "yt:k1" {
+		t.Fatalf("Next = %+v, %v; want the unnamed video", s, err)
+	}
+	if _, _, resolved := yt.logs(); len(resolved) != 1 {
+		t.Errorf("%d resolves (%v), want 1: the other is known by its title", len(resolved), resolved)
+	}
+}
+
+func TestQueueRemembersWhoItResolved(t *testing.T) {
+	clk := newClock()
+	at := map[string]time.Time{}
+	yt := knownBandsYT(clk, at, "k1", "k2", "k3", "k4")
+	q := NewQueue("dungeon synth", yt, nil, knownByPrefix, rand.New(rand.NewSource(7)), clk.Now)
+
+	// Song one resolves two videos and plays one. Song two resolves the two
+	// it hasn't seen and leaves the remembered one alone, ranked last
+	// because its band is known. Song three has only remembered videos left
+	// and spawns nothing.
+	want := []int{2, 4, 4}
+	for i, wantResolves := range want {
+		s, err := q.Next(context.Background())
+		if err != nil {
+			t.Fatalf("Next #%d: %v", i+1, err)
+		}
+		_, _, resolved := yt.logs()
+		if len(resolved) != wantResolves {
+			t.Errorf("after song %d: %d resolves (%v), want %d", i+1, len(resolved), resolved, wantResolves)
+		}
+		// The song's age is that of its resolve, not of the moment it played:
+		// that is what decides when its signed URL needs refreshing.
+		id := strings.TrimPrefix(s.Key, "yt:")
+		if !s.Resolved.Equal(at[id]) {
+			t.Errorf("song %d (%s) Resolved = %v, want the time it was resolved, %v", i+1, id, s.Resolved, at[id])
+		}
+		clk.Advance(15 * time.Second)
+	}
+	seen := map[string]bool{}
+	_, _, resolved := yt.logs()
+	for _, page := range resolved {
+		if seen[page] {
+			t.Errorf("%s was resolved twice within ten minutes", page)
+		}
+		seen[page] = true
+	}
+}
+
+func TestQueueResolveMemoExpires(t *testing.T) {
+	// Two videos: song one resolves both and plays one, leaving the other
+	// remembered. When it plays decides whether it is read or resolved again.
+	for _, tc := range []struct {
+		name         string
+		gap          time.Duration
+		wantResolves int
+	}{
+		{"inside ten minutes", 3 * time.Minute, 2},
+		{"after ten minutes", 11 * time.Minute, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := newClock()
+			at := map[string]time.Time{}
+			yt := knownBandsYT(clk, at, "k1", "k2")
+			q := NewQueue("dungeon synth", yt, nil, knownByPrefix, rand.New(rand.NewSource(7)), clk.Now)
+
+			if _, err := q.Next(context.Background()); err != nil {
+				t.Fatalf("Next #1: %v", err)
+			}
+			clk.Advance(tc.gap)
+			if _, err := q.Next(context.Background()); err != nil {
+				t.Fatalf("Next #2: %v", err)
+			}
+			if _, _, resolved := yt.logs(); len(resolved) != tc.wantResolves {
+				t.Errorf("%d resolves (%v), want %d", len(resolved), resolved, tc.wantResolves)
+			}
+		})
 	}
 }
 
@@ -921,6 +1066,216 @@ func TestQueueDropsAVideoThatFailsTwice(t *testing.T) {
 	}
 }
 
+// gapBC is a Bandcamp tag with one new release, no shuffle and one best
+// seller: the second song can only come from a request the 10 s gap holds
+// back, because the first request (the tag probe) used up the new releases.
+func gapBC() *fakeBC {
+	return &fakeBC{items: func(tag, slice string) []BCItem {
+		switch slice {
+		case "new":
+			return bcItems("First", 100, 1)
+		case "top":
+			return bcItems("Classic", 200, 1)
+		}
+		return nil
+	}}
+}
+
+func TestQueueWaitsOutTheBandcampGap(t *testing.T) {
+	bc := gapBC()
+	q, clk := newTestQueue("death metal", nil, bc, nil)
+	var slept []time.Duration
+	q.sleep = func(ctx context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		clk.Advance(d) // the wait, without taking any
+		return ctx.Err()
+	}
+
+	first, err := q.Next(context.Background())
+	if err != nil || first.Key != "bc:100" {
+		t.Fatalf("Next #1 = %+v, %v; want the one new release", first, err)
+	}
+	clk.Advance(2 * time.Second)
+
+	// Everything left sits behind the gap. That is a wait, not the end of
+	// the station: the song is seconds away.
+	second, err := q.Next(context.Background())
+	if errors.Is(err, ErrNoSources) {
+		t.Fatalf("Next #2 = ErrNoSources: a request held by the gap is not an empty station")
+	}
+	if err != nil || second.Key != "bc:200" {
+		t.Fatalf("Next #2 = %+v, %v; want the best seller once the gap opened", second, err)
+	}
+	if len(slept) == 0 {
+		t.Error("the gap was never waited out")
+	}
+	for _, d := range slept {
+		if d <= 0 || d > bcGap {
+			t.Errorf("waited %v, want something up to the %v gap", d, bcGap)
+		}
+	}
+}
+
+func TestQueueGapWithNoTimeToWaitIsRetryable(t *testing.T) {
+	q, clk := newTestQueue("death metal", nil, gapBC(), nil)
+	q.sleep = func(ctx context.Context, d time.Duration) error {
+		t.Errorf("slept %v with a context that ends sooner", d)
+		return nil
+	}
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatalf("Next #1: %v", err)
+	}
+	clk.Advance(2 * time.Second)
+
+	// The caller can spare two seconds; the gap needs eight.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := q.Next(ctx)
+	if !errors.Is(err, ErrPaced) {
+		t.Fatalf("Next = %v, want ErrPaced", err)
+	}
+	if errors.Is(err, ErrNoSources) {
+		t.Error("a paced Next must never read as an exhausted station")
+	}
+	if ctx.Err() != nil {
+		t.Error("the answer should come at once, not at the deadline")
+	}
+}
+
+func TestQueueLinkSeedOfflineKeepsItsTagsAndSong(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"marked by the adapter", fmt.Errorf("unable to download webpage: %w", ErrNetwork)},
+		{"a net.Error", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("no route to host")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolves := 0
+			yt := plentifulYT()
+			yt.resolve = func(ctx context.Context, page string) (YTMedia, error) {
+				m := defaultMedia(page)
+				if idOf(page) != "abcdefghijk" {
+					return m, nil
+				}
+				if resolves++; resolves <= 3 {
+					return YTMedia{}, tc.err
+				}
+				m.Artist, m.Track, m.Tags = "Dismember", "Dreaming In Red", []string{"swedish death metal"}
+				return m, nil
+			}
+			bc := &fakeBC{items: func(tag, slice string) []BCItem {
+				if tag == "swedish-death-metal" {
+					return bcItems("Swede", 500, 60)
+				}
+				return nil
+			}}
+			q, clk := newTestQueue("https://youtu.be/abcdefghijk", yt, bc, nil)
+
+			// Three calls while offline, more than the two a bad video gets.
+			for i := 1; i <= 3; i++ {
+				if _, err := q.Next(context.Background()); !errors.Is(err, tc.err) {
+					t.Fatalf("offline Next #%d = %v, want the network error", i, err)
+				}
+				clk.Advance(15 * time.Second)
+			}
+			// Back online: the pasted song still comes first, and its tags
+			// still find Bandcamp.
+			songs := drain(t, q, clk, 12)
+			if songs[0].Key != "yt:abcdefghijk" || songs[0].Artist != "Dismember" {
+				t.Errorf("first song after the outage = %+v, want the linked one", songs[0])
+			}
+			viaBandcamp := false
+			for _, s := range songs {
+				viaBandcamp = viaBandcamp || strings.HasPrefix(s.Key, "bc:")
+			}
+			if !viaBandcamp {
+				t.Errorf("no Bandcamp song: the station lost its tags to the outage: %v", bc.log())
+			}
+		})
+	}
+}
+
+func TestQueueNetworkFailuresDoNotDropVideos(t *testing.T) {
+	calls := 0
+	yt := &fakeYT{
+		songs: func(query string, n int) []YTHit {
+			if n == 5 {
+				return []YTHit{{ID: "only"}}
+			}
+			return nil
+		},
+		resolve: func(ctx context.Context, page string) (YTMedia, error) {
+			if calls++; calls <= 3 {
+				return YTMedia{}, fmt.Errorf("unable to download webpage: %w", ErrNetwork)
+			}
+			return defaultMedia(page), nil
+		},
+	}
+	q, clk := newTestQueue("dungeon synth", yt, nil, nil)
+	for i := 1; i <= 3; i++ {
+		if _, err := q.Next(context.Background()); !errors.Is(err, ErrNetwork) {
+			t.Fatalf("offline Next #%d = %v, want the network error", i, err)
+		}
+		clk.Advance(15 * time.Second)
+	}
+	s, err := q.Next(context.Background())
+	if err != nil || s.Key != "yt:only" {
+		t.Errorf("back online Next = %+v, %v; want the video the outage must not have dropped", s, err)
+	}
+}
+
+func TestQueueEmptySearchesAreRemembered(t *testing.T) {
+	yt := &fakeYT{} // every search comes back empty
+	q, clk := newTestQueue("a name nobody sang about", yt, nil, nil)
+
+	for i := 0; i < 3; i++ {
+		if _, err := q.Next(context.Background()); !errors.Is(err, ErrNoSources) {
+			t.Fatalf("Next #%d = %v, want ErrNoSources", i+1, err)
+		}
+		clk.Advance(time.Minute)
+	}
+	// Anchors, the plain search and its three variants: one round, once.
+	if songsLog, _, _ := yt.logs(); len(songsLog) != 5 {
+		t.Errorf("three asks ran %d searches (%v), want one round of 5", len(songsLog), songsLog)
+	}
+
+	clk.Advance(6 * time.Minute)
+	if _, err := q.Next(context.Background()); !errors.Is(err, ErrNoSources) {
+		t.Fatalf("late Next = %v, want ErrNoSources", err)
+	}
+	if songsLog, _, _ := yt.logs(); len(songsLog) <= 5 {
+		t.Errorf("an empty answer more than five minutes old must be asked for again, searches = %d", len(songsLog))
+	}
+}
+
+func TestQueueSearchStagesStopWhenTheContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	yt := &fakeYT{songs: func(query string, n int) []YTHit {
+		if n == searchSize {
+			cancel() // the caller gives up during the first stage
+		}
+		return nil
+	}}
+	q, _ := newTestQueue("dungeon synth", yt, nil, nil)
+
+	_, err := q.Next(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Next = %v, want context.Canceled", err)
+	}
+	songsLog, _, _ := yt.logs()
+	plain := 0
+	for _, l := range songsLog {
+		if strings.HasSuffix(l, "#50") {
+			plain++
+		}
+	}
+	if plain != 1 {
+		t.Errorf("%d discovery searches ran (%v): the stages after the cancelled one are wasted processes", plain, songsLog)
+	}
+}
+
 func TestQueueCancelledContext(t *testing.T) {
 	q, _ := newTestQueue("dungeon synth", plentifulYT(), plentifulBC(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1048,6 +1403,69 @@ func TestQueueAnchorBoostLastsTenSongs(t *testing.T) {
 	drain(t, q, clk, 1)
 	if got := q.AnchorShare(); got != 0.2 {
 		t.Errorf("share after ten songs = %v, want back to 0.2", got)
+	}
+}
+
+// recoveringBC fails every request until the test lets it answer.
+func recoveringBC() (*fakeBC, func()) {
+	bc := &fakeBC{err: errors.New("bandcamp is down")}
+	return bc, func() {
+		bc.mu.Lock()
+		defer bc.mu.Unlock()
+		bc.err = nil
+		bc.items = func(tag, slice string) []BCItem { return bcItems("Back", 10, 60) }
+	}
+}
+
+// A Next that errors served nobody, so it takes nothing from the raised share.
+func TestQueueFailedNextKeepsTheBoost(t *testing.T) {
+	bc, heal := recoveringBC()
+	q, clk := newTestQueue("dungeon synth", nil, bc, nil)
+	for i := 0; i < 3; i++ {
+		q.Skipped(true)
+	}
+	raised := q.AnchorShare()
+	if raised <= 0.2 {
+		t.Fatalf("share = %v after three quick skips", raised)
+	}
+
+	for i := 0; i < 4; i++ {
+		if _, err := q.Next(context.Background()); err == nil {
+			t.Fatal("Next succeeded against a dead Bandcamp")
+		}
+		clk.Advance(15 * time.Second)
+	}
+	if got := q.AnchorShare(); got != raised {
+		t.Fatalf("four failed Nexts aged the boost: share %v, want %v", got, raised)
+	}
+
+	heal()
+	drain(t, q, clk, 9)
+	if got := q.AnchorShare(); got != raised {
+		t.Errorf("share after nine songs = %v, want %v still", got, raised)
+	}
+	drain(t, q, clk, 1)
+	if got := q.AnchorShare(); got != 0.2 {
+		t.Errorf("share after ten songs = %v, want back to 0.2", got)
+	}
+}
+
+// And a Next that errors is not a song the listener let play out either, so
+// it does not break a run of quick skips.
+func TestQueueFailedNextKeepsTheRun(t *testing.T) {
+	bc, _ := recoveringBC()
+	q, clk := newTestQueue("dungeon synth", nil, bc, nil)
+	q.Skipped(true)
+	q.Skipped(true)
+	for i := 0; i < 2; i++ {
+		if _, err := q.Next(context.Background()); err == nil {
+			t.Fatal("Next succeeded against a dead Bandcamp")
+		}
+		clk.Advance(15 * time.Second)
+	}
+	q.Skipped(true) // the third, with nothing played in between
+	if got := q.AnchorShare(); got <= 0.2 {
+		t.Errorf("share = %v: two failed Nexts broke the run of quick skips", got)
 	}
 }
 

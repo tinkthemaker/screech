@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/core"
@@ -73,9 +74,17 @@ func (s State) seeded(msg Seeded) (State, []Cmd) {
 // superseded one: a newer Play took the player while this one was still
 // resolving, which says nothing about the station, even when the listener
 // has come straight back to it.
+//
+// The exception is a lookup that failed because the network is down (a
+// discovery station's first song): that says nothing about the station
+// either, so it takes the road a stream that never locks takes, without the
+// strike, and three in a row mean offline.
 func (s State) playFailed(msg PlayFailed) (State, []Cmd) {
 	if !s.HaveStation || msg.UUID != s.Station.UUID || errors.Is(msg.Err, player.ErrSuperseded) {
 		return s, nil
+	}
+	if errors.Is(msg.Err, player.ErrSourceNetwork) {
+		return s.failTuneAs("song lookup failed", false)
 	}
 	s.core.MarkStationFailed(msg.UUID)
 	s.Note = "stream rejected " + s.dot() + " moving on"
@@ -91,6 +100,9 @@ func (s State) next() (State, []Cmd) {
 		// early rather than tuning away from the outage.
 		return s.offlineRetry()
 	}
+	if cmd, ok := s.beginNextSong(); ok {
+		return s, []Cmd{cmd}
+	}
 	fb := "NEXT  Finding another station"
 	switch {
 	case s.Suspect:
@@ -104,6 +116,36 @@ func (s State) next() (State, []Cmd) {
 	// order is unspecified.
 	cmd := s.beginSkip(fb)
 	return s, []Cmd{cmd}
+}
+
+// beginNextSong is NEXT on a discovery station that is making sound: the
+// player moves on to the next song and the listen carries on untouched, so
+// the station is never charged a skip for a song change. It reports false
+// when NEXT should keep its old meaning, a station skip: on radio, before
+// the stream has locked (there is no song to leave), without a queue behind
+// the player, and for a second NEXT inside songNextWindow, which is the
+// listener asking for a different station. It mutates s, like beginSkip.
+func (s *State) beginNextSong() (Cmd, bool) {
+	if (s.Phase != Playing && s.Phase != Buffering) || !s.discovery() {
+		return nil, false
+	}
+	sq, ok := s.pl.(player.SongQueue)
+	if !ok {
+		return nil, false
+	}
+	if !s.lastSongNextAt.IsZero() && s.Now.Sub(s.lastSongNextAt) < songNextWindow {
+		s.lastSongNextAt = time.Time{} // the skip ends this run of NEXTs
+		return nil, false
+	}
+	s.lastSongNextAt = s.Now
+	s.setFeedback("NEXT SONG  Again for a new station")
+	dot := s.dot()
+	return func() Msg {
+		if err := sq.NextSong(); err != nil {
+			return Notify{Note: "next song failed " + dot + " " + err.Error()}
+		}
+		return nil
+	}, true
 }
 
 // tuneTo plays a station by identity — library rows and preset recall all
@@ -125,6 +167,32 @@ func (s State) seed(msg Seed) (State, []Cmd) {
 	s.Seeking = true
 	s.Note = ""
 	return s, []Cmd{s.seedCmd(msg.Query)}
+}
+
+// discover is FIND's Enter: a phrase or a link becomes a discovery station.
+// The pick comes back as Tuned like any other, so it lands through
+// applyPick; a blank query is nothing to start.
+func (s State) discover(msg Discover) (State, []Cmd) {
+	seed := strings.TrimSpace(msg.Query)
+	if seed == "" {
+		return s, nil
+	}
+	return s, []Cmd{s.discoverCmd(seed)}
+}
+
+// discoverCmd starts the station in core, which ends the current listen the
+// way TuneTo does. A seed core refuses is the listener's typo, not a failed
+// tune: Tuned's error branch would stop a session that has no station yet,
+// so the refusal rides Notify as a note instead.
+func (s State) discoverCmd(seed string) Cmd {
+	c, dot := s.core, s.dot()
+	return func() Msg {
+		pick, err := c.StartDiscovery(seed, time.Now())
+		if err != nil {
+			return Notify{Note: "could not start discovery " + dot + " " + err.Error()}
+		}
+		return Tuned{Pick: pick}
+	}
 }
 
 // wildcard is the virgin first-run shortcut: pick anything.
@@ -203,11 +271,20 @@ func (s State) applyPick(pick core.Pick) (State, []Cmd) {
 	s.Virgin = false
 	s.Note = ""
 	s.Reason = pick.Reason
+	if core.IsDiscovery(pick.Station.UUID) && strings.HasPrefix(pick.Reason, "discovering") {
+		// Core spells a discovery's reason with a literal middle dot. The
+		// separator is the session's to choose, so the terminal's ASCII
+		// mode stays seven-bit.
+		s.Reason = s.discoveringReason(pick.Station.Name)
+	}
 	s.Phase = Tuning
 	s.TuneAt = s.Now
 	s.Artist, s.Title, s.TrackKey = "", "", ""
 	s.HaveTrack = false
 	s.LovedTrack = false
+	s.NewToYou = false
+	s.named = false
+	s.lastSongNextAt = time.Time{}
 	s.Suspect = false
 	s.PlayStart = time.Time{}
 	s.drops = 0
@@ -238,6 +315,15 @@ func (s *State) beginSkip(feedback string) Cmd {
 // offline retry it extends the backoff instead of punishing the retried
 // station.
 func (s State) failTune(reason string) (State, []Cmd) {
+	return s.failTuneAs(reason, true)
+}
+
+// failTuneAs is failTune with the strike optional. A failure that is plainly
+// the network's (a discovery station's song lookup finding no connection)
+// still counts toward the offline streak and still moves on, but earns the
+// station nothing: there is no strike to forgive later, and a station that
+// did nothing wrong is not marked in the meantime.
+func (s State) failTuneAs(reason string, strike bool) (State, []Cmd) {
 	if s.retryN > 0 {
 		s.core.EndListen(time.Now())
 		s.RetryAt = s.Now.Add(retryBackoff(s.retryN))
@@ -247,15 +333,20 @@ func (s State) failTune(reason string) (State, []Cmd) {
 		s.Resuming = false
 		return s, nil
 	}
-	s.core.MarkStationFailed(s.Station.UUID)
-	s.failStreak = append(s.failStreak, s.Station.UUID)
-	if len(s.failStreak) >= offlineAfter {
+	if strike {
+		s.core.MarkStationFailed(s.Station.UUID)
+		s.failStreak = append(s.failStreak, s.Station.UUID)
+	} else {
+		s.netFails++
+	}
+	if len(s.failStreak)+s.netFails >= offlineAfter {
 		// Three different stations, three failures: it's the network.
 		// Forgive the strikes and wait for it to come back.
 		for _, uuid := range s.failStreak {
 			s.core.ForgiveFailure(uuid)
 		}
 		s.failStreak = nil
+		s.netFails = 0
 		s.core.EndListen(time.Now())
 		s.retryN = 1
 		s.RetryAt = s.Now.Add(retryBackoff(0))
