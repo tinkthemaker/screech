@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/player"
@@ -36,6 +38,10 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 			s.HaveTrack = false
 			s.LovedTrack = false
 		}
+		// The queue says whether this song's artist is new; a title that
+		// didn't parse as a track has no artist to be new.
+		s.NewToYou = ok && ev.NewToYou
+		s.nameDiscovery(ev.Title)
 		// Auto-hop only on the stream's own break marker — the opt-in
 		// promise is "the title said so", never suspicion alone. The hop
 		// goes through Tune on purpose: a skip during a break earns the
@@ -69,6 +75,7 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 			}
 			s.lockAt = s.Now
 			s.failStreak = nil
+			s.netFails = 0
 			s.Reconnecting = false
 			s.Resuming = false
 			s.lastGood = s.Station
@@ -106,16 +113,20 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 		if ev.Type == player.EventStreamError {
 			reason = "stream failed"
 		}
+		// A discovery queue that lost its network says so by wrapping
+		// ErrSourceNetwork. That is the connection's fault, not the
+		// station's, in any phase: it takes the same road, minus the strike.
+		strike := !(ev.Type == player.EventStreamError && errors.Is(ev.Err, player.ErrSourceNetwork))
 		switch s.Phase {
 		case Paused:
 			// The stream died underneath the pause: resuming can no
 			// longer unpause in place, it has to reload.
 			s.pauseReload = true
 		case Playing, Buffering:
-			s2, cmds := s.dropStream(reason)
+			s2, cmds := s.dropStreamAs(reason, strike)
 			return s2, append([]Cmd{s2.listen()}, cmds...)
 		case Tuning:
-			s2, cmds := s.failTune(reason)
+			s2, cmds := s.failTuneAs(reason, strike)
 			return s2, append([]Cmd{s2.listen()}, cmds...)
 		}
 		return s, []Cmd{s.listen()}
@@ -137,13 +148,43 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 	return s, []Cmd{s.listen()}
 }
 
+// nameDiscovery offers a discovery station's first title as its name. Core
+// decides whether it applies (only a station started from a YouTube link,
+// still named by that link, takes it), so every station's first title is
+// offered once and a later one never is. A rename changes what the strip
+// and the library show, so the pick reason follows the name it was built on.
+func (s *State) nameDiscovery(title string) {
+	if s.named || !s.discovery() || strings.TrimSpace(title) == "" {
+		return
+	}
+	s.named = true
+	old := s.Station.Name
+	if err := s.core.RenameDiscovery(s.Station.UUID, title); err != nil {
+		return // cosmetic: the station keeps the name it had
+	}
+	st, ok := s.core.StationByUUID(s.Station.UUID)
+	if !ok || st.Name == old {
+		return
+	}
+	if s.Reason == s.discoveringReason(old) {
+		s.Reason = s.discoveringReason(st.Name)
+	}
+	s.Station = st
+}
+
 // dropStream handles a live stream that ended or errored underneath us:
 // reconnect the same URL in place. Drops beyond maxDrops without a stable
 // minute fail the tune instead.
 func (s State) dropStream(reason string) (State, []Cmd) {
+	return s.dropStreamAs(reason, true)
+}
+
+// dropStreamAs is dropStream with the strike optional, for the failure it
+// may end in: see failTuneAs.
+func (s State) dropStreamAs(reason string, strike bool) (State, []Cmd) {
 	s.drops++
 	if s.drops > maxDrops {
-		return s.failTune(reason)
+		return s.failTuneAs(reason, strike)
 	}
 	s.Phase = Tuning
 	s.TuneAt = s.Now
