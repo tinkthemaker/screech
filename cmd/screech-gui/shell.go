@@ -84,6 +84,10 @@ type shell struct {
 	unfoldTop int  // the top SetWindowPos set at unfold
 	unfolded  bool // fold state the shell last drove, for persist
 
+	// firstRun is set when nothing has ever played: restore opens the
+	// console (on FIND) rather than a strip with nothing on it.
+	firstRun bool
+
 	ctx    context.Context // Wails' context, live from OnStartup
 	runner *session.Runner
 	rt     *app.Runtime
@@ -227,6 +231,14 @@ func (s *shell) onShutdown() {
 	})
 }
 
+// startsUnfolded is the one rule for the window's opening height, shared by
+// the size main hands Wails and the placement restore applies afterwards:
+// the console if the last run left it open, and always on a first launch,
+// where the page's default tab is FIND.
+func startsUnfolded(saved core.WindowPlacement, firstRun bool) bool {
+	return firstRun || (saved.Saved && saved.Unfolded)
+}
+
 // restore puts the saved placement back, or centres on the primary work
 // area — whenever nothing is saved, or the saved top bar sits on no
 // monitor (an unplugged screen).
@@ -242,7 +254,7 @@ func (s *shell) restore() {
 	w := round(480 * scale)
 	h := round(128 * scale)
 	s.unfolded = false
-	if saved.Unfolded {
+	if startsUnfolded(saved, s.firstRun) {
 		h = round(428 * scale)
 		s.unfolded = true
 	}

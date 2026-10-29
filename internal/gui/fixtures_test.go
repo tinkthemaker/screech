@@ -26,24 +26,37 @@ var fixtureNowMs = time.Date(2026, 10, 19, 8, 47, 0, 0, time.UTC).UnixMilli()
 // collapsed textContent per data-id and ExpectStyle computed styles;
 // ExpectUnfolded overrides Expect entries when the window is unfolded.
 type fixture struct {
-	Name           string                       `json:"name"`
-	Snapshot       session.Snapshot             `json:"snapshot"`
-	Unfolded       bool                         `json:"unfolded"`
-	Tab            string                       `json:"tab"`
-	Filter         string                       `json:"filter,omitempty"`
-	RemoveArmed    bool                         `json:"removeArmed,omitempty"`
-	Reduced        bool                         `json:"reduced,omitempty"`
-	Recent         []RecentRow                  `json:"recent,omitempty"`
-	Loved          []LovedRow                   `json:"loved,omitempty"`
-	Stations       []StationRow                 `json:"stations,omitempty"`
-	Taste          TasteView                    `json:"taste"`
-	Info           InfoView                     `json:"info"`
-	Selected       int                          `json:"selected"`
-	Top            int                          `json:"top,omitempty"` // list scroll offset
-	Level          *[3]float64                  `json:"level,omitempty"`
+	Name     string           `json:"name"`
+	Snapshot session.Snapshot `json:"snapshot"`
+	// SnapExtra carries the snapshot fields Task 5's session adds
+	// (newToYou, discovery) until session.Snapshot has them; fixture.js
+	// lays it over the snapshot. Replace with the real fields once merged.
+	SnapExtra   map[string]any `json:"snapExtra,omitempty"`
+	Unfolded    bool           `json:"unfolded"`
+	Tab         string         `json:"tab"`
+	Filter      string         `json:"filter,omitempty"`
+	Find        string         `json:"find,omitempty"` // text already in the FIND bar
+	RemoveArmed bool           `json:"removeArmed,omitempty"`
+	Reduced     bool           `json:"reduced,omitempty"`
+	Recent      []RecentRow    `json:"recent,omitempty"`
+	Loved       []LovedRow     `json:"loved,omitempty"`
+	Stations    []StationRow   `json:"stations,omitempty"`
+	Discoveries []DiscoveryRow `json:"discoveries,omitempty"` // FIND's rows
+	RadioTop    []StationRow   `json:"radioTop,omitempty"`    // RADIO's rows
+	Taste       TasteView      `json:"taste"`
+	Info        InfoView       `json:"info"`
+	Selected    int            `json:"selected"`
+	Top         int            `json:"top,omitempty"` // list scroll offset
+	Level       *[3]float64    `json:"level,omitempty"`
+	// Expect pins collapsed textContent per data-id (an input's value; a
+	// "id@attr" key pins an attribute instead). ExpectRect pins a box to
+	// [left, top, width, height] in page px — the brief's geometry, copied
+	// exactly. Absent lists data-ids that must not exist.
 	Expect         map[string]string            `json:"expect,omitempty"`
 	ExpectUnfolded map[string]string            `json:"expectUnfolded,omitempty"`
 	ExpectStyle    map[string]map[string]string `json:"expectStyle,omitempty"`
+	ExpectRect     map[string][4]float64        `json:"expectRect,omitempty"`
+	Absent         []string                     `json:"absent,omitempty"`
 
 	// BothModes also renders unfolded, for the folded-vs-unfolded strip
 	// comparison.
@@ -77,12 +90,13 @@ func playingSnapshot() session.Snapshot {
 
 func ptrLevel(l, r, p float64) *[3]float64 { return &[3]float64{l, r, p} }
 
-// exp builds a fixture's Expect map: the five button labels every strip
-// render carries, plus per-fixture entries.
+// exp builds a fixture's Expect map: the button labels every strip render
+// carries (the ✕ cap stands where EXIT was; guard.js fails if btn-exit
+// ever comes back), plus per-fixture entries.
 func exp(extra map[string]string) map[string]string {
 	m := map[string]string{
 		"btn-next": "NEXT", "btn-love": "LOVE",
-		"btn-pause": "PAUSE", "btn-more": "MORE", "btn-exit": "EXIT",
+		"btn-pause": "PAUSE", "btn-more": "MORE", "btn-close": "✕",
 	}
 	for k, v := range extra {
 		m[k] = v
@@ -108,10 +122,22 @@ func fixtures() []fixture {
 				"status-word": "● LIVE 00:42", "status-detail": "· tag: ambient",
 			}),
 			ExpectUnfolded: map[string]string{"btn-more": "LESS"},
-			// Wails drags the frame, never a control.
+			// Wails drags the frame, never a control — the ✕ cap included.
 			ExpectStyle: map[string]map[string]string{
 				"left-block": {"--wails-draggable": "drag"},
 				"btn-next":   {"--wails-draggable": ""},
+				"btn-close": {
+					"--wails-draggable": "", "background-color": "rgb(255, 85, 85)",
+					"border-radius": "0px 10px 10px 0px", "font-size": "13px", "font-weight": "700",
+				},
+				"btn-more": {"border-radius": "0px 14px 14px 0px"},
+			},
+			// The top bar's tan segment ends at 428, the ✕ cap takes
+			// 432–480 × 0–20, and MORE/LESS spans 376–480.
+			ExpectRect: map[string][4]float64{
+				"bar-b":     {332, 0, 96, 12},
+				"btn-close": {432, 0, 48, 20},
+				"btn-more":  {376, 100, 104, 28},
 			}},
 		{Name: "tuning", Snapshot: session.Snapshot{
 			Phase: "tuning", HaveStation: true, Station: dsoCard,
@@ -163,6 +189,9 @@ func fixtures() []fixture {
 			"btn-next": "RETRY NOW",
 		}), ExpectStyle: map[string]map[string]string{
 			"left-block": {"background-color": "rgb(204, 51, 51)"},
+			// Red alert: the ✕ cap goes dark red with a white cross, as
+			// EXIT did.
+			"btn-close": {"background-color": "rgb(204, 51, 51)", "color": "rgb(255, 255, 255)"},
 		}},
 		{Name: "stopped", Snapshot: withFlags(play, "stopped", func(s *session.Snapshot) {
 			s.Fatal = "mpv exited · restart screech"
@@ -177,6 +206,12 @@ func fixtures() []fixture {
 		}), Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{
 			"status-word": "● LIVE 00:42", "chip": "BREAK",
 		})},
+		// A band never heard on Screech before: the strip says so where the
+		// pick reason would sit.
+		{Name: "new-to-you", Snapshot: play, SnapExtra: map[string]any{"newToYou": true, "discovery": true},
+			Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{
+				"status-word": "● LIVE 00:42", "status-detail": "· NEW TO YOU",
+			})},
 		{Name: "syncing", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
 			s.Syncing = true
 		}), Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{
@@ -308,19 +343,87 @@ func fixtures() []fixture {
 				"hdr-name": "Taste", "hdr-count": "88 h all time · 14 h this week · 12 loved",
 				"dp-0": "morning", "artist-0": "Boards of Canada", "tag-0": "ambient",
 			})},
-		{Name: "console-search", Snapshot: play, Unfolded: true, Tab: "search",
-			Expect: expC(map[string]string{"hdr-name": "Search"})},
-		{Name: "console-info", Snapshot: play, Unfolded: true, Tab: "info",
-			Info: sampleInfo(), Expect: expC(map[string]string{
-				"hdr-name": "Info", "info-0": "FROM", "info-0-value": "US · MP3 128K",
-			})},
-		// SLEEP is an action tab: the panel stays on the current view and
-		// the tab itself carries the countdown.
-		{Name: "console-sleep", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
+		// FIND, the front door: one bar, up to four discovery stations to
+		// pick up, one faint hint. The geometry is front-door-v6's, page px.
+		{Name: "console-find", Snapshot: play, Unfolded: true, Tab: "find",
+			Discoveries: sampleDiscoveries(), Expect: expC(map[string]string{
+				"bar-cap": "FIND", "bar-go": "GO ▸",
+				"bar-input@placeholder": "Artist, song, genre or YouTube link",
+				"find-label":            "Pick up where you left off",
+				"row-0":                 "swedish death metal", "row-0-right": "2h ago",
+				"find-hint": "ESC TO CLOSE · TAB FOR RADIO",
+			}), ExpectStyle: map[string]map[string]string{
+				"tab-find":  {"background-color": "rgb(153, 204, 255)"},
+				"tab-radio": {"background-color": "rgb(153, 153, 255)"},
+				"tab-more":  {"background-color": "rgb(255, 204, 153)"},
+				// The two caps are one colour, the bar's.
+				"bar-cap": {"background-color": "rgb(255, 153, 0)"},
+				"bar-go":  {"background-color": "rgb(255, 153, 0)"},
+				"bar-input": {
+					"font-size": "16px", "color": "rgb(153, 204, 255)",
+					"text-overflow": "ellipsis", "--wails-draggable": "",
+				},
+				"find-label": {"color": "rgb(255, 153, 102)", "font-size": "11px"},
+				"find-hint":  {"color": "rgb(119, 119, 119)", "font-size": "11px", "text-align": "center"},
+			}, ExpectRect: map[string][4]float64{
+				"tab-find": {0, 156, 96, 28}, "tab-radio": {0, 188, 96, 28},
+				"tab-recent": {0, 220, 96, 28}, "tab-loved": {0, 252, 96, 28},
+				"tab-stations": {0, 284, 96, 28}, "tab-taste": {0, 316, 96, 28},
+				"tab-more": {0, 348, 96, 28},
+				"find-bar": {136, 148, 328, 36}, "bar-cap": {136, 148, 52, 36},
+				"bar-go": {412, 148, 52, 36},
+				// The label heads rows at 28-px pitch from 220.
+				"find-label": {136, 204, 328, 16}, "row-top": {124, 220, 340, 28},
+				"find-hint": {124, 348, 340, 16},
+			}, Absent: []string{"tab-search", "tab-info", "tab-sleep"}},
+		// Nothing discovered yet: no label, no rows, the bar and the hint.
+		{Name: "console-find-empty", Snapshot: play, Unfolded: true, Tab: "find",
+			Expect: expC(map[string]string{
+				"bar-cap": "FIND", "find-hint": "ESC TO CLOSE · TAB FOR RADIO",
+			}), Absent: []string{"find-label", "row-top"}},
+		// A long link scrolls inside the field instead of growing it.
+		{Name: "console-find-typed", Snapshot: play, Unfolded: true, Tab: "find",
+			Find: longLink, Discoveries: sampleDiscoveries(), Expect: expC(map[string]string{
+				"bar-cap": "FIND", "bar-input": longLink,
+			}), ExpectStyle: map[string]map[string]string{
+				"bar-input": {"text-overflow": "ellipsis", "font-size": "16px"},
+			}},
+		// RADIO: the same bar in blue; below it the most-listened radio
+		// stations, as STATIONS lays them out, six at most.
+		{Name: "console-radio", Snapshot: play, Unfolded: true, Tab: "radio",
+			RadioTop: append(sampleStations(), StationRow{
+				UUID: "seed:long", Name: "A Station Whose Name Runs On Past The Edge Of Its Row Entirely",
+				TotalSec: 3_600, LoveCount: 1,
+			}), Expect: expC(map[string]string{
+				"bar-cap": "RADIO", "bar-go": "GO ▸",
+				"bar-input@placeholder": "Station, genre or country",
+				"row-0":                 "SomaFM: Groove Salad", "row-0-right": "1d 15h · P3 · ♥ 7",
+			}), ExpectStyle: map[string]map[string]string{
+				"tab-radio": {"background-color": "rgb(153, 204, 255)"},
+				"tab-find":  {"background-color": "rgb(153, 153, 255)"},
+				"bar-cap":   {"background-color": "rgb(153, 153, 255)"},
+				"bar-go":    {"background-color": "rgb(153, 153, 255)"},
+			}, ExpectRect: map[string][4]float64{
+				"find-bar": {136, 148, 328, 36}, "row-top": {124, 200, 340, 28},
+			}, Absent: []string{"find-hint", "find-label"}},
+		{Name: "console-radio-empty", Snapshot: play, Unfolded: true, Tab: "radio",
+			Expect: expC(map[string]string{"bar-cap": "RADIO"}), Absent: []string{"row-top"}},
+		// MORE holds what INFO and SLEEP held: the info rows, and the sleep
+		// pill that carries the countdown.
+		{Name: "console-more", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
 			s.SleepAtMs = fixtureNowMs + 28*time.Minute.Milliseconds()
-		}), Unfolded: true, Tab: "loved", Loved: sampleLoved(6), Expect: expC(map[string]string{
-			"hdr-name": "Loved", "tab-sleep": "SLEEP 28", "row-0": "Boards of Canada — Roygbiv",
-		})},
+		}), Unfolded: true, Tab: "more", Info: sampleInfo(), Expect: expC(map[string]string{
+			"hdr-name": "More", "sleep-pill": "SLEEP 28",
+			"info-0": "FROM", "info-0-value": "US · MP3 128K",
+		}), ExpectStyle: map[string]map[string]string{
+			"tab-more": {"background-color": "rgb(153, 204, 255)"},
+		}, Absent: []string{"tab-info", "tab-sleep"}},
+		{Name: "console-more-idle", Snapshot: play, Unfolded: true, Tab: "more", Info: sampleInfo(),
+			Expect: expC(map[string]string{"hdr-name": "More", "sleep-pill": "SLEEP", "info-0": "FROM"})},
+		{Name: "console-more-nothing-tuned", Snapshot: session.Snapshot{Phase: "idle", Virgin: true, Volume: 70},
+			Unfolded: true, Tab: "more", Expect: expC(map[string]string{
+				"hdr-name": "More", "sleep-pill": "SLEEP", "empty": "nothing tuned yet",
+			})},
 		{Name: "empty-recent", Snapshot: play, Unfolded: true, Tab: "recent",
 			Expect: expC(map[string]string{
 				"hdr-name": "Recent", "empty": "nothing heard yet",
@@ -368,18 +471,23 @@ func fixtures() []fixture {
 			"elbow":       {"background-color": "rgb(255, 170, 170)"},
 			// Red alert turns the live tab palest.
 			"tab-recent": {"background-color": "rgb(255, 214, 214)"},
+			"tab-find":   {"background-color": "rgb(255, 102, 102)"},
+			"tab-more":   {"background-color": "rgb(255, 170, 170)"},
 		}},
 
-		// keys drives TestKeyboardMap: a virgin snapshot (so the search
-		// input's space wildcard is live) unfolded onto LOVED with eight
-		// rows — enough for the ±5/End moves and one wheel scroll.
+		// keys drives TestKeyboardMap: a virgin snapshot (so RADIO's space
+		// wildcard is live) unfolded onto LOVED with eight rows — enough
+		// for the ±5/End moves and one wheel scroll — and the lists FIND
+		// and RADIO draw their rows from.
 		{Name: "keys", Snapshot: session.Snapshot{
 			Phase: "idle", Virgin: true, Volume: 70,
 			Slots: [9]bool{true, false, true},
-		}, Unfolded: true, Tab: "loved", Loved: sampleLoved(8)},
-		// keys-folded carries loved rows but stays folded: every row key
-		// must be a no-op — nothing may act on a list that isn't drawn.
-		{Name: "keys-folded", Snapshot: play, Loved: sampleLoved(8)},
+		}, Unfolded: true, Tab: "loved", Loved: sampleLoved(8),
+			Discoveries: sampleDiscoveries(), RadioTop: sampleStations()},
+		// keys-folded carries loved rows but stays folded, on LOVED: every
+		// row key must be a no-op — nothing may act on a list that isn't
+		// drawn — while MORE and / open the console on FIND.
+		{Name: "keys-folded", Snapshot: play, Tab: "loved", Loved: sampleLoved(8)},
 		// Reduced motion through the bridge preference: the buffering
 		// pulse flattens but the meter keeps running.
 		{Name: "reduced", Snapshot: withFlags(play, "buffering", func(s *session.Snapshot) {}),
@@ -405,6 +513,29 @@ func sampleRecent() []RecentRow {
 		{StationUUID: "seed:dronezone", StationName: "Drone Zone", Artist: "Tycho", Title: "Awake", HeardAtMs: base - 1_200_000},
 	}
 	return rows
+}
+
+// longLink is the 200-character YouTube link a listener might paste: a
+// watch page with a playlist along for the ride.
+const longLink = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLFsQleAWXsj_4yDeebiIADdH5FMayBiJo" +
+	"&index=12345&start_radio=1&pp=iAQB&utm_source=share&utm_medium=member_desktop&utm_campaign=front-door-fixture-padding"
+
+// Both arrays are legal only when the link is exactly 200 characters.
+var (
+	_ [len(longLink) - 200]struct{}
+	_ [200 - len(longLink)]struct{}
+)
+
+// FIND's four rows: a phrase, a song a link started from, and two more
+// phrases, newest first.
+func sampleDiscoveries() []DiscoveryRow {
+	h := time.Hour.Milliseconds()
+	return []DiscoveryRow{
+		{UUID: "disc:0000000000000001", Name: "swedish death metal", LastAtMs: fixtureNowMs - 2*h},
+		{UUID: "disc:0000000000000002", Name: "Boards of Canada – Roygbiv", LastAtMs: fixtureNowMs - 30*h},
+		{UUID: "disc:0000000000000003", Name: "dungeon synth", LastAtMs: fixtureNowMs - 9*24*h},
+		{UUID: "disc:0000000000000004", Name: "blackgaze", LastAtMs: fixtureNowMs - 17*24*h},
+	}
 }
 
 func sampleLoved(n int) []LovedRow {

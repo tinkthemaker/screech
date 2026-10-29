@@ -26,9 +26,9 @@ const type = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bu
 
 const q = (sel) => document.querySelector(sel);
 const fmtCall = (c) => c[0] + '(' + c.slice(1).map((a) => JSON.stringify(a)).join(',') + ')';
-const focusedSearch = () =>
+const focusedBar = () =>
   !!(document.activeElement && document.activeElement.classList &&
-    document.activeElement.classList.contains('searchin'));
+    document.activeElement.classList.contains('findin'));
 const rec = () => ({
   sel: ui.state.sel,
   top: ui.state.top,
@@ -37,7 +37,9 @@ const rec = () => ({
   rowTop: (q('[data-id="row-top"]') || {}).textContent || null,
   remove: (q('[data-id="act-remove"]') || {}).textContent || null,
   filterInput: !!q('[data-id="filter-input"]'),
-  searchFocused: focusedSearch(),
+  barFocused: focusedBar(),
+  barValue: (q('.findin') || {}).value ?? null,
+  rowLit: !!q('.crow.sel'),
 });
 const run = async (name, fn, extra) => {
   const before = window.__calls.length;
@@ -74,6 +76,11 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     for (const k of ['x', 'x', 'Enter', 'j', 'r']) {
       await run('folded-' + k, () => key(k));
     }
+    // Folded, "/" and the MORE button both open the console on FIND —
+    // from LOVED, which the fixture leaves selected.
+    await run('folded-slash', () => key('/'));
+    await run('folded-back-to-loved', () => ui.setTab('loved'));
+    await run('folded-more-click', () => q('#btnMore').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })));
     out.errors = (window.__errors || []).slice();
     const pre = document.createElement('pre');
     pre.id = 'keys';
@@ -150,15 +157,36 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     () => { ui.state.filter = 'ab'; ui.state.filterOpen = false; return ui.renderPanel(); });
   await run('esc-filter-leftover', () => key('Escape'));
 
-  // ---- search + ESC order --------------------------------------------
+  // ---- FIND, RADIO and ESC order -------------------------------------
+  // "/" from MORE lands on FIND with the bar focused; letters are the
+  // bar's; Enter on nothing does nothing.
   await run('i-again', () => key('i'));
-  await run('slash-search', () => key('/'));
-  await run('search-letter', () => key('l')); // swallowed
-  await run('search-space', () => key(' ')); // virgin wildcard
-  await run('search-space-repeat', () => key(' ', { repeat: true }));
-  await run('search-type', () => type(q('[data-id="search-input"]'), 'ambient'));
-  await run('search-enter', () => key('Enter'));
-  await run('esc-search', () => key('Escape'));
+  await run('slash-find', () => key('/'));
+  await run('find-letter', () => key('l')); // swallowed
+  await run('find-blank-enter', () => key('Enter'));
+  await run('find-type', () => type(q('[data-id="bar-input"]'), 'swedish death metal'));
+  // Tab leaves the bar for RADIO and the new bar takes focus; an empty
+  // RADIO bar's space is the virgin wildcard, once per press.
+  await run('find-tab', () => key('Tab'));
+  await run('radio-space', () => key(' '));
+  await run('radio-space-repeat', () => key(' ', { repeat: true }));
+  await run('radio-type', () => type(q('[data-id="bar-input"]'), 'ambient'));
+  await run('radio-enter', () => key('Enter'));
+  // Back on FIND the phrase is still there; ↓ hands over to the rows and
+  // ↑ from the first row takes the bar back.
+  await run('radio-shift-tab', () => key('Tab', { shiftKey: true }));
+  await run('find-down', () => key('ArrowDown'));
+  await run('find-up', () => key('ArrowUp'));
+  await run('find-down-again', () => key('ArrowDown'));
+  await run('find-row-next', () => key('j'));
+  await run('find-row-enter', () => key('Enter'));
+  await run('find-row-click', () => clickRow());
+  // "/" with the rows in hand returns to the bar; Enter starts a station.
+  await run('slash-find-again', () => key('/'));
+  await run('find-enter', () => key('Enter'));
+  // ESC unwinds text first, then folds.
+  await run('find-type-2', () => { const bar = q('.findin'); bar.focus(); type(bar, 'x'); });
+  await run('esc-find-text', () => key('Escape'));
   await run('esc-fold', () => key('Escape'));
 
   out.errors = (window.__errors || []).slice();

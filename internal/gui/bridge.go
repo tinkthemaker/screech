@@ -40,6 +40,11 @@ type Bridge struct {
 	win    Window
 	prefs  Prefs
 	em     atomic.Value // Emitter; nil until SetEmitter
+
+	// send is how an intent reaches the runner: Attach points it at
+	// Runner.Send. A test seam, so a test can see exactly which messages a
+	// bound call produced.
+	send func(session.Msg)
 }
 
 // New builds the bridge; Attach and SetEmitter finish the wiring once the
@@ -51,7 +56,10 @@ func New(c *core.Core, win Window, prefs Prefs) *Bridge {
 // Prefs reports the shell's display choices to the page.
 func (b *Bridge) Prefs() Prefs { return b.prefs }
 
-func (b *Bridge) Attach(r *session.Runner) { b.runner = r }
+func (b *Bridge) Attach(r *session.Runner) {
+	b.runner = r
+	b.send = r.Send
+}
 
 // SetEmitter is called from the shell's OnStartup; events raised before
 // it are dropped, since the page isn't there to hear them.
@@ -72,11 +80,11 @@ func (b *Bridge) Sink() session.Sink { return sink{b} }
 // "any keypress clears the notice" is the same rule the terminal
 // follows), then the message. Send never blocks after Stop.
 func (b *Bridge) intent(m session.Msg) {
-	if b.runner == nil {
+	if b.send == nil {
 		return
 	}
-	b.runner.Send(session.Touch{})
-	b.runner.Send(m)
+	b.send(session.Touch{})
+	b.send(m)
 }
 
 func (b *Bridge) Current() session.Snapshot {
@@ -116,6 +124,23 @@ func (b *Bridge) Seed(query string) {
 
 // Wildcard is the virgin first-run shortcut: pick anything.
 func (b *Bridge) Wildcard() { b.intent(session.Wildcard{}) }
+
+// Discover is FIND's Enter: start a discovery station from a phrase or a
+// link. A blank query is ignored. The core decides whether it is a link and
+// whether the station already exists, so the page sends what was typed.
+func (b *Bridge) Discover(query string) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return
+	}
+	b.intent(session.Discover{Query: query})
+}
+
+// ResumeDiscovery picks a discovery station up where it was left, from
+// FIND's list. It is a plain tune: the station is already in the database.
+func (b *Bridge) ResumeDiscovery(uuid string) {
+	b.intent(session.TuneTo{UUID: uuid, Reason: "discovering"})
+}
 
 // ReturnToStation tunes to the station a loved track came from.
 func (b *Bridge) ReturnToStation(uuid string) {
@@ -167,6 +192,47 @@ func (b *Bridge) Stations(filter string) ([]StationRow, error) {
 		return nil, err
 	}
 	return stationRows(core.FilterSavedStations(entries, filter)), nil
+}
+
+// recentDiscoveryRows is how many "pick up where you left off" rows FIND
+// has room for; radioTopRows is how many RADIO's list has under its bar.
+const (
+	recentDiscoveryRows = 4
+	radioTopRows        = 6
+	// radioScan is how deep into the listen-time leaderboard RadioTop reads
+	// to find radio stations behind the listener's own: stations from
+	// config.toml and discoveries can out-listen every radio station.
+	radioScan = 500
+)
+
+// RecentDiscoveries is FIND's list: the last few discovery stations
+// listened to, newest first. A failed read is an empty list, not an error:
+// the bar above it must still open.
+func (b *Bridge) RecentDiscoveries() []DiscoveryRow {
+	rows, err := b.c.RecentDiscoveries(recentDiscoveryRows)
+	if err != nil {
+		return []DiscoveryRow{}
+	}
+	return discoveryRows(rows)
+}
+
+// RadioTop is RADIO's list: the radio stations listened to longest, the
+// listener's own stations and discoveries left out (they have FIND and
+// config.toml). Preset slot and love count come from the saved list, so a
+// row reads like its STATIONS twin. As with RecentDiscoveries, a failed
+// read is an empty list.
+func (b *Bridge) RadioTop() []StationRow {
+	tops, err := b.c.TopListened(radioScan)
+	if err != nil {
+		return []StationRow{}
+	}
+	saved := map[string]core.SavedStation{}
+	if entries, err := b.c.SavedStations(); err == nil {
+		for _, e := range entries {
+			saved[e.UUID] = e
+		}
+	}
+	return radioRows(tops, saved, radioTopRows)
 }
 
 // Taste is the TASTE tab.

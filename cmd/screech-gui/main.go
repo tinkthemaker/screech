@@ -110,9 +110,12 @@ func main() {
 	br.Attach(runner)
 
 	// The window opens at the height the last run left it — the saved
-	// fold state, in logical px Wails scales itself.
+	// fold state, in logical px Wails scales itself — except on a first
+	// launch, which opens the console on FIND: the session's Virgin flag,
+	// read before the runner can clear it by tuning.
+	sh.firstRun = state.Virgin
 	height := stripH
-	if saved := rt.Core.WindowPlacement(); saved.Saved && saved.Unfolded {
+	if startsUnfolded(rt.Core.WindowPlacement(), sh.firstRun) {
 		height = consoleH
 	}
 	sh.unfolded = height == consoleH
