@@ -71,11 +71,12 @@ func (f *fakePlayer) Close() error {
 }
 func (f *fakePlayer) emit(ev player.Event) { f.ch <- ev }
 
-// recWindow records SetUnfolded calls and counts Quit.
+// recWindow records SetUnfolded calls and counts Quit and Rescaled.
 type recWindow struct {
 	mu       sync.Mutex
 	unfolded []bool
 	quits    int
+	rescales int
 }
 
 func (w *recWindow) SetUnfolded(u bool) {
@@ -87,6 +88,11 @@ func (w *recWindow) Quit() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.quits++
+}
+func (w *recWindow) Rescaled() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rescales++
 }
 
 // recEmitter records (event, data) pairs in order.
@@ -364,7 +370,7 @@ func TestBoundSurface(t *testing.T) {
 		"RemoveLoved", "RemoveStation", "ReturnToStation", "Seed",
 		"SetEmitter", "SetUnfolded", "SetVolume", "Sink", "Stations",
 		"StepVolume", "Taste", "TogglePause", "TogglePreset", "TuneSaved",
-		"Wildcard", "Prefs",
+		"Wildcard", "Prefs", "Rescaled",
 	}
 	typ := reflect.TypeOf((*Bridge)(nil))
 	var got []string
@@ -392,6 +398,16 @@ func TestQuitCallsWindow(t *testing.T) {
 	defer win.mu.Unlock()
 	if win.quits != 1 {
 		t.Fatalf("win.Quit calls: %d", win.quits)
+	}
+}
+
+func TestRescaledCallsWindow(t *testing.T) {
+	b, _, _, _, win, _ := testBridge(t, session.Options{})
+	b.Rescaled()
+	win.mu.Lock()
+	defer win.mu.Unlock()
+	if win.rescales != 1 {
+		t.Fatalf("win.Rescaled calls: %d", win.rescales)
 	}
 }
 

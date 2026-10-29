@@ -309,6 +309,19 @@ document.fonts.ready.then(() => {
   refreshScroll(els.track);
 });
 
+// Dragged onto a monitor at another scale, the window is resized by
+// Wails without Go hearing of it, so the shell's outline would keep the
+// old monitor's pixels. The page sees the new devicePixelRatio; a
+// resolution query matches only the ratio it was built for, so each
+// change re-arms one for the next.
+const watchScale = () => {
+  matchMedia(`(resolution: ${devicePixelRatio}dppx)`).addEventListener('change', () => {
+    bridge.Rescaled();
+    watchScale();
+  }, { once: true });
+};
+watchScale();
+
 if (!bridge.fixtureMode && !bridge.missing) {
   // Live text (elapsed clock, retry countdown) and meter animation.
   setInterval(() => { if (snap) render(); }, 1000);

@@ -204,6 +204,39 @@ func TestPlacementOffScreenCentres(t *testing.T) {
 	}
 }
 
+// Dragged onto a monitor at another scale, Wails resizes the window
+// itself (WM_DPICHANGED), leaving the outline clipped at the old size:
+// at 100%→150% that hides a third of the face. Rescaled reshapes it to
+// the window's new size, in place, and saves nothing.
+func TestRescaledReshapesAtNewScale(t *testing.T) {
+	for _, unfolded := range []bool{false, true} {
+		h := 128
+		if unfolded {
+			h = 428
+		}
+		ops := &fakeOps{r: rect{300, 200, 780, 200 + h}, scale: 1}
+		m := fakeMons{areas: []rect{{0, 0, 4800, 2000}}, primary: rect{0, 0, 1920, 1040}}
+		s, saves := testShell(ops, m, core.WindowPlacement{X: 300, Y: 200, Unfolded: unfolded, Saved: true})
+		s.restore()
+
+		// What Wails' WM_DPICHANGED handler does: the suggested rect.
+		ops.scale = 1.5
+		ops.r = rect{2400, 300, 2400 + 720, 300 + round(float64(h)*1.5)}
+		moved := ops.r
+		s.Rescaled()
+
+		if len(ops.regions) != 2 || ops.regions[1] != unfolded {
+			t.Fatalf("unfolded=%v: regions = %v, want a second one for the new scale", unfolded, ops.regions)
+		}
+		if ops.r != moved {
+			t.Fatalf("unfolded=%v: Rescaled moved the window to %+v", unfolded, ops.r)
+		}
+		if len(*saves) != 0 {
+			t.Fatalf("unfolded=%v: Rescaled saved %+v", unfolded, *saves)
+		}
+	}
+}
+
 func TestPlacementRestoredOnScreen(t *testing.T) {
 	// A placement whose top bar is still on a monitor restores as-is,
 	// including the fold height.

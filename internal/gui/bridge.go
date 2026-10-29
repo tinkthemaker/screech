@@ -17,10 +17,12 @@ type Emitter interface {
 	Emit(event string, data any)
 }
 
-// Window is the bit of the shell the bridge drives: fold state and quit.
+// Window is the bit of the shell the bridge drives: fold state, quit,
+// and the outline after a monitor-scale change.
 type Window interface {
 	SetUnfolded(unfolded bool) // resize, keep the strip where it is, persist
 	Quit()
+	Rescaled() // the window crossed to another scale; reshape it in place
 }
 
 // Prefs are the shell's display choices the page can't read on its own —
@@ -231,3 +233,9 @@ func (b *Bridge) SetUnfolded(unfolded bool) {
 // Quit asks the shell to close; the shell's OnBeforeClose stops the
 // runner.
 func (b *Bridge) Quit() { b.win.Quit() }
+
+// Rescaled is the page reporting a devicePixelRatio change: the window
+// moved to a monitor at another scale. The page is the only part that
+// hears it — Wails resizes the window on WM_DPICHANGED without telling
+// Go — so it relays it to the shell, which reshapes the outline.
+func (b *Bridge) Rescaled() { b.win.Rescaled() }

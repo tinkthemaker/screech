@@ -163,7 +163,10 @@ EXIT calls the same bridge quit path as `q`. Station and track text that
 exceeds its row makes one measured pass after a reading pause, then returns
 to the start; reduced motion leaves it still. The frameless HWND gets a
 DPI-scaled window region on restore and each fold change, following the
-LCARS face's 48-px left curves and smaller right caps.
+LCARS face's 48-px left curves and smaller right caps. Dragged onto a
+monitor at another scale, Wails resizes the window on `WM_DPICHANGED`
+without telling Go, so the page watches `devicePixelRatio` and calls
+`Rescaled`, and the shell reshapes the region to the window's new size.
 
 **The bridge contract** (`internal/gui`, which imports neither Wails nor
 `x/sys/windows`, so its tests run on every OS). `gui.Bridge` is the one

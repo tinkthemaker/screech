@@ -47,6 +47,7 @@ function realBridge() {
     RemoveStation: call('RemoveStation'),
     SetUnfolded: call('SetUnfolded'),
     Quit: call('Quit'),
+    Rescaled: call('Rescaled'),
     onSnapshot(fn) { snapSubs.push(fn); },
     onLevel(fn) { lvlSubs.push(fn); },
     now: () => Date.now(),

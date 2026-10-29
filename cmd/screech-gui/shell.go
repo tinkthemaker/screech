@@ -167,6 +167,23 @@ func (s *shell) SetUnfolded(unfolded bool) {
 	s.persist(r.left, top, unfolded)
 }
 
+// Rescaled is the gui.Window face for a monitor-scale change. Wails has
+// already resized the window to the new monitor's suggested rect
+// (WM_DPICHANGED), but the region still has the old monitor's pixels:
+// going up in scale it would hide part of the face. Reshape to whatever
+// the window is now; the place didn't change, so nothing is saved.
+func (s *shell) Rescaled() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ops, ok := s.self()
+	if !ok {
+		return
+	}
+	if r, ok := ops.Rect(); ok {
+		ops.SetRegion(r.width(), r.height(), ops.Scale(), s.unfolded)
+	}
+}
+
 // Quit is the gui.Window face for the page's Q. The Once means a Q at
 // the same moment as a taskbar close still stops the runner once.
 func (s *shell) Quit() {
