@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"time"
 
 	"github.com/tinkthemaker/screech/internal/player"
@@ -36,6 +37,10 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 			s.HaveTrack = false
 			s.LovedTrack = false
 		}
+		// The queue says whether this song's artist is new; a title that
+		// didn't parse as a track has no artist to be new.
+		s.NewToYou = ok && ev.NewToYou
+		s.nameDiscovery(ev.Title)
 		// Auto-hop only on the stream's own break marker — the opt-in
 		// promise is "the title said so", never suspicion alone. The hop
 		// goes through Tune on purpose: a skip during a break earns the
@@ -69,6 +74,7 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 			}
 			s.lockAt = s.Now
 			s.failStreak = nil
+			s.netFails = 0
 			s.Reconnecting = false
 			s.Resuming = false
 			s.lastGood = s.Station
@@ -135,6 +141,30 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 		return s.backendDied(ev.Err)
 	}
 	return s, []Cmd{s.listen()}
+}
+
+// nameDiscovery offers a discovery station's first title as its name. Core
+// decides whether it applies (only a station started from a YouTube link,
+// still named by that link, takes it), so every station's first title is
+// offered once and a later one never is. A rename changes what the strip
+// and the library show, so the pick reason follows the name it was built on.
+func (s *State) nameDiscovery(title string) {
+	if s.named || !s.discovery() || strings.TrimSpace(title) == "" {
+		return
+	}
+	s.named = true
+	old := s.Station.Name
+	if err := s.core.RenameDiscovery(s.Station.UUID, title); err != nil {
+		return // cosmetic: the station keeps the name it had
+	}
+	st, ok := s.core.StationByUUID(s.Station.UUID)
+	if !ok || st.Name == old {
+		return
+	}
+	if s.Reason == s.discoveringReason(old) {
+		s.Reason = s.discoveringReason(st.Name)
+	}
+	s.Station = st
 }
 
 // dropStream handles a live stream that ended or errored underneath us:

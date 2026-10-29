@@ -18,7 +18,13 @@ type stubPlayer struct {
 	restarts int
 	closed   bool
 	playGate chan struct{} // non-nil: Play blocks on it after logging
+
+	nextSongs   int   // NextSong calls, the discovery queue's NEXT
+	songLoves   int   // SongLoved calls
+	nextSongErr error // injected NextSong failure
 }
+
+var _ player.SongQueue = (*stubPlayer)(nil)
 
 func newStubPlayer() *stubPlayer { return &stubPlayer{ch: make(chan player.Event, 8)} }
 func (s *stubPlayer) Play(url string) error {
@@ -114,4 +120,46 @@ func (s *stubPlayer) callsList() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.calls...)
+}
+
+// NextSong and SongLoved make the stub a discovery queue's player: the
+// session only reaches for them on a disc: station, so radio tests never
+// see them.
+func (s *stubPlayer) NextSong() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextSongs++
+	s.calls = append(s.calls, "next-song")
+	return s.nextSongErr
+}
+
+func (s *stubPlayer) SongLoved() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.songLoves++
+	s.calls = append(s.calls, "song-loved")
+}
+
+func (s *stubPlayer) nextSongCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextSongs
+}
+
+func (s *stubPlayer) songLovedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.songLoves
+}
+
+func (s *stubPlayer) failNextSong(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextSongErr = err
+}
+
+func (s *stubPlayer) playCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.playURLs)
 }

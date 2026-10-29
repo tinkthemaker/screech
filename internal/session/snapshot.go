@@ -14,6 +14,8 @@ type Snapshot struct {
 	HaveTrack    bool        `json:"haveTrack"`
 	Loved        bool        `json:"loved"`
 	Suspect      bool        `json:"suspect"`
+	NewToYou     bool        `json:"newToYou"`    // the playing song's artist is new to this listener
+	Discovery    bool        `json:"discovery"`   // the station is a discovery queue, not a radio stream
 	PlayStartMs  int64       `json:"playStartMs"` // unix ms; 0 until the stream locks
 	PausedAtMs   int64       `json:"pausedAtMs"`
 	RetryAtMs    int64       `json:"retryAtMs"` // Offline: when the next retry fires
@@ -62,6 +64,8 @@ func (s State) Snapshot() Snapshot {
 		HaveTrack:    s.HaveTrack,
 		Loved:        s.LovedTrack,
 		Suspect:      s.Suspect,
+		NewToYou:     s.NewToYou,
+		Discovery:    s.discovery(),
 		PlayStartMs:  ms(s.PlayStart),
 		PausedAtMs:   ms(s.PausedAt),
 		RetryAtMs:    ms(s.RetryAt),
