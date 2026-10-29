@@ -148,6 +148,7 @@ type Glyphs struct {
 	Tick     string // preset mark on the band line
 	Knob     string // volume slider thumb
 	Pointer  string // active row in browsable lists
+	Prompt   string // chevron on the FIND and RADIO bar
 	Times    string // play-count multiplier ("heard 3×")
 	Seam     string // gutter between the two faceplate bays
 	FrameTL  string
@@ -171,6 +172,7 @@ var unicodeGlyphs = Glyphs{
 	Tick:     "┴",
 	Knob:     "●",
 	Pointer:  "›",
+	Prompt:   "▸",
 	Times:    "×",
 	Seam:     "│",
 	FrameTL:  "╭",
@@ -194,6 +196,7 @@ var asciiGlyphs = Glyphs{
 	Tick:     "+",
 	Knob:     "O",
 	Pointer:  ">",
+	Prompt:   ">",
 	Times:    "x",
 	Seam:     ":",
 	FrameTL:  "+",

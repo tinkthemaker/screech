@@ -218,8 +218,10 @@ func TestFindPromptListsRecentDiscoveries(t *testing.T) {
 		t.Fatalf("recent list should run newest first:\n%s", view)
 	}
 
-	// The first row is selected on open; down moves to the second, and
-	// enter resumes that station through the engine's TuneTo.
+	// No row is selected on open; the first down selects the newest, the
+	// second the one after it, and enter resumes that station through the
+	// engine's TuneTo.
+	m = pressKey(t, m, tea.KeyDown)
 	m = pressKey(t, m, tea.KeyDown)
 	m = pressKey(t, m, tea.KeyEnter)
 	if m.prompt {
@@ -234,12 +236,75 @@ func TestFindPromptListsRecentDiscoveries(t *testing.T) {
 	}
 }
 
-func TestFindEnterResumesTheNewestByDefault(t *testing.T) {
+// The window and the README agree: nothing in the list is selected until the
+// down arrow is pressed, so an Enter on a bar the listener never typed in is
+// not a decision to resume anything.
+func TestFindEnterWithNoSelectionJustCloses(t *testing.T) {
 	m := withDiscoveries(t, findModel(t, 80, 24))
 	m = pressRune(t, m, '/')
+	if m.findPos >= 0 {
+		t.Fatalf("a freshly opened list has a selection, pos=%d", m.findPos)
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "pick up where you left off") || !strings.Contains(view, "jazz piano") {
+		t.Fatalf("the list should still be drawn:\n%s", view)
+	}
+	if strings.Contains(view, m.th.G.Pointer+" jazz piano") {
+		t.Fatalf("a row is drawn selected before any arrow:\n%s", view)
+	}
+	m = pressKey(t, m, tea.KeyEnter)
+	if m.prompt || m.s.HaveStation {
+		t.Fatalf("enter with nothing selected just closes: prompt=%v station=%q", m.prompt, m.s.Station.UUID)
+	}
+}
+
+func TestFindDownThenEnterResumesTheNewest(t *testing.T) {
+	m := withDiscoveries(t, findModel(t, 80, 24))
+	m = pressRune(t, m, '/')
+	m = pressKey(t, m, tea.KeyDown)
+	if view := stripANSI(m.View()); !strings.Contains(view, m.th.G.Pointer+" jazz piano") {
+		t.Fatalf("the first down should select the newest:\n%s", view)
+	}
 	m = pressKey(t, m, tea.KeyEnter)
 	if want := core.DiscoveryUUID("jazz piano"); m.s.Station.UUID != want {
-		t.Fatalf("enter on the open list resumes the newest, want %s got %q", want, m.s.Station.UUID)
+		t.Fatalf("down then enter resumes the newest, want %s got %q", want, m.s.Station.UUID)
+	}
+}
+
+// Up before any down has nothing to leave: it must not select a row either.
+func TestFindUpWithNoSelectionSelectsNothing(t *testing.T) {
+	m := withDiscoveries(t, findModel(t, 80, 24))
+	m = pressRune(t, m, '/')
+	m = pressKey(t, m, tea.KeyUp)
+	if m.findPos >= 0 {
+		t.Fatalf("up selected a row, pos=%d", m.findPos)
+	}
+}
+
+// The bar's chevron is the theme's: a triangle, and in ascii mode the 7-bit
+// stand-in.
+func TestFindBarUsesThePromptGlyph(t *testing.T) {
+	m := findModel(t, 80, 24)
+	m = pressRune(t, m, '/')
+	if view := stripANSI(m.View()); !strings.Contains(view, "FIND  "+m.th.G.Prompt) || m.th.G.Prompt != "▸" {
+		t.Fatalf("the FIND bar lacks its chevron %q:\n%s", m.th.G.Prompt, view)
+	}
+	m = pressKey(t, m, tea.KeyTab)
+	if view := stripANSI(m.View()); !strings.Contains(view, "RADIO "+m.th.G.Prompt) {
+		t.Fatalf("the RADIO bar lacks its chevron:\n%s", view)
+	}
+
+	a := findModel(t, 80, 24)
+	a.th = NewTheme("#FFB000", true)
+	a = pressRune(t, a, '/')
+	view := stripANSI(a.View())
+	if !strings.Contains(view, "FIND  >") || strings.Contains(view, "▸") {
+		t.Fatalf("ascii mode should read FIND  > with no triangle:\n%s", view)
+	}
+	for _, r := range view {
+		if r > 0x7f {
+			t.Fatalf("ascii mode leaked %q into the FIND sheet:\n%s", r, view)
+		}
 	}
 }
 
@@ -280,8 +345,8 @@ func TestFindRecentsLeaveWhenTyping(t *testing.T) {
 	if view := stripANSI(m.View()); !strings.Contains(view, "pick up where you left off") {
 		t.Fatalf("emptying the bar brings the list back:\n%s", view)
 	}
-	if m.findPos != 0 {
-		t.Fatalf("the selection starts over, pos=%d", m.findPos)
+	if m.findPos != noFindRow {
+		t.Fatalf("the selection starts over with nothing selected, pos=%d", m.findPos)
 	}
 }
 

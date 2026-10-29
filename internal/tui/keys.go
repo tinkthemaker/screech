@@ -143,13 +143,15 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyDown, tea.KeyUp:
 		// Arrows walk the recent list; with no list on screen they have
-		// nothing to move.
+		// nothing to move. Down from no selection lands on the newest; up
+		// from none stays on none, and up from the first row stays there.
 		if n := m.findShown(); n > 0 {
-			step := 1
-			if msg.Type == tea.KeyUp {
-				step = -1
+			switch {
+			case msg.Type == tea.KeyDown:
+				m.findPos = minI(m.findPos+1, n-1)
+			case m.findPos >= 0:
+				m.findPos = maxI(m.findPos-1, 0)
 			}
-			m.findPos = minI(maxI(m.findPos+step, 0), n-1)
 		}
 		return m, nil
 
@@ -158,8 +160,8 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.buf = m.buf[:len(m.buf)-1]
 		}
 		if len(m.buf) == 0 {
-			// The list is back; it starts over at the newest.
-			m.findPos = 0
+			// The list is back; it starts over, with nothing selected.
+			m.findPos = noFindRow
 		}
 		return m, nil
 

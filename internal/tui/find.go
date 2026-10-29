@@ -38,6 +38,9 @@ const (
 	// findListOverhead is the rows the list costs beyond its entries: the
 	// gap above it and its label.
 	findListOverhead = 2
+	// noFindRow is findPos while no recent row is selected, which is how the
+	// list opens: the first down arrow selects the newest, as in the window.
+	noFindRow = -1
 )
 
 const (
@@ -54,7 +57,7 @@ func (m *Model) openFind() {
 	m.buf = nil
 	m.promptMode = findMode
 	m.finds = m.recentDiscoveries()
-	m.findPos = 0
+	m.findPos = noFindRow
 }
 
 // closePrompt puts the prompt away and forgets its state.
@@ -62,7 +65,7 @@ func (m *Model) closePrompt() {
 	m.prompt = false
 	m.buf = nil
 	m.finds = nil
-	m.findPos = 0
+	m.findPos = noFindRow
 }
 
 // recentDiscoveries reads the discovery stations worth picking up. The one
@@ -110,7 +113,7 @@ func (m *Model) switchPromptMode() {
 	if lim := m.queryLimit(); len(m.buf) > lim {
 		m.buf = m.buf[:lim]
 	}
-	m.findPos = 0
+	m.findPos = noFindRow
 }
 
 // findListRows is how many recent rows the sheet has room for in budget
@@ -168,7 +171,7 @@ func (m Model) findBar(iw int) string {
 		label, placeholder = "RADIO", radioPlaceholder
 	}
 	head := m.th.Accent.Bold(true).Render(runewidth.FillRight(label, findLabelW)) +
-		" " + m.th.Accent.Render(">") + " "
+		" " + m.th.Accent.Render(m.th.G.Prompt) + " "
 	cur := m.cursorGlyph()
 	room := maxI(0, iw-findLabelW-3)
 	if len(m.buf) == 0 {
@@ -213,18 +216,20 @@ func (m Model) findRecentRows(iw, n int) []string {
 }
 
 // findSelected is the recent row under the selection, if the list is on
-// screen.
+// screen and an arrow has selected one. Enter on a bar nobody typed in, with
+// nothing selected, picks nothing: it only closes.
 func (m Model) findSelected() (core.DiscoveryRow, bool) {
 	n := m.findShown()
-	if n == 0 {
+	if n == 0 || m.findPos < 0 {
 		return core.DiscoveryRow{}, false
 	}
-	return m.finds[minI(maxI(m.findPos, 0), n-1)], true
+	return m.finds[minI(m.findPos, n-1)], true
 }
 
 // submitPrompt is Enter: it closes the prompt and sends the listener's
 // intent. With text in the bar that is a discovery (FIND) or a radio search
-// (RADIO); with an empty bar over a visible list it is the selected row.
+// (RADIO); with an empty bar over a visible list it is the selected row, and
+// with no row selected it is nothing.
 func (m Model) submitPrompt() (Model, []session.Msg) {
 	q := strings.TrimSpace(string(m.buf))
 	row, picked := m.findSelected()
