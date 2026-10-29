@@ -112,6 +112,14 @@ const (
 	// tune's 8 s gives it 2 s). Its tag walk is up to four requests and a
 	// host that hangs would otherwise take the whole first-song budget.
 	bcShare = 4
+
+	// A station's very first ask, with no Bandcamp tag settled, gives
+	// Bandcamp one probe (the first tag, "new") and this long, whatever the
+	// caller's deadline; then YouTube has the rest. A genre phrase starts in
+	// a moment this way, and an artist's name costs a fast empty answer, not
+	// a walk. Every yt-dlp process takes seconds, so YouTube cannot afford
+	// the first song's budget to be spent anywhere else.
+	bcFirstTry = 2 * time.Second
 )
 
 // errBCSlow is the cause of the sub-deadline Bandcamp runs under, so bcFetch
@@ -154,6 +162,8 @@ type Queue struct {
 	rng   *rand.Rand
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) error // waits out the Bandcamp gap; tests replace it
+
+	bcFirst time.Duration // how long a first ask gives Bandcamp; tests shorten it
 
 	// The queue is safe for concurrent use, and its two halves are guarded
 	// separately so that no lock is ever held across a lookup.
@@ -220,6 +230,7 @@ func NewQueue(seed string, yt YouTube, bc Bandcamp, known Known, rng *rand.Rand,
 		rng:     rng,
 		now:     now,
 		sleep:   sleepCtx,
+		bcFirst: bcFirstTry,
 		base:    anchorStart,
 		slot:    make(chan struct{}, 1),
 		bcCache: map[string]bcEntry{},
@@ -328,13 +339,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 
 // ytLeads reports whether YouTube is asked before Bandcamp for this kind of
 // song. The two take turns, so a station is about half and half, and Bandcamp
-// starts: it needs no yt-dlp, so with a tag settled it answers from a cache
-// read. Two cases put YouTube first.
-//
-// Until Bandcamp has a tag, its answer is a walk of up to four requests, and
-// the first song of a station has 8 s in all: nothing has played yet and
-// nothing is cached, so YouTube leads, as the spec says ("Bandcamp first when
-// it has a cached tag result, YouTube otherwise"). And a Bandcamp that failed
+// starts: it needs no yt-dlp, so it answers fastest. A Bandcamp that failed
 // stays behind YouTube until its gap has passed; inside the gap it would only
 // hand back its old failure.
 func (q *Queue) ytLeads(k int) bool {
@@ -344,20 +349,33 @@ func (q *Queue) ytLeads(k int) bool {
 	if q.yt == nil || q.bc == nil {
 		return false
 	}
-	if len(q.recent) == 0 && q.bcTag == "" {
-		return true
-	}
 	return q.bcErr != nil && q.now().Sub(q.bcLast) < bcGap
 }
 
-// bcContext is the context Bandcamp is asked under: the caller's, narrowed to
-// a share of what is left when YouTube is waiting behind it.
-func (q *Queue) bcContext(ctx context.Context, fallback bool) (context.Context, context.CancelFunc) {
+// firstAsk reports whether this is a station's very first lookup with no
+// Bandcamp tag settled and a YouTube to fall back on: the one ask that gets
+// Bandcamp's short first try instead of its tag walk.
+func (q *Queue) firstAsk() bool {
+	return q.yt != nil && q.bc != nil && len(q.recent) == 0 && q.bcTag == "" && !q.bcOut
+}
+
+// bcContext is the context Bandcamp is asked under. A first try gets bcFirst,
+// or a quarter of what the caller has left if that is less, deadline or not.
+// Otherwise it is the caller's, narrowed to a share of what is left when
+// YouTube is waiting behind it.
+func (q *Queue) bcContext(ctx context.Context, first, fallback bool) (context.Context, context.CancelFunc) {
 	dl, ok := ctx.Deadline()
-	if !ok || !fallback {
-		return ctx, func() {}
+	switch {
+	case first:
+		d := q.bcFirst
+		if ok {
+			d = min(d, time.Until(dl)/bcShare)
+		}
+		return context.WithTimeoutCause(ctx, d, errBCSlow)
+	case ok && fallback:
+		return context.WithTimeoutCause(ctx, time.Until(dl)/bcShare, errBCSlow)
 	}
-	return context.WithTimeoutCause(ctx, time.Until(dl)/bcShare, errBCSlow)
+	return ctx, func() {}
 }
 
 // pick tries the sources in turn for one kind of song; see ytLeads for who
@@ -381,11 +399,17 @@ func (q *Queue) pick(ctx context.Context, anchor bool, r *run) (Song, bool) {
 			err error
 		)
 		if src == srcBC {
-			// Ahead of a YouTube that has not been tried, Bandcamp gets only
-			// its share of the time; last, it gets what is left.
-			bctx, stop := q.bcContext(ctx, i == 0 && q.yt != nil && !r.down[srcYT])
-			s, ok, err = q.pickBC(bctx, anchor)
+			// The station's first ask gives Bandcamp one short try, which if
+			// it comes to nothing is spent for this Next. Later, ahead of a
+			// YouTube that has not been tried, Bandcamp gets only its share
+			// of the time; last, it gets what is left.
+			first := i == 0 && q.firstAsk()
+			bctx, stop := q.bcContext(ctx, first, i == 0 && q.yt != nil && !r.down[srcYT])
+			s, ok, err = q.pickBC(bctx, anchor, first)
 			stop()
+			if first && !ok {
+				r.down[srcBC] = true
+			}
 		} else {
 			s, ok, err = q.pickYT(ctx, anchor, r)
 		}

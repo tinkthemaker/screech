@@ -254,12 +254,17 @@ func (q *Queue) bcFetch(ctx context.Context, tag, slice string, free bool) ([]BC
 // bcTagFor settles which tag this station uses on Bandcamp: the first of its
 // probes that has anything under "new". If none does, Bandcamp sits out for
 // the life of the station. A failed request settles nothing and is retried
-// on a later call.
-func (q *Queue) bcTagFor(ctx context.Context) (string, error) {
+// on a later call. At most probes tags are tried this call (the walk goes on
+// from where it stopped on the next one), so a caller who is waiting can ask
+// for one.
+func (q *Queue) bcTagFor(ctx context.Context, probes int) (string, error) {
 	free := false
-	for q.bcTag == "" && !q.bcOut {
+	for tried := 0; q.bcTag == "" && !q.bcOut; tried++ {
 		if q.bcNext >= len(q.bcProbes) || q.bcNext >= bcProbeCap {
 			q.bcOut = true
+			break
+		}
+		if tried >= probes {
 			break
 		}
 		p := q.bcProbes[q.bcNext]
@@ -285,11 +290,19 @@ func (q *Queue) bcTagFor(ctx context.Context) (string, error) {
 // pickBC chooses a Bandcamp track. Anchors come from the tag's top sellers;
 // discoveries from its newest releases and a shuffle. Its items are already
 // playable, so nothing is resolved.
-func (q *Queue) pickBC(ctx context.Context, anchor bool) (Song, bool, error) {
+//
+// A first try is a station's first ask: one tag probe, and only the newest
+// releases, which that probe has just fetched. Whatever kind of song was
+// rolled, a track it finds is a discovery, because the point is to start.
+func (q *Queue) pickBC(ctx context.Context, anchor, first bool) (Song, bool, error) {
 	if q.bc == nil {
 		return Song{}, false, nil
 	}
-	tag, err := q.bcTagFor(ctx)
+	probes := bcProbeCap
+	if first {
+		probes, anchor = 1, false
+	}
+	tag, err := q.bcTagFor(ctx, probes)
 	if err != nil {
 		return Song{}, false, err
 	}
@@ -297,7 +310,10 @@ func (q *Queue) pickBC(ctx context.Context, anchor bool) (Song, bool, error) {
 		return Song{}, false, nil
 	}
 	slices := []string{"new", "rand"}
-	if anchor {
+	switch {
+	case first:
+		slices = []string{"new"}
+	case anchor:
 		slices = []string{"top"}
 	}
 

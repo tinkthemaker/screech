@@ -331,11 +331,16 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   `loadfile ... replace -1 force-media-title=%n%...` path that page links use) and
   emits a title event, and it never emits `EventStreamEnded` between songs, so
   a song change is never read as a dropped stream. The first song must play
-  inside the tune watchdog's 12 s, so its lookups are capped at 8 s in total:
-  Bandcamp first when it has a cached tag result, since that needs no yt-dlp,
-  and YouTube otherwise. A Bandcamp tried ahead of a YouTube that is waiting
-  behind it gets a quarter of the time left, and a hang counts as a failure
-  its 10 s gap holds back, so it costs one wait, not one per ask. Background
+  inside the tune watchdog's 12 s, so its lookups are capped at 8 s in total.
+  Bandcamp gets a first try of at most 2 s, since it needs no yt-dlp: when no
+  tag is settled yet it is one tag probe (the first tag, slice `new`), and
+  with a tag settled the usual cache read. If it serves a song, that is the
+  first song; otherwise YouTube gets the rest of the budget. Later, a Bandcamp
+  tried ahead of a YouTube that is waiting behind it gets a quarter of the
+  time left. Either way a hang counts as a failure its 10 s gap holds back, so
+  it costs one wait, not one per ask, and an artist phrase (no Bandcamp tag)
+  still reaches YouTube. The budget stays 8 s: that leaves mpv 4 s to lock
+  before the watchdog, which strikes, where a late lookup does not. Background
   prefetch calls get up to 20 s each. A prefetched media URL older than 1 h is
   resolved again before it loads. A first song that can't be found fails
   `Play` (`ErrResolve`), which the session reads as `PlayFailed`. Once a song
@@ -346,8 +351,10 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   station: network trouble is not a bad station. A network failure that the
   prefetch reported more than 5 s before its song ended is asked about once
   more before it ends the walk, since a song can play for minutes after the
-  network goes. A lookup that merely ran out of time is a failed song or tune,
-  not an outage, unless a source marked it `ErrNetwork`. The strip clock counts
+  network goes. A lookup that merely ran out of time is a failed song, not an
+  outage, unless a source marked it `ErrNetwork`; the one exception is a
+  tune's first lookup, where a timeout can't tell a slow network from a bad
+  seed, so it takes the no-strike road as network trouble does. The strip clock counts
   the station, not the song.
 - Personal `mpv.conf` still applies (audio device, exclusive mode — the
   parts worth keeping), but options that break live radio are pinned at
@@ -502,7 +509,9 @@ station carries on with the other.
 - **Pacing:** at most one Bandcamp request per 10 s per station, with a
   `screech/<version>` User-Agent. The one exception is the walk down the tags
   at the start of a station: after an empty answer the next tag is the same
-  question, so up to 4 probes go out back to back, once. Results are cached
+  question, so up to 4 probes go out back to back, once. A station's first ask
+  makes only the first probe, so nobody waits on the walk; it goes on at the
+  next ask that is Bandcamp's turn. Results are cached
   for 30 min. A request times out after 4 s, well inside the first song's 8.
 
 **New to you.** A discovery whose artist key appears in neither `tracks_heard`

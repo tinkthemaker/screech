@@ -958,3 +958,127 @@ func TestQueueLovedSkipsAnchors(t *testing.T) {
 		t.Fatalf("loving a find reached the source %d times, want 1", loved)
 	}
 }
+
+// The first lookup of a tune that runs out of its budget cannot tell a slow
+// network from a bad seed, and it must not strike a station that may be
+// perfectly good: it is transient, the session's no-strike road.
+func TestQueueFirstLookupDeadlineIsTransient(t *testing.T) {
+	for name, err := range map[string]error{
+		"wrapped":     fmt.Errorf("discover: %w", context.DeadlineExceeded),
+		"joined":      fmt.Errorf("discover: %w", errors.Join(errors.New("yt-dlp: Video unavailable"), context.DeadlineExceeded)),
+		"with a mark": fmt.Errorf("discover: %w: %w", ErrSourceNetwork, context.DeadlineExceeded),
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := &scriptSource{errs: map[int]error{0: err}}
+			m, logPath, _ := startQueueMPV(t, src)
+			got := m.Play("discover:x")
+			if !errors.Is(got, ErrSourceNetwork) {
+				t.Fatalf("Play = %v, want it to wrap ErrSourceNetwork (no strike)", got)
+			}
+			if errors.Is(got, ErrResolve) {
+				t.Fatalf("Play = %v: a first-lookup timeout must not read as ErrResolve, which strikes the station", got)
+			}
+			if !errors.Is(got, context.DeadlineExceeded) {
+				t.Errorf("Play = %v: the deadline should stay reachable for the log", got)
+			}
+			waitForLog(t, logPath, `"stop"`)
+			time.Sleep(100 * time.Millisecond)
+			if strings.Contains(logText(t, logPath), "loadfile") {
+				t.Fatal("nothing may load when the lookup failed")
+			}
+		})
+	}
+
+	// A source that lets the budget run out and then answers in words of its
+	// own is still a timeout: the clock, not the answer, is what happened.
+	t.Run("the budget really ran out", func(t *testing.T) {
+		old := firstSongWait
+		firstSongWait = 150 * time.Millisecond
+		t.Cleanup(func() { firstSongWait = old })
+		gate := make(chan struct{}) // never opened
+		src := &slowFailSource{gate: gate, err: errors.New("lookup abandoned")}
+		m, _ := startFakeMPV(t, "default")
+		m.SetSongSources(func(string) (SongSource, error) { return src, nil })
+		got := m.Play("discover:x")
+		if !errors.Is(got, ErrSourceNetwork) || errors.Is(got, ErrResolve) {
+			t.Fatalf("Play = %v, want ErrSourceNetwork and not ErrResolve", got)
+		}
+	})
+
+	// Only a deadline is let off. A source that simply has no songs, or
+	// failed in its own words, is still a station's fault.
+	src := &scriptSource{errs: map[int]error{0: errors.New("discover: no source has songs for this seed")}}
+	m, _, _ := startQueueMPV(t, src)
+	if got := m.Play("discover:x"); !errors.Is(got, ErrResolve) || errors.Is(got, ErrSourceNetwork) {
+		t.Fatalf("Play = %v, want ErrResolve only", got)
+	}
+}
+
+// After the first song a lookup that times out is a song that didn't come:
+// skipped like one, three in a row end the station, and none of it is an
+// outage.
+func TestQueuePrefetchDeadlineIsAFailedSong(t *testing.T) {
+	deadline := fmt.Errorf("discover: %w", context.DeadlineExceeded)
+
+	t.Run("one is skipped", func(t *testing.T) {
+		songs := []Song{song("one", "ok"), song("unused", "ok"), song("two", "ok")}
+		src := &scriptSource{songs: songs, errs: map[int]error{1: deadline}}
+		m, logPath, _ := startQueueMPV(t, src)
+		rec := record(m)
+		if err := m.Play("discover:x"); err != nil {
+			t.Fatal(err)
+		}
+		rec.waitTitle(t, titleOf(songs[0]))
+		endFile(t, m, "end-eof")
+		waitForLog(t, logPath, loadLine(songs[2]))
+		settle()
+		if n := rec.count(EventStreamError); n != 0 {
+			t.Fatalf("%d EventStreamError for one song that timed out, want none", n)
+		}
+		if n := src.nextCalls(); n < 3 {
+			t.Errorf("the source was asked %d times, want the timed-out lookup to be followed by another", n)
+		}
+	})
+
+	t.Run("three in a row end the station without an outage", func(t *testing.T) {
+		src := &scriptSource{
+			songs: []Song{song("one", "ok")},
+			errs:  map[int]error{1: deadline, 2: deadline, 3: deadline},
+		}
+		m, logPath, _ := startQueueMPV(t, src)
+		rec := record(m)
+		if err := m.Play("discover:x"); err != nil {
+			t.Fatal(err)
+		}
+		rec.waitTitle(t, titleOf(src.songs[0]))
+		endFile(t, m, "end-eof")
+		ev := rec.waitFor(t, "EventStreamError", func(ev Event) bool { return ev.Type == EventStreamError })
+		if errors.Is(ev.Err, ErrSourceNetwork) {
+			t.Fatalf("a run of timed-out songs was reported as network trouble: %v", ev.Err)
+		}
+		settle()
+		if n := rec.count(EventStreamError); n != 1 {
+			t.Fatalf("%d EventStreamError, want exactly one", n)
+		}
+		if n := countLoads(t, logPath); n != 1 {
+			t.Fatalf("%d loadfiles, want only the first song", n)
+		}
+	})
+}
+
+// slowFailSource waits for its context to end and then fails in its own
+// words, wrapping nothing: a lookup abandoned at the deadline.
+type slowFailSource struct {
+	gate chan struct{}
+	err  error
+}
+
+func (s *slowFailSource) Next(ctx context.Context) (Song, error) {
+	select {
+	case <-s.gate:
+	case <-ctx.Done():
+	}
+	return Song{}, s.err
+}
+func (s *slowFailSource) Skipped(bool) {}
+func (s *slowFailSource) Loved()       {}

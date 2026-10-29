@@ -236,13 +236,20 @@ in a row.
   `loadfile … replace -1 force-media-title=%n%…` path). It emits a title
   event, and never `EventStreamEnded`, between songs.
 - **First-song budget.** The first song must play inside the tune
-  watchdog's 12 s. Its lookups are capped at 8 s in total: Bandcamp first
-  when it has a cached tag result, since that needs no yt-dlp, and YouTube
-  otherwise. Background prefetch calls get up to 20 s each.
+  watchdog's 12 s. Its lookups are capped at 8 s in total. Bandcamp gets a
+  first try of at most 2 s, since it needs no yt-dlp: when no tag is settled
+  yet that is one tag probe (the first tag, slice `new`); with a tag already
+  settled it is the usual cache read. If it serves a song, that is the first
+  song; otherwise YouTube gets the rest of the budget (ruling R21: "Bandcamp
+  gets a <=2 s first try, then YouTube"). A hanging Bandcamp can never take
+  more than that, and an artist phrase, which is no Bandcamp tag, still
+  reaches YouTube. Background prefetch calls get up to 20 s each.
 - **Failures.** A song that won't resolve or play is skipped. Three in a
   row raise `PlayFailed`, so the existing strike-and-move-on path runs. A
   lookup that fails because the network is down takes the existing offline
-  path and never strikes.
+  path and never strikes. So does a first lookup that runs out of its 8 s: on
+  the first lookup a timeout can't tell a slow network from a bad seed. A
+  later lookup that times out is only a skipped song.
 - **Expiry.** A prefetched media URL older than 1 h is resolved again
   before it loads.
 - **The strip clock** counts the station, not the song.

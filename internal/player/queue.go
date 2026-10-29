@@ -66,7 +66,9 @@ var _ SongQueue = (*MPV)(nil)
 const (
 	// firstSongBudget bounds the lookups behind the first song. The tune
 	// watchdog gives a station 12 s from the pick to lock; this leaves mpv
-	// the rest.
+	// the rest. Kept at 8 s: a late lookup is transient (see playQueue) but
+	// a late lock is a strike, and 9 s would leave exactly 3 s with nothing
+	// for the gap between the pick and the lookup or a slow media host.
 	firstSongBudget = 8 * time.Second
 	// prefetchBudget is for the lookup of the song after the current one.
 	// Nobody is waiting on it, so yt-dlp may take its time.
@@ -85,6 +87,10 @@ const (
 	// when it ends, minutes later; an outage verdict that old is asked again.
 	oldNetworkError = 5 * time.Second
 )
+
+// firstSongWait is the budget playQueue applies; a variable only so a test can
+// make the wait short.
+var firstSongWait = firstSongBudget
 
 var (
 	errNoQueue    = errors.New("player: no discovery station is playing")
@@ -172,8 +178,10 @@ func (m *MPV) playQueue(seed string) error {
 	_ = m.sendLocked("stop")
 	m.mu.Unlock()
 
-	lookup, stop := context.WithTimeout(q.ctx, firstSongBudget)
+	lookup, stop := context.WithTimeout(q.ctx, firstSongWait)
 	first, err := src.Next(lookup)
+	// Read before stop() cancels it: did the budget run out?
+	ranOut := errors.Is(lookup.Err(), context.DeadlineExceeded)
 	stop()
 
 	m.mu.Lock()
@@ -186,6 +194,14 @@ func (m *MPV) playQueue(seed string) error {
 	}
 	if err == nil && !validStreamURL(first.URL) {
 		err = errBadSongURL
+	}
+	if err != nil && (ranOut || errors.Is(err, context.DeadlineExceeded)) && !errors.Is(err, ErrSourceNetwork) {
+		// A first lookup that ran out of its budget cannot tell a slow
+		// network from a bad seed, so it must not strike a station that may
+		// be perfectly good: it is transient, the session's no-strike road.
+		// Later lookups are different: a song that timed out is a skipped
+		// song (lookupFailedLocked), and three in a row are a verdict.
+		err = fmt.Errorf("%w: no song within %v: %w", ErrSourceNetwork, firstSongWait, err)
 	}
 	if err != nil {
 		m.dropQueueLocked()

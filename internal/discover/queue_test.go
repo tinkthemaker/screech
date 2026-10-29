@@ -1734,16 +1734,43 @@ func (h *hangBC) log() []string {
 	return append([]string(nil), h.calls...)
 }
 
-// An artist's name is not a Bandcamp tag, and finding that out is a walk of
-// requests. The first song of a station whose Bandcamp has no tag settled
-// comes from YouTube without asking Bandcamp first, so the walk is never
-// inside the 8 s a tune has.
-func TestQueueFirstSongGoesToYouTubeWhileBandcampHasNoTag(t *testing.T) {
+// A station's first ask gives Bandcamp a short first try when no tag is
+// settled: one tag probe, the "new" slice, and a few seconds at most. If it
+// serves a song that is the first song, and it is fast: a genre phrase starts
+// in a moment, with no yt-dlp process at all. This holds whichever kind of
+// song the roll asked for, since the point is to start.
+func TestQueueFirstAskServesFromBandcampWhenItsFirstProbeAnswers(t *testing.T) {
+	for _, seed := range []int64{1, 2, 3, 4, 5, 6, 7, 8} {
+		bc := plentifulBC()
+		yt := plentifulYT()
+		clk := newClock()
+		q := NewQueue("swedish death metal", yt, bc, nil, rand.New(rand.NewSource(seed)), clk.Now)
+
+		s, err := q.Next(context.Background())
+		if err != nil {
+			t.Fatalf("seed %d: Next: %v", seed, err)
+		}
+		if !strings.HasPrefix(s.Key, "bc:") || s.Anchor {
+			t.Errorf("seed %d: first song = %+v, want a Bandcamp discovery", seed, s)
+		}
+		if calls := bc.log(); len(calls) != 1 || calls[0] != "swedish-death-metal|new" {
+			t.Errorf("seed %d: Bandcamp was asked %v, want the one probe", seed, calls)
+		}
+		if songsLog, mixLog, resolveLog := yt.logs(); len(songsLog)+len(mixLog)+len(resolveLog) != 0 {
+			t.Errorf("seed %d: yt-dlp ran for a song Bandcamp had: %v %v %v", seed, songsLog, mixLog, resolveLog)
+		}
+	}
+}
+
+// An artist's name is not a Bandcamp tag. Finding that out costs one probe,
+// not a walk, and then YouTube has the rest of the 8 s. The walk goes on
+// later, from the second ask, when nobody is waiting on it.
+func TestQueueFirstAskTriesBandcampOnceThenYouTube(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	bc := &fakeBC{} // answers empty for every tag: "chelsea-wolfe", then "wolfe"
 	yt := plentifulYT()
-	q, _ := newTestQueue("chelsea wolfe", yt, bc, nil)
+	q, clk := newTestQueue("chelsea wolfe", yt, bc, nil)
 
 	s, err := q.Next(ctx)
 	if err != nil {
@@ -1752,18 +1779,39 @@ func TestQueueFirstSongGoesToYouTubeWhileBandcampHasNoTag(t *testing.T) {
 	if !strings.HasPrefix(s.Key, "yt:") {
 		t.Errorf("first song = %+v, want one from YouTube", s)
 	}
-	if calls := bc.log(); len(calls) != 0 {
-		t.Errorf("the first ask walked Bandcamp's tags (%v) before it had a song", calls)
+	if calls := bc.log(); len(calls) != 1 || calls[0] != "chelsea-wolfe|new" {
+		t.Errorf("the first ask made Bandcamp requests %v, want the one probe and slice", calls)
 	}
 	songsLog, _, resolveLog := yt.logs()
 	if len(songsLog) == 0 || len(resolveLog) == 0 {
 		t.Errorf("YouTube was not asked: searches %v, resolves %v", songsLog, resolveLog)
 	}
+
+	// The walk picks up where it stopped, once the gap has passed.
+	clk.Advance(15 * time.Second)
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if calls := bc.log(); len(calls) != 2 || calls[1] != "wolfe|new" {
+		t.Errorf("Bandcamp requests = %v, want the walk to go on with wolfe", calls)
+	}
 }
 
-// A Bandcamp that has a tag settled still goes first: its answer is a cache
-// read, and the spec's rule is "Bandcamp first when it has a cached tag
-// result".
+// One probe, whatever the phrase: four words are four tags, and only the
+// first is tried while the caller waits.
+func TestQueueFirstAskProbesOnlyTheFirstTag(t *testing.T) {
+	bc := &fakeBC{}
+	q, _ := newTestQueue("atmospheric black metal band", plentifulYT(), bc, nil)
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls := bc.log(); len(calls) != 1 || calls[0] != "atmospheric-black-metal-band|new" {
+		t.Errorf("Bandcamp requests = %v, want only the full phrase", calls)
+	}
+}
+
+// A Bandcamp that has a tag settled still goes first on the first ask: its
+// answer is a cache read, with no first-try limit to speak of.
 func TestQueueFirstSongKeepsBandcampFirstOnceItsTagIsSettled(t *testing.T) {
 	bc := plentifulBC()
 	q, _ := newTestQueue("death metal", plentifulYT(), bc, nil)
@@ -1771,7 +1819,7 @@ func TestQueueFirstSongKeepsBandcampFirstOnceItsTagIsSettled(t *testing.T) {
 	if err := q.prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if tag, err := q.bcTagFor(context.Background()); err != nil || tag != "death-metal" {
+	if tag, err := q.bcTagFor(context.Background(), bcProbeCap); err != nil || tag != "death-metal" {
 		t.Fatalf("bcTagFor = %q, %v", tag, err)
 	}
 	s, err := q.Next(context.Background())
@@ -1783,53 +1831,82 @@ func TestQueueFirstSongKeepsBandcampFirstOnceItsTagIsSettled(t *testing.T) {
 	}
 }
 
-// A Bandcamp that hangs takes a quarter of what the caller has left and then
-// YouTube answers; and once it has hung, the next ask does not wait on it
-// again while it is still inside its gap.
+// A Bandcamp that hangs on the first ask costs its first try and no more,
+// even when the caller gave no deadline of its own; YouTube answers, and
+// once Bandcamp has hung, the next ask does not wait on it again while it is
+// inside its gap.
 func TestQueueHangingBandcampDoesNotEatTheBudget(t *testing.T) {
 	bc := &hangBC{}
 	q, clk := newTestQueue("swedish death metal", plentifulYT(), bc, nil)
+	q.bcFirst = 100 * time.Millisecond
 
-	// The first ask goes to YouTube by itself and never touches Bandcamp.
-	if _, err := q.Next(context.Background()); err != nil {
-		t.Fatalf("first Next: %v", err)
-	}
-	if calls := bc.log(); len(calls) != 0 {
-		t.Fatalf("Bandcamp was asked on the first ask: %v", calls)
-	}
-	clk.Advance(15 * time.Second)
-
-	// The second is Bandcamp's turn. It hangs; it may cost a quarter of the
-	// time left, and the song still comes, inside the deadline.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The first ask: Bandcamp hangs for its first try, then YouTube.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	start := time.Now()
 	s, err := q.Next(ctx)
 	if err != nil {
-		t.Fatalf("second Next with a hanging Bandcamp: %v", err)
+		t.Fatalf("first Next with a hanging Bandcamp: %v", err)
 	}
 	if !strings.HasPrefix(s.Key, "yt:") {
-		t.Errorf("second song = %+v, want one from YouTube", s)
+		t.Errorf("first song = %+v, want one from YouTube", s)
 	}
-	if ctx.Err() != nil {
-		t.Errorf("the deadline passed (%v): Bandcamp ate the budget", ctx.Err())
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("the first song took %v: Bandcamp ate more than its first try", took)
 	}
 	if n := len(bc.log()); n != 1 {
 		t.Fatalf("Bandcamp was asked %d times (%v), want the one probe that hung", n, bc.log())
 	}
 
 	// A hang is a failure, not a cancelled probe nobody remembers: the gap
-	// holds Bandcamp back, so the next ask costs no wait at all.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel2()
-	start := time.Now()
-	if _, err := q.Next(ctx2); err != nil {
-		t.Fatalf("third Next: %v", err)
-	}
-	if took := time.Since(start); took > 250*time.Millisecond {
-		t.Errorf("the third ask took %v: it waited on a Bandcamp that was still failing", took)
+	// holds Bandcamp back, so the next asks cost no wait at all.
+	for i := 2; i <= 3; i++ {
+		clk.Advance(time.Second)
+		ctxN, cancelN := context.WithTimeout(context.Background(), 2*time.Second)
+		start := time.Now()
+		if _, err := q.Next(ctxN); err != nil {
+			cancelN()
+			t.Fatalf("Next #%d: %v", i, err)
+		}
+		cancelN()
+		if took := time.Since(start); took > 250*time.Millisecond {
+			t.Errorf("Next #%d took %v: it waited on a Bandcamp that was still failing", i, took)
+		}
 	}
 	if n := len(bc.log()); n != 1 {
 		t.Errorf("Bandcamp was asked again inside its gap: %v", bc.log())
+	}
+}
+
+// Later asks give a hanging Bandcamp a quarter of what the caller has left,
+// not the first try's few seconds: once its gap has passed, Bandcamp leads
+// again, hangs again, and the song still comes inside the deadline.
+func TestQueueHangingBandcampOnALaterAskCostsAQuarter(t *testing.T) {
+	bc := &hangBC{}
+	q, clk := newTestQueue("swedish death metal", plentifulYT(), bc, nil)
+	q.bcFirst = 50 * time.Millisecond
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(bc.log()); n != 1 {
+		t.Fatalf("Bandcamp was asked %d times on the first ask, want 1", n)
+	}
+	clk.Advance(15 * time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := q.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next with a hanging Bandcamp: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Errorf("the deadline passed (%v): Bandcamp ate the budget", ctx.Err())
+	}
+	if !strings.HasPrefix(s.Key, "yt:") {
+		t.Errorf("song = %+v, want one from YouTube", s)
+	}
+	if n := len(bc.log()); n != 2 {
+		t.Errorf("Bandcamp was asked %d times, want the retry after its gap: %v", n, bc.log())
 	}
 }
 
