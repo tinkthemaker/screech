@@ -14,10 +14,6 @@ export default async function fixtureBridge(name) {
     document.title = 'MISSING FIXTURE ' + name;
   }
   const fx = f || { snapshot: {}, unfolded: false };
-  // The snapshot as the page will get it: the fields the session adds for
-  // discovery default to false, and a fixture may lay its own over them
-  // (snapExtra) until session.Snapshot carries them.
-  fx.snapshot = Object.assign({ newToYou: false, discovery: false }, fx.snapshot, fx.snapExtra);
   window.__calls = [];
   window.__errors = [];
   window.addEventListener('error', (e) => window.__errors.push(e.message + ' @' + e.filename + ':' + e.lineno));

@@ -26,28 +26,24 @@ var fixtureNowMs = time.Date(2026, 10, 19, 8, 47, 0, 0, time.UTC).UnixMilli()
 // collapsed textContent per data-id and ExpectStyle computed styles;
 // ExpectUnfolded overrides Expect entries when the window is unfolded.
 type fixture struct {
-	Name     string           `json:"name"`
-	Snapshot session.Snapshot `json:"snapshot"`
-	// SnapExtra carries the snapshot fields Task 5's session adds
-	// (newToYou, discovery) until session.Snapshot has them; fixture.js
-	// lays it over the snapshot. Replace with the real fields once merged.
-	SnapExtra   map[string]any `json:"snapExtra,omitempty"`
-	Unfolded    bool           `json:"unfolded"`
-	Tab         string         `json:"tab"`
-	Filter      string         `json:"filter,omitempty"`
-	Find        string         `json:"find,omitempty"` // text already in the FIND bar
-	RemoveArmed bool           `json:"removeArmed,omitempty"`
-	Reduced     bool           `json:"reduced,omitempty"`
-	Recent      []RecentRow    `json:"recent,omitempty"`
-	Loved       []LovedRow     `json:"loved,omitempty"`
-	Stations    []StationRow   `json:"stations,omitempty"`
-	Discoveries []DiscoveryRow `json:"discoveries,omitempty"` // FIND's rows
-	RadioTop    []StationRow   `json:"radioTop,omitempty"`    // RADIO's rows
-	Taste       TasteView      `json:"taste"`
-	Info        InfoView       `json:"info"`
-	Selected    int            `json:"selected"`
-	Top         int            `json:"top,omitempty"` // list scroll offset
-	Level       *[3]float64    `json:"level,omitempty"`
+	Name        string           `json:"name"`
+	Snapshot    session.Snapshot `json:"snapshot"`
+	Unfolded    bool             `json:"unfolded"`
+	Tab         string           `json:"tab"`
+	Filter      string           `json:"filter,omitempty"`
+	Find        string           `json:"find,omitempty"` // text already in the FIND bar
+	RemoveArmed bool             `json:"removeArmed,omitempty"`
+	Reduced     bool             `json:"reduced,omitempty"`
+	Recent      []RecentRow      `json:"recent,omitempty"`
+	Loved       []LovedRow       `json:"loved,omitempty"`
+	Stations    []StationRow     `json:"stations,omitempty"`
+	Discoveries []DiscoveryRow   `json:"discoveries,omitempty"` // FIND's rows
+	RadioTop    []StationRow     `json:"radioTop,omitempty"`    // RADIO's rows
+	Taste       TasteView        `json:"taste"`
+	Info        InfoView         `json:"info"`
+	Selected    int              `json:"selected"`
+	Top         int              `json:"top,omitempty"` // list scroll offset
+	Level       *[3]float64      `json:"level,omitempty"`
 	// Expect pins collapsed textContent per data-id (an input's value; a
 	// "id@attr" key pins an attribute instead). ExpectRect pins a box to
 	// [left, top, width, height] in page px — the brief's geometry, copied
@@ -208,10 +204,11 @@ func fixtures() []fixture {
 		})},
 		// A band never heard on Screech before: the strip says so where the
 		// pick reason would sit.
-		{Name: "new-to-you", Snapshot: play, SnapExtra: map[string]any{"newToYou": true, "discovery": true},
-			Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{
-				"status-word": "● LIVE 00:42", "status-detail": "· NEW TO YOU",
-			})},
+		{Name: "new-to-you", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
+			s.NewToYou, s.Discovery = true, true
+		}), Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{
+			"status-word": "● LIVE 00:42", "status-detail": "· NEW TO YOU",
+		})},
 		{Name: "syncing", Snapshot: withFlags(play, "playing", func(s *session.Snapshot) {
 			s.Syncing = true
 		}), Level: ptrLevel(0.6, 0.5, 0.8), Expect: exp(map[string]string{

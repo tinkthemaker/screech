@@ -61,8 +61,10 @@ func TestResumeDiscoveryTunesIt(t *testing.T) {
 	sn := waitSnap(t, r, 10*time.Second, func(s session.Snapshot) bool {
 		return s.Station.UUID == p.Station.UUID
 	})
-	if sn.Reason != "discovering" {
-		t.Fatalf("reason %q, want %q", sn.Reason, "discovering")
+	// The bridge sends the bare word; the session spells the reason out for
+	// a discovery station, with its own separator.
+	if sn.Reason != "discovering · dungeon synth" {
+		t.Fatalf("reason %q, want %q", sn.Reason, "discovering · dungeon synth")
 	}
 }
 
