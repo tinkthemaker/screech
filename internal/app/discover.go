@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -228,9 +230,9 @@ func (a ytAdapter) Resolve(ctx context.Context, page string) (discover.YTMedia, 
 }
 
 // connectionWords are what yt-dlp (Python's urllib and requests underneath)
-// says on its last line when it never reached YouTube, or YouTube was down.
-// There is no status to read, so the words are the only signal. They are
-// lowercase: the line is compared lowercased.
+// says on its last line when it never reached YouTube. Without a status in
+// the line the words are the only signal; with one, connectionTrouble reads
+// the status first. They are lowercase: the line is compared lowercased.
 var connectionWords = []string{
 	"unable to download",
 	"getaddrinfo",
@@ -240,8 +242,11 @@ var connectionWords = []string{
 	"connection reset",
 	"connection aborted",
 	"temporary failure in name resolution",
-	"http error 5",
 }
+
+// httpStatus finds the status in a (lowercased) yt-dlp line like "HTTP Error
+// 403: Forbidden".
+var httpStatus = regexp.MustCompile(`http error (\d{3})`)
 
 // connectionTrouble marks a yt-dlp failure that reads like a connection
 // problem with discover.ErrNetwork, keeping yt-dlp's own words reachable.
@@ -249,17 +254,36 @@ var connectionWords = []string{
 // says nothing about them), and the song adapter hands the player
 // ErrSourceNetwork. A video that is unavailable or private, and every other
 // ordinary extraction error, comes back as it was.
+//
+// A status in the line settles it, because then the server answered and
+// "Unable to download" only says the page didn't come. 429 (rate limited) and
+// 5xx (the server's own trouble) are outages to wait out. Any other 4xx is a
+// refusal: yt-dlp is blocked, or the video is gone. Calling that "offline"
+// would have the station retry forever behind a block that never lifts.
 func connectionTrouble(err error) error {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return err
 	}
 	msg := strings.ToLower(err.Error())
-	for _, w := range connectionWords {
-		if strings.Contains(msg, w) {
-			return fmt.Errorf("%w: %w", discover.ErrNetwork, err)
+	outage := false
+	if m := httpStatus.FindStringSubmatch(msg); m != nil {
+		code, _ := strconv.Atoi(m[1])
+		switch {
+		case code == http.StatusTooManyRequests || code >= 500:
+			outage = true
+		case code >= 400:
+			return err
 		}
 	}
-	return err
+	for _, w := range connectionWords {
+		if !outage && strings.Contains(msg, w) {
+			outage = true
+		}
+	}
+	if !outage {
+		return err
+	}
+	return fmt.Errorf("%w: %w", discover.ErrNetwork, err)
 }
 
 func ytHits(in []ytdlp.Hit) []discover.YTHit {

@@ -18,6 +18,7 @@ import (
 	"github.com/tinkthemaker/screech/internal/config"
 	"github.com/tinkthemaker/screech/internal/discover"
 	"github.com/tinkthemaker/screech/internal/player"
+	versionpkg "github.com/tinkthemaker/screech/internal/version"
 	"github.com/tinkthemaker/screech/internal/ytdlp"
 )
 
@@ -436,6 +437,22 @@ func TestYouTubeAdapter(t *testing.T) {
 	}
 }
 
+// The Bandcamp client discovery stations use is the one the brief names: a
+// short timeout so a dead network shows up inside a tune's budget, and
+// Screech's own user agent.
+func TestNewBandcampClient(t *testing.T) {
+	c, ok := newBandcamp().(discover.BandcampClient)
+	if !ok {
+		t.Fatalf("newBandcamp() = %T, want discover.BandcampClient", newBandcamp())
+	}
+	if c.HTTP == nil || c.HTTP.Timeout != 8*time.Second {
+		t.Errorf("HTTP client = %+v, want an 8 s timeout", c.HTTP)
+	}
+	if c.UserAgent != versionpkg.UserAgent() || !strings.HasPrefix(c.UserAgent, "screech/") {
+		t.Errorf("UserAgent = %q, want %q", c.UserAgent, versionpkg.UserAgent())
+	}
+}
+
 // yt-dlp reports a dead connection only in words on its last stderr line.
 // The YouTube adapter marks those with discover.ErrNetwork, so the queue
 // doesn't count them against a video and the session goes offline instead of
@@ -456,6 +473,20 @@ func TestYtdlpConnectionTroubleIsMarked(t *testing.T) {
 		{"yt-dlp: ERROR: [youtube] x: HTTP Error 502: Bad Gateway", true},
 		{"YT-DLP: ERROR: UNABLE TO DOWNLOAD WEBPAGE", true},
 
+		// "Unable to download" says the page didn't come, not why. When the
+		// line carries a status the server answered, so the status decides:
+		// rate limiting (429) and its own failures (5xx) are outages to wait
+		// out; being refused or told it's gone is the video's or yt-dlp's
+		// problem, and calling it "offline" would hide a blocked yt-dlp
+		// behind a station that retries forever.
+		{"yt-dlp: ERROR: Unable to download webpage: HTTP Error 429: Too Many Requests", true},
+		{"yt-dlp: ERROR: Unable to download webpage: HTTP Error 503: Service Unavailable", true},
+		{"yt-dlp: ERROR: [youtube] x: Unable to download API page: HTTP Error 500: Internal Server Error", true},
+		{"yt-dlp: ERROR: Unable to download webpage: HTTP Error 403: Forbidden", false},
+		{"yt-dlp: ERROR: Unable to download webpage: HTTP Error 404: Not Found", false},
+		{"yt-dlp: ERROR: Unable to download webpage: HTTP Error 410: Gone", false},
+		{"yt-dlp: ERROR: [youtube] x: Unable to download API page: HTTP Error 400: Bad Request", false},
+
 		{"yt-dlp: ERROR: [youtube] gone: Video unavailable", false},
 		{"yt-dlp: ERROR: [youtube] x: Private video. Sign in if you've been granted access to this video", false},
 		{"yt-dlp: ERROR: [youtube] x: Sign in to confirm you're not a bot", false},
@@ -465,8 +496,8 @@ func TestYtdlpConnectionTroubleIsMarked(t *testing.T) {
 	} {
 		src := errors.New(tc.msg)
 		got := connectionTrouble(src)
-		if errors.Is(got, discover.ErrNetwork) != tc.net {
-			t.Errorf("connectionTrouble(%q) marked = %v, want %v", tc.msg, !tc.net, tc.net)
+		if marked := errors.Is(got, discover.ErrNetwork); marked != tc.net {
+			t.Errorf("connectionTrouble(%q) marked = %v, want %v", tc.msg, marked, tc.net)
 		}
 		if !errors.Is(got, src) {
 			t.Errorf("connectionTrouble(%q) lost the original error", tc.msg)
