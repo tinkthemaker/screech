@@ -924,3 +924,37 @@ func TestQueueOldPrefetchNetworkErrorIsAskedAgain(t *testing.T) {
 		}
 	})
 }
+
+// An anchor is a well-known track, not a find: loving one says nothing about
+// the finds, so the source is not told, and the anchor share does not drop.
+func TestQueueLovedSkipsAnchors(t *testing.T) {
+	anchor := song("anchor", "ok")
+	anchor.Anchor = true
+	find := song("find", "ok")
+	src := &scriptSource{songs: []Song{anchor, find, song("after", "ok")}}
+	m, logPath, _ := startQueueMPV(t, src)
+	rec := record(m)
+	if err := m.Play("discover:x"); err != nil {
+		t.Fatal(err)
+	}
+	rec.waitTitle(t, titleOf(anchor))
+	m.SongLoved()
+	src.mu.Lock()
+	loved := src.loved
+	src.mu.Unlock()
+	if loved != 0 {
+		t.Fatalf("loving an anchor reached the source %d times, want 0", loved)
+	}
+
+	// The next song is a find, and loving it counts.
+	endFile(t, m, "end-eof")
+	waitForLog(t, logPath, loadLine(find))
+	rec.waitTitle(t, titleOf(find))
+	m.SongLoved()
+	src.mu.Lock()
+	loved = src.loved
+	src.mu.Unlock()
+	if loved != 1 {
+		t.Fatalf("loving a find reached the source %d times, want 1", loved)
+	}
+}

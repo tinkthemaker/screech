@@ -35,6 +35,7 @@ type Song struct {
 	Key, Artist, Title string
 	URL                string // the direct media URL: signed and short-lived, so never stored or logged
 	NewToYou           bool
+	Anchor             bool // a well-known track, not a find: loving it says nothing about the finds
 }
 
 // SongSource is the endless supply behind a discovery station. Next gets
@@ -438,11 +439,13 @@ func (m *MPV) NextSong() error {
 	return nil
 }
 
-// SongLoved passes a LOVE on to the source, if a song is playing.
+// SongLoved passes a LOVE on to the source, if a song is playing. An anchor is
+// not passed on: the source reads a love as "the finds are working", and a
+// well-known track says nothing about them.
 func (m *MPV) SongLoved() {
 	m.mu.Lock()
 	q := m.queue
-	live := q != nil && !q.dead && q.haveCur
+	live := q != nil && !q.dead && q.haveCur && !q.cur.Anchor
 	m.mu.Unlock()
 	if live {
 		q.src.Loved()

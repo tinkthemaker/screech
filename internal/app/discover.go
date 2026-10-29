@@ -171,7 +171,7 @@ func (a *songAdapter) Next(ctx context.Context) (player.Song, error) {
 	if err != nil {
 		return player.Song{}, sourceError(err)
 	}
-	return player.Song{Key: s.Key, Artist: s.Artist, Title: s.Title, URL: s.URL, NewToYou: s.NewToYou}, nil
+	return player.Song{Key: s.Key, Artist: s.Artist, Title: s.Title, URL: s.URL, NewToYou: s.NewToYou, Anchor: s.Anchor}, nil
 }
 
 func (a *songAdapter) Skipped(quick bool) { a.q.Skipped(quick) }

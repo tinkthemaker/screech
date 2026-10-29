@@ -313,6 +313,7 @@ type stubQueue struct {
 	mu         sync.Mutex
 	foreground []bool
 	err        error
+	anchor     bool // the song it hands out is an anchor
 	skips      []bool
 	loved      int
 }
@@ -324,7 +325,7 @@ func (q *stubQueue) Next(ctx context.Context) (discover.Song, error) {
 	if q.err != nil {
 		return discover.Song{}, q.err
 	}
-	return discover.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", NewToYou: true}, nil
+	return discover.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", NewToYou: !q.anchor, Anchor: q.anchor}, nil
 }
 func (q *stubQueue) Skipped(quick bool) { q.mu.Lock(); q.skips = append(q.skips, quick); q.mu.Unlock() }
 func (q *stubQueue) Loved()             { q.mu.Lock(); q.loved++; q.mu.Unlock() }
@@ -363,6 +364,15 @@ func TestAdapterPassesSongsAndFeedback(t *testing.T) {
 	src.Loved()
 	if fmt.Sprint(q.skips) != "[true false]" || q.loved != 1 {
 		t.Errorf("skips = %v loved = %d", q.skips, q.loved)
+	}
+
+	// An anchor is passed on as one, so the player can keep a love of it
+	// from lowering the anchor share.
+	qa := &stubQueue{anchor: true}
+	s, err = (&songAdapter{q: qa}).Next(context.Background())
+	want = player.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", Anchor: true}
+	if err != nil || s != want {
+		t.Fatalf("Next = %+v, %v; want %+v", s, err, want)
 	}
 }
 

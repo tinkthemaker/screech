@@ -674,3 +674,20 @@ func TestDiscoverRefusalNotesUseTheSessionDot(t *testing.T) {
 		}
 	}
 }
+
+// A love that lands on the station alone (no song has been named yet) says
+// nothing about the finds, so the queue is not told: only a loved song leans
+// the mix.
+func TestStationOnlyLoveOnDiscoveryLeavesQueueAlone(t *testing.T) {
+	s, pl := testState(t)
+	s = playingDiscovery(t, s, "swedish death metal")
+
+	s = drive(t, s, Love{})
+
+	if s.Feedback != "LOVED  Station" {
+		t.Fatalf("feedback = %q, want a station-only love", s.Feedback)
+	}
+	if n := pl.songLovedCount(); n != 0 {
+		t.Fatalf("a station-only love reached the queue %d times", n)
+	}
+}

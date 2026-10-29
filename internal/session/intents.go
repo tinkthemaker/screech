@@ -26,8 +26,10 @@ func (s State) love() (State, []Cmd) {
 			s.setFeedback("LOVED  Station")
 		}
 		// A discovery queue learns from a love as well: it leans toward
-		// the kind of song just loved. Taking a love back tells it nothing.
-		if sq, ok := s.pl.(player.SongQueue); ok && s.discovery() {
+		// the kind of song just loved. Taking a love back tells it nothing,
+		// and neither does a love that only reached the station, with no song
+		// named yet to have been loved.
+		if sq, ok := s.pl.(player.SongQueue); ok && s.discovery() && track {
 			return s, []Cmd{func() Msg {
 				sq.SongLoved()
 				return nil
