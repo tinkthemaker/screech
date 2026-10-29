@@ -179,3 +179,64 @@ func TestMPVForcedTitle(t *testing.T) {
 		t.Fatalf("media-title = %q, want %q", ev.Title, title)
 	}
 }
+
+// TestMPVSongQueue walks a discovery station through a real mpv: the song's
+// own artist and title must survive loadfile's option list, a song that ends
+// must hand over to the next without the stream-ended event the session
+// would reconnect on, and NEXT must replace a song that is still playing.
+// The source is scripted, so no network and no yt-dlp.
+func TestMPVSongQueue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real mpv process; skipping in -short mode")
+	}
+	mpvPath, err := exec.LookPath("mpv")
+	if err != nil {
+		t.Skipf("mpv not on PATH: %v", err)
+	}
+	testExtraArgs = []string{"--ao=null"}
+	t.Cleanup(func() { testExtraArgs = nil })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write(sineWAV(2 * time.Second))
+	}))
+	defer srv.Close()
+
+	songs := []Song{
+		{Key: "1", Artist: "Ólafur Arnalds", Title: `Saman, "live" 100%`, URL: srv.URL + "/one.wav", NewToYou: true},
+		{Key: "2", Artist: "Entombed", Title: "Left Hand Path", URL: srv.URL + "/two.wav"},
+		{Key: "3", Artist: "Nils Frahm", Title: "Says", URL: srv.URL + "/three.wav", NewToYou: true},
+	}
+	src := &scriptSource{songs: songs}
+	m, err := NewMPV(mpvPath, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	m.SetSongSources(func(string) (SongSource, error) { return src, nil })
+	rec := record(m)
+
+	if err := m.Play("discover:lifecycle"); err != nil {
+		t.Fatal(err)
+	}
+	if ev := rec.waitTitle(t, titleOf(songs[0])); !ev.NewToYou {
+		t.Error("first song lost its NewToYou")
+	}
+	// The first song plays out (about two seconds) and the second follows.
+	if ev := rec.waitTitle(t, titleOf(songs[1])); ev.NewToYou {
+		t.Error("second song gained a NewToYou it never had")
+	}
+	// NEXT while the second is still playing replaces it.
+	if err := m.NextSong(); err != nil {
+		t.Fatal(err)
+	}
+	if ev := rec.waitTitle(t, titleOf(songs[2])); !ev.NewToYou {
+		t.Error("third song lost its NewToYou")
+	}
+	if got := src.skips(); len(got) != 1 || !got[0] {
+		t.Errorf("skips = %v, want one quick skip", got)
+	}
+	if n := rec.count(EventStreamEnded) + rec.count(EventStreamError) + rec.count(EventStopped); n != 0 {
+		t.Errorf("%d stream-end events while songs handed over", n)
+	}
+}

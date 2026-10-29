@@ -12,11 +12,16 @@ const (
 	EventPlaying
 	// EventBuffering: connected but stalled/caching.
 	EventBuffering
-	// EventStreamError: the current stream failed to play.
+	// EventStreamError: the current stream failed to play. On a discovery
+	// station it means the station failed: three songs in a row would not
+	// play, or the next song could not be looked up for want of a network,
+	// in which case Err wraps ErrSourceNetwork.
 	EventStreamError
 	// EventStreamEnded: the current stream ended on its own. For live
 	// radio that means the server dropped us — mpv does not reconnect
-	// non-seekable ICY streams — not that the programme finished.
+	// non-seekable ICY streams — not that the programme finished. A
+	// discovery station never emits it: songs end all the time, and the
+	// player simply loads the next.
 	EventStreamEnded
 	// EventDied: the backend itself is gone (mpv exited).
 	EventDied
@@ -50,7 +55,11 @@ type Event struct {
 	// halves identical. The UI says so rather than implying a stereo image
 	// that isn't there.
 	Stereo bool
-	Err    error
+	// NewToYou rides EventTitle while a discovery station's song queue
+	// plays: the song's artist is one the listener has never heard here.
+	// Radio titles never set it.
+	NewToYou bool
+	Err      error
 }
 
 type Player interface {
