@@ -327,6 +327,81 @@ func TestFirstTitleLeavesPhraseStationNamed(t *testing.T) {
 	}
 }
 
+func evNetworkStreamError() Msg {
+	return PlayerEvent(player.Event{
+		Type: player.EventStreamError,
+		Err:  fmt.Errorf("next song: %w", player.ErrSourceNetwork),
+	})
+}
+
+// A queue that lost its network reports it as a stream error; the station
+// did nothing wrong, in whatever phase the report lands.
+func TestNetworkStreamErrorWhileTuningNoStrike(t *testing.T) {
+	t.Run("tuning", func(t *testing.T) {
+		s, _ := testState(t)
+		s = drive(t, s, Discover{Query: "swedish death metal"})
+		uuid := s.Station.UUID
+		if s.Phase != Tuning {
+			t.Fatalf("want Tuning, got %v", s.Phase)
+		}
+		s2, cmds := s.Update(evNetworkStreamError())
+		if st, _ := s2.core.StationByUUID(uuid); st.FailCount != 0 {
+			t.Fatalf("a network failure must not strike the station: FailCount=%d", st.FailCount)
+		}
+		if len(s2.failStreak) != 0 || s2.netFails != 1 {
+			t.Fatalf("it counts toward offline without a strike: failStreak=%v netFails=%d", s2.failStreak, s2.netFails)
+		}
+		if len(cmds) < 2 || s2.Phase != Tuning {
+			t.Fatalf("it should re-arm the listener and move on: cmds=%d phase=%v", len(cmds), s2.Phase)
+		}
+	})
+
+	t.Run("a streak goes offline unstruck", func(t *testing.T) {
+		s, _ := testState(t)
+		s = playing(t, s)
+		var seen []string
+		for i := 0; i < offlineAfter; i++ {
+			if s.Phase == Playing {
+				s = drive(t, s, evStreamEnded()) // the stream dies; a reconnect is under way
+			}
+			seen = append(seen, s.Station.UUID)
+			s = drive(t, s, evNetworkStreamError())
+		}
+		if s.Phase != Offline {
+			t.Fatalf("three network failures in a row mean offline, got %v", s.Phase)
+		}
+		for _, uuid := range seen {
+			if st, _ := s.core.StationByUUID(uuid); st.FailCount != 0 {
+				t.Errorf("%s was struck for the network: FailCount=%d", uuid, st.FailCount)
+			}
+		}
+	})
+
+	t.Run("playing, once the reconnects run out", func(t *testing.T) {
+		s, _ := testState(t)
+		s = playing(t, s)
+		uuid := s.Station.UUID
+		s.drops = maxDrops // the next drop is one too many
+		s2, cmds := s.Update(evNetworkStreamError())
+		if st, _ := s2.core.StationByUUID(uuid); st.FailCount != 0 {
+			t.Fatalf("giving up on the network is not a strike: FailCount=%d", st.FailCount)
+		}
+		if s2.netFails != 1 || len(cmds) < 2 {
+			t.Fatalf("it should fail the tune without a strike: netFails=%d cmds=%d", s2.netFails, len(cmds))
+		}
+	})
+
+	t.Run("an ordinary stream error still strikes", func(t *testing.T) {
+		s, _ := testState(t)
+		s = drive(t, s, Tuned{Pick: pickSeed(core.SeedStations()[0])})
+		uuid := s.Station.UUID
+		s2, _ := s.Update(evStreamError())
+		if st, _ := s2.core.StationByUUID(uuid); st.FailCount != 1 {
+			t.Fatalf("a dead stream is the station's strike: FailCount=%d", st.FailCount)
+		}
+	})
+}
+
 func TestPlayFailedNetworkTakesOfflinePath(t *testing.T) {
 	netErr := fmt.Errorf("lookup: %w", player.ErrSourceNetwork)
 

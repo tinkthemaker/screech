@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -112,16 +113,20 @@ func (s State) handlePlayerEvent(ev player.Event) (State, []Cmd) {
 		if ev.Type == player.EventStreamError {
 			reason = "stream failed"
 		}
+		// A discovery queue that lost its network says so by wrapping
+		// ErrSourceNetwork. That is the connection's fault, not the
+		// station's, in any phase: it takes the same road, minus the strike.
+		strike := !(ev.Type == player.EventStreamError && errors.Is(ev.Err, player.ErrSourceNetwork))
 		switch s.Phase {
 		case Paused:
 			// The stream died underneath the pause: resuming can no
 			// longer unpause in place, it has to reload.
 			s.pauseReload = true
 		case Playing, Buffering:
-			s2, cmds := s.dropStream(reason)
+			s2, cmds := s.dropStreamAs(reason, strike)
 			return s2, append([]Cmd{s2.listen()}, cmds...)
 		case Tuning:
-			s2, cmds := s.failTune(reason)
+			s2, cmds := s.failTuneAs(reason, strike)
 			return s2, append([]Cmd{s2.listen()}, cmds...)
 		}
 		return s, []Cmd{s.listen()}
@@ -171,9 +176,15 @@ func (s *State) nameDiscovery(title string) {
 // reconnect the same URL in place. Drops beyond maxDrops without a stable
 // minute fail the tune instead.
 func (s State) dropStream(reason string) (State, []Cmd) {
+	return s.dropStreamAs(reason, true)
+}
+
+// dropStreamAs is dropStream with the strike optional, for the failure it
+// may end in: see failTuneAs.
+func (s State) dropStreamAs(reason string, strike bool) (State, []Cmd) {
 	s.drops++
 	if s.drops > maxDrops {
-		return s.failTune(reason)
+		return s.failTuneAs(reason, strike)
 	}
 	s.Phase = Tuning
 	s.TuneAt = s.Now
