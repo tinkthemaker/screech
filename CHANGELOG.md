@@ -15,7 +15,8 @@ covers everything since 0.6.1.
   YouTube link, and Screech keeps finding new bands in that sound, from
   YouTube Music and Bandcamp, with a well-known track now and then. A band
   you've never heard on Screech is marked NEW TO YOU. NEXT plays the next
-  song, and pressing NEXT again within 3 seconds changes station. Every song
+  song (paused, it resumes with it), and pressing NEXT again within 3
+  seconds changes station. Every song
   counts: loves, history and taste see all of them. Packaging such as
   "(Official Audio)" and trailing "ft." credits is stripped from titles.
 - **The window's FIND tab.** The console opens on a search bar ("Artist, song,
@@ -28,7 +29,9 @@ covers everything since 0.6.1.
   yt-dlp on PATH, beside `screech.exe`, and in its data folder. Set it to
   `"off"` to turn yt-dlp off. Screech hands yt-dlp your Node or Bun when
   there's no Deno, and `screech doctor` says which, and when to run
-  `yt-dlp -U`. Without yt-dlp, discovery stations still play from Bandcamp.
+  `yt-dlp -U`. Without yt-dlp, discovery stations still play from Bandcamp,
+  and a YouTube link says it needs yt-dlp instead of starting a station that
+  can't play.
 - **Adding from the command line.** `screech add --discover "<phrase>"` keeps
   a discovery station in `config.toml`, and `screech add <YouTube link>` now
   makes a discovery station seeded from that link.

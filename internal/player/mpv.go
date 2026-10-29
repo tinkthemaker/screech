@@ -463,13 +463,18 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 			case "stop":
 				// mpv's `stop` command — the OS media flyout's Stop
 				// button sends it. Screech sends one only to silence the
-				// old station while a discovery station's first song is
-				// found (playQueue). loadPending can't vouch for that one:
-				// the old file's late start-file clears it before the stop
-				// takes effect. So while a queue is still looking for its
-				// first song, this end-file is that stop, never the
-				// listener's: dropping the queue for it would cancel the
-				// lookup and read as a failed station.
+				// old station while the next one is found: playQueue does
+				// for a discovery station's first song, and Play does for a
+				// page link while yt-dlp resolves it. loadPending vouches
+				// for these stops, but not always: the old file's late
+				// start-file can clear it before the stop takes effect.
+				// For a queue that is enough to tell: while it is still
+				// looking for its first song, this end-file is that stop,
+				// never the listener's, and dropping the queue for it would
+				// cancel the lookup and read as a failed station. (A page
+				// link's Play has already dropped any queue by then, so
+				// only loadPending stands between its stop and the
+				// listener's.)
 				m.mu.Lock()
 				if q := m.queue; q != nil && !q.haveCur && !q.dead {
 					m.mu.Unlock()

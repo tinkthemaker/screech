@@ -33,7 +33,8 @@ two controls:
   after a long listen it's a variety request (listen credit already banked, no penalty).
   On a discovery station it asks the player for the next song, and the
   station is never charged a skip; a second next within 3 s changes station
-  (see Discovery songs).
+  (see Discovery songs). While paused on a discovery station it is the same
+  next song, and resumes playback with it.
 - **love** (`l`) — strong positive on the track's artist + station + tags.
   Toggle: loving the same track (or, trackless, *that same station*) a
   second time returns the boosts. Returning is floored at the (1,1) prior:
@@ -332,13 +333,22 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   a song change is never read as a dropped stream. The first song must play
   inside the tune watchdog's 12 s, so its lookups are capped at 8 s in total:
   Bandcamp first when it has a cached tag result, since that needs no yt-dlp,
-  and YouTube otherwise. Background prefetch calls get up to 20 s each. A
-  prefetched media URL older than 1 h is resolved again before it loads. A
-  song that won't resolve or play is skipped; three in a row raise
-  `PlayFailed`, so the existing strike-and-move-on path runs. A lookup that
-  fails because the network is down takes the existing offline path and never
-  strikes the station: network trouble is not a bad station. The strip clock
-  counts the station, not the song.
+  and YouTube otherwise. A Bandcamp tried ahead of a YouTube that is waiting
+  behind it gets a quarter of the time left, and a hang counts as a failure
+  its 10 s gap holds back, so it costs one wait, not one per ask. Background
+  prefetch calls get up to 20 s each. A prefetched media URL older than 1 h is
+  resolved again before it loads. A first song that can't be found fails
+  `Play` (`ErrResolve`), which the session reads as `PlayFailed`. Once a song
+  has loaded, a song that won't resolve or play is skipped, and three in a row
+  raise `EventStreamError`, the event a dropped stream raises. Either way the
+  existing strike-and-move-on path runs. A lookup that fails because the
+  network is down takes the existing offline path and never strikes the
+  station: network trouble is not a bad station. A network failure that the
+  prefetch reported more than 5 s before its song ended is asked about once
+  more before it ends the walk, since a song can play for minutes after the
+  network goes. A lookup that merely ran out of time is a failed song or tune,
+  not an outage, unless a source marked it `ErrNetwork`. The strip clock counts
+  the station, not the song.
 - Personal `mpv.conf` still applies (audio device, exclusive mode — the
   parts worth keeping), but options that break live radio are pinned at
   spawn: `keep-open` and `loop-*` would swallow the eof that drop
@@ -462,13 +472,16 @@ station carries on with the other.
   `--flat-playlist` returns real songs: titles and ids, no views or durations.
 - **Anchors** come from the first 5 results for the phrase. **Discoveries**
   come from results 10 to 50, and from variant queries (the phrase plus
-  `underground`, `demo`, `new`, or a neighbouring tag).
+  `underground`, `demo` or `new`).
 - **Resolving** gets the media URL, artist, track, duration and view count. A
   discovery that resolves with over 1 M views is re-labelled as an anchor.
 - **Songs only:** anything outside 90 s to 12 min is skipped (no mixes, no full
   albums).
 - A YouTube link seeds from its own Mix (`list=RD<id>`) for related songs. Its
-  title and tags supply the phrase for the Bandcamp side.
+  tags supply the phrase for the Bandcamp side and for the phrase searches; a
+  video with no tags takes the artist it resolved to, or its cleaned title. The
+  Mix is a few dozen songs, so once it is used up the station carries on from
+  the phrase searches, as a typed phrase's would.
 
 **Bandcamp genre tags, with no yt-dlp needed.**
 
@@ -478,14 +491,19 @@ station carries on with the other.
   It is undocumented, and it can break.
 - **The response:** each result carries `band_name`, `title` (the release) and
   `featured_track{title, duration, stream_url}`. `stream_url` is a signed MP3
-  that mpv plays directly. Results without a `featured_track` are skipped.
+  that mpv plays directly. Results without a `featured_track` are skipped, and
+  so are tracks outside 90 s to 12 min, as on YouTube (a feed that gives no
+  duration passes).
 - **Slices:** `new` and `rand` give discoveries, and `top` gives anchors.
 - **Tags from the phrase:** lower-cased and hyphenated (`swedish death metal`
   -> `swedish-death-metal`). If that returns nothing, leading words are dropped
   (`death-metal`). If nothing ever matches, as with an artist name, Bandcamp
   sits out and YouTube carries the station.
 - **Pacing:** at most one Bandcamp request per 10 s per station, with a
-  `screech/<version>` User-Agent. Results are cached for 30 min.
+  `screech/<version>` User-Agent. The one exception is the walk down the tags
+  at the start of a station: after an empty answer the next tag is the same
+  question, so up to 4 probes go out back to back, once. Results are cached
+  for 30 min. A request times out after 4 s, well inside the first song's 8.
 
 **New to you.** A discovery whose artist key appears in neither `tracks_heard`
 nor the loves is new. New artists come first among discoveries, and the strip
@@ -514,10 +532,17 @@ video title through the existing split. Bandcamp gives `band_name` and
 - **Process rules:** one yt-dlp process at a time, app-wide, with a tune's
   lookups ahead of prefetches; the working directory is the data folder; and
   `--no-warnings`.
-- **Caches,** in memory only: search results for 6 h, media URLs for 1 h. Media
-  URLs are never written to the database, the config or the log.
+- **Caches,** in memory only: search results for 6 h (one entry per phrase,
+  holding its longest answer, so the anchors' five come out of the discoveries'
+  fifty), and what resolving a video said for 10 min, so a video that lost the
+  draw is not resolved a second time. A prefetched media URL older than 1 h is
+  asked for again by the player; that is its re-ask, not a cache. Media URLs
+  are never written to the database, the config or the log.
 - **Without yt-dlp,** discovery stations still play from Bandcamp. A YouTube
-  link station can't start, and says why on the strip.
+  link can't start a station: the note says `YouTube links need yt-dlp · see
+  screech doctor`, and no station is made. A link that isn't a YouTube video (a
+  playlist, a channel, any other site) is refused the same way with `can't
+  start from that link · paste a YouTube video, or type a genre or artist`.
 - **`screech doctor`** reports the yt-dlp it found, where, and its version, and
   suggests `yt-dlp -U` when that release is over 60 days old. It also reports
   the JS runtime it will hand yt-dlp, whether Bandcamp's discover feed answered,

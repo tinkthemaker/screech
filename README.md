@@ -170,26 +170,28 @@ window, switches the bar to radio search instead.
 The mix is discoveries and anchors. Discoveries are bands you probably
 haven't heard, smaller and newer. Anchors are the genre's well-known tracks,
 about one song in five; a run of quick skips brings more of them for a
-while, and loving a discovery brings fewer. A song never comes round again
-on the same station within its last 200 songs, and the same band never
-plays twice in a row. Songs run from 90 seconds to 12 minutes, so mixes and
-full albums are left out.
+while, and loving a discovery brings fewer (loving an anchor doesn't). A song
+never comes round again on the same station within its last 200 songs, and the
+same band never plays twice in a row. Songs run from 90 seconds to 12 minutes,
+so mixes and full albums are left out.
 
 **NEW TO YOU** marks a band you've never heard or loved on Screech. Those
 bands come first among the discoveries, and the status line shows the
 label while one plays.
 
 **NEXT** on a discovery station plays the next song. The station stays
-where it is, and the skip isn't counted against it. Press NEXT again within
-3 seconds and it changes station, as NEXT always has. The status line
-suggests exactly that. **LOVE** loves the song, as it does on any station.
+where it is, and the skip isn't counted against it; paused, NEXT resumes with
+the next song. Press NEXT again within 3 seconds and it changes station, as
+NEXT always has. The status line suggests exactly that. **LOVE** loves the
+song, as it does on any station.
 
 **yt-dlp, and a JavaScript runtime.** YouTube songs need
 [yt-dlp](https://github.com/yt-dlp/yt-dlp), which Screech doesn't install or
 update; `screech doctor` says when to run `yt-dlp -U`. Without yt-dlp, a
 station plays from Bandcamp alone, and a YouTube link can't start one (the
-status line says why). yt-dlp also wants a JavaScript runtime to get past
-YouTube's challenges, and a runtime is recommended: deno, node or bun on
+status line says why, and points at `screech doctor`). A link that isn't a
+YouTube video can't start one either. yt-dlp also wants a JavaScript runtime
+to get past YouTube's challenges, and a runtime is recommended: deno, node or bun on
 your PATH. Deno is used as it is; otherwise Screech hands yt-dlp node or
 bun. Bandcamp's feed is undocumented and may change without notice. When it
 stops answering, `screech doctor` says so, and stations lean on YouTube alone.
