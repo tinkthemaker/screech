@@ -260,59 +260,9 @@ func (r Runner) run(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("yt-dlp gave up: %w", ctx.Err())
 	}
 	if err != nil {
-		return "", ytdlpFailure(lastLine(stderr.String(), err.Error()))
+		return "", fmt.Errorf("yt-dlp: %s", lastLine(stderr.String(), err.Error()))
 	}
 	return stdout.String(), nil
-}
-
-// ErrNetwork marks a yt-dlp run that failed because the machine could not
-// reach the network, as opposed to a video that is gone or a lookup that was
-// refused. The caller treats the first as "offline" and the second as the
-// song's own fault.
-var ErrNetwork = errors.New("yt-dlp: no network")
-
-// failure is a yt-dlp error that carries yt-dlp's own words and, when they
-// read like a dead connection, answers errors.Is(err, ErrNetwork).
-type failure struct {
-	msg     string
-	offline bool
-}
-
-func (f failure) Error() string        { return "yt-dlp: " + f.msg }
-func (f failure) Is(target error) bool { return f.offline && target == ErrNetwork }
-
-func ytdlpFailure(msg string) error { return failure{msg: msg, offline: looksOffline(msg)} }
-
-// offlineWords are what yt-dlp (Python's urllib and requests underneath)
-// says when it never got to the server. There is no status to read, so the
-// words are the only signal; a throttled or blocked lookup ("HTTP Error
-// 429", "Sign in to confirm") says something else and is left alone.
-var offlineWords = []string{
-	"getaddrinfo failed",
-	"name resolution",
-	"name or service not known",
-	"nodename nor servname",
-	"no address associated",
-	"network is unreachable",
-	"no route to host",
-	"connection refused",
-	"actively refused",
-	"connection reset",
-	"connection aborted",
-	"failed to establish a new connection",
-	"timed out",
-}
-
-// looksOffline reports whether yt-dlp's last line reads like a connection
-// that never came up.
-func looksOffline(msg string) bool {
-	msg = strings.ToLower(msg)
-	for _, w := range offlineWords {
-		if strings.Contains(msg, w) {
-			return true
-		}
-	}
-	return false
 }
 
 // lastLine is yt-dlp's last word on stderr, which is the reason it failed;

@@ -183,15 +183,19 @@ func sourceError(err error) error {
 
 // isNetworkFailure reads discover's error, which joins what each source
 // said. Bandcamp's are Go's own (DNS, dial, a timeout, any transport error,
-// all net.Error), yt-dlp's say so through ytdlp.ErrNetwork, and our own
-// deadline expiring counts too: a lookup that ran out of time went nowhere
-// useful, and that is the network's doing far more often than a station's.
-// A cancelled lookup is neither; the player dropped it on purpose.
+// all net.Error), yt-dlp's are marked discover.ErrNetwork by ytAdapter, and
+// our own deadline expiring counts too: a lookup that ran out of time went
+// nowhere useful, and that is the network's doing far more often than a
+// station's. A cancelled lookup is neither; the player dropped it on purpose.
 func isNetworkFailure(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	if errors.Is(err, ytdlp.ErrNetwork) {
+	// ErrPaced is Bandcamp's gap, not trouble of its own, but it only comes
+	// back when the context gave no room to wait it out, and the same slow
+	// network that ate the time is why: retry shortly, offline-style, rather
+	// than strike a station that did nothing wrong.
+	if errors.Is(err, discover.ErrNetwork) || errors.Is(err, discover.ErrPaced) {
 		return true
 	}
 	var ne net.Error
@@ -204,23 +208,58 @@ type ytAdapter struct{ r ytdlp.Runner }
 
 func (a ytAdapter) Songs(ctx context.Context, query string, n int) ([]discover.YTHit, error) {
 	hits, err := a.r.Songs(ctx, query, n)
-	return ytHits(hits), err
+	return ytHits(hits), connectionTrouble(err)
 }
 
 func (a ytAdapter) Mix(ctx context.Context, videoID string, n int) ([]discover.YTHit, error) {
 	hits, err := a.r.Mix(ctx, videoID, n)
-	return ytHits(hits), err
+	return ytHits(hits), connectionTrouble(err)
 }
 
 func (a ytAdapter) Resolve(ctx context.Context, page string) (discover.YTMedia, error) {
 	m, err := a.r.Resolve(ctx, page)
 	if err != nil {
-		return discover.YTMedia{}, err
+		return discover.YTMedia{}, connectionTrouble(err)
 	}
 	return discover.YTMedia{
 		URL: m.URL, Artist: m.Artist, Track: m.Track, Title: m.Title, Channel: m.Channel,
 		Duration: m.Duration, Views: m.Views, Tags: m.Tags,
 	}, nil
+}
+
+// connectionWords are what yt-dlp (Python's urllib and requests underneath)
+// says on its last line when it never reached YouTube, or YouTube was down.
+// There is no status to read, so the words are the only signal. They are
+// lowercase: the line is compared lowercased.
+var connectionWords = []string{
+	"unable to download",
+	"getaddrinfo",
+	"failed to resolve",
+	"timed out",
+	"connection refused",
+	"connection reset",
+	"connection aborted",
+	"temporary failure in name resolution",
+	"http error 5",
+}
+
+// connectionTrouble marks a yt-dlp failure that reads like a connection
+// problem with discover.ErrNetwork, keeping yt-dlp's own words reachable.
+// discover then doesn't count it against a video or a linked seed (an outage
+// says nothing about them), and the song adapter hands the player
+// ErrSourceNetwork. A video that is unavailable or private, and every other
+// ordinary extraction error, comes back as it was.
+func connectionTrouble(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return err
+	}
+	msg := strings.ToLower(err.Error())
+	for _, w := range connectionWords {
+		if strings.Contains(msg, w) {
+			return fmt.Errorf("%w: %w", discover.ErrNetwork, err)
+		}
+	}
+	return err
 }
 
 func ytHits(in []ytdlp.Hit) []discover.YTHit {

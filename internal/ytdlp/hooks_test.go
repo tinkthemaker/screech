@@ -149,50 +149,6 @@ func TestRunnerHooksSkipAFailedStart(t *testing.T) {
 	}
 }
 
-// yt-dlp reports a dead connection in words, not in a status; a lookup that
-// failed for want of a network must be told apart from a video that is gone,
-// because the first must not strike a station.
-func TestNetworkFailuresAreMarked(t *testing.T) {
-	for _, msg := range []string{
-		"ERROR: [youtube:search] x: Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed> (caused by URLError(gaierror(11001, 'getaddrinfo failed')))",
-		"ERROR: Unable to download webpage: <urlopen error [Errno -3] Temporary failure in name resolution>",
-		"ERROR: unable to download video data: [Errno 101] Network is unreachable",
-		"ERROR: [youtube] x: Unable to download API page: HTTPSConnectionPool(host='www.youtube.com', port=443): Read timed out.",
-		"ERROR: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it> Connection refused",
-	} {
-		if !looksOffline(msg) {
-			t.Errorf("looksOffline(%q) = false", msg)
-		}
-	}
-	for _, msg := range []string{
-		"ERROR: [youtube] gone: Video unavailable",
-		"ERROR: [youtube] x: Sign in to confirm you're not a bot",
-		"ERROR: Unable to download webpage: HTTP Error 429: Too Many Requests",
-		"ERROR: [youtube] x: Private video",
-		"",
-	} {
-		if looksOffline(msg) {
-			t.Errorf("looksOffline(%q) = true", msg)
-		}
-	}
-}
-
-func TestOfflineRunWrapsErrNetwork(t *testing.T) {
-	r, _ := fake(t, "offline")
-	_, err := r.Songs(context.Background(), "x", 1)
-	if !errors.Is(err, ErrNetwork) {
-		t.Fatalf("error = %v, want one wrapping ErrNetwork", err)
-	}
-	if !strings.Contains(err.Error(), "getaddrinfo failed") {
-		t.Errorf("error = %v, want yt-dlp's own words kept", err)
-	}
-	// A gone video is not the network.
-	r, _ = fake(t, "fail")
-	if _, err := r.Resolve(context.Background(), "https://www.youtube.com/watch?v=gone"); errors.Is(err, ErrNetwork) {
-		t.Errorf("a missing video is not a network failure: %v", err)
-	}
-}
-
 // doctor says which runtime yt-dlp will have, including deno, which needs no
 // flag and so is invisible to DetectJSRuntime.
 func TestJSRuntimeName(t *testing.T) {

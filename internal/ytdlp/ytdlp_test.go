@@ -98,10 +98,6 @@ func runFakeYTDLP(mode string, args []string) int {
 		return 1
 	case "hang":
 		time.Sleep(30 * time.Second)
-	case "offline":
-		fmt.Fprintln(os.Stderr, "WARNING: retrying")
-		fmt.Fprintln(os.Stderr, "ERROR: [youtube:search] x: Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed>")
-		return 1
 	case "nourl":
 		fmt.Println("screech-title:no stream here")
 	case "version":

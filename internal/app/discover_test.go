@@ -56,6 +56,10 @@ func runFakeYTDLP(mode string) int {
 	case "fail":
 		fmt.Fprintln(os.Stderr, "ERROR: [youtube] x: Video unavailable")
 		return 1
+	case "offline":
+		fmt.Fprintln(os.Stderr, "WARNING: retrying")
+		fmt.Fprintln(os.Stderr, "ERROR: [youtube] x: Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed>")
+		return 1
 	}
 	return 0
 }
@@ -367,12 +371,17 @@ func TestNetworkErrorsMapToErrSourceNetwork(t *testing.T) {
 		{"http transport", post, true},
 		{"joined with another source's failure", fmt.Errorf("discover: %w", errors.Join(errors.New("yt-dlp: Video unavailable"), post)), true},
 		{"the lookup's own deadline", fmt.Errorf("discover: %w", context.DeadlineExceeded), true},
-		{"yt-dlp offline", fmt.Errorf("discover: %w", fmt.Errorf("resolving: %w", ytdlp.ErrNetwork)), true},
+		{"the queue's own network mark", fmt.Errorf("discover: %w", fmt.Errorf("resolving: %w", discover.ErrNetwork)), true},
+		{"bandcamp pacing", fmt.Errorf("discover: %w", discover.ErrPaced), true},
+		{"a timeout from deeper in", fmt.Errorf("x: %w", &url.Error{Op: "Get", URL: "https://bandcamp.com/", Err: os.ErrDeadlineExceeded}), true},
 		{"already marked", fmt.Errorf("%w: x", player.ErrSourceNetwork), true},
 
 		{"no sources", discover.ErrNoSources, false},
 		{"a gone video", errors.New("discover: yt-dlp: Video unavailable"), false},
-		{"a bad status", errors.New("bandcamp discover: 503 Service Unavailable"), false},
+		{"a private video", errors.New("discover: yt-dlp: [youtube] x: Private video"), false},
+		{"a refused status", fmt.Errorf("discover: %w", &discover.StatusError{Code: 403}), false},
+		{"a throttling status", fmt.Errorf("discover: %w", &discover.StatusError{Code: 429}), false},
+		{"yt-dlp wouldn't start", errors.New("starting yt-dlp (x): file not found"), false},
 		{"cancelled", fmt.Errorf("discover: %w", context.Canceled), false},
 		{"cancelled over a dns failure", errors.Join(context.Canceled, dns), false},
 	} {
@@ -424,5 +433,67 @@ func TestYouTubeAdapter(t *testing.T) {
 	t.Setenv("SCREECH_FAKE_YTDLP", "fail")
 	if _, err := yt.Resolve(ctx, "https://www.youtube.com/watch?v=gone"); err == nil {
 		t.Error("a failed run must fail Resolve")
+	}
+}
+
+// yt-dlp reports a dead connection only in words on its last stderr line.
+// The YouTube adapter marks those with discover.ErrNetwork, so the queue
+// doesn't count them against a video and the session goes offline instead of
+// striking the station; a video that is simply gone stays an ordinary error.
+func TestYtdlpConnectionTroubleIsMarked(t *testing.T) {
+	for _, tc := range []struct {
+		msg string
+		net bool
+	}{
+		{"yt-dlp: ERROR: [youtube:search] x: Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed>", true},
+		{"yt-dlp: ERROR: [youtube] x: Failed to resolve 'www.youtube.com' ([Errno -2] Name or service not known)", true},
+		{"yt-dlp: ERROR: <urlopen error [Errno -3] Temporary failure in name resolution>", true},
+		{"yt-dlp: ERROR: HTTPSConnectionPool(host='www.youtube.com', port=443): Read timed out.", true},
+		{"yt-dlp: ERROR: [Errno 111] Connection refused", true},
+		{"yt-dlp: ERROR: ('Connection aborted.', ConnectionResetError(10054, 'An existing connection was forcibly closed'))", true},
+		{"yt-dlp: ERROR: Connection reset by peer", true},
+		{"yt-dlp: ERROR: unable to download video data: HTTP Error 503: Service Unavailable", true},
+		{"yt-dlp: ERROR: [youtube] x: HTTP Error 502: Bad Gateway", true},
+		{"YT-DLP: ERROR: UNABLE TO DOWNLOAD WEBPAGE", true},
+
+		{"yt-dlp: ERROR: [youtube] gone: Video unavailable", false},
+		{"yt-dlp: ERROR: [youtube] x: Private video. Sign in if you've been granted access to this video", false},
+		{"yt-dlp: ERROR: [youtube] x: Sign in to confirm you're not a bot", false},
+		{"yt-dlp: ERROR: [youtube] x: This video is not available in your country", false},
+		{"yt-dlp printed no stream URL", false},
+		{"yt-dlp: ERROR: HTTP Error 404: Not Found", false},
+	} {
+		src := errors.New(tc.msg)
+		got := connectionTrouble(src)
+		if errors.Is(got, discover.ErrNetwork) != tc.net {
+			t.Errorf("connectionTrouble(%q) marked = %v, want %v", tc.msg, !tc.net, tc.net)
+		}
+		if !errors.Is(got, src) {
+			t.Errorf("connectionTrouble(%q) lost the original error", tc.msg)
+		}
+	}
+	if connectionTrouble(nil) != nil {
+		t.Error("no error must stay no error")
+	}
+	// Our own deadline is already a net.Error; it is not re-labelled.
+	if got := connectionTrouble(context.Canceled); errors.Is(got, discover.ErrNetwork) {
+		t.Error("a cancelled lookup is not a network failure")
+	}
+}
+
+// Through the adapter and a real process: a yt-dlp that couldn't reach
+// YouTube comes out marked, and one that found the video gone does not.
+func TestYouTubeAdapterMarksOfflineRuns(t *testing.T) {
+	yt := ytAdapter{ytdlp.Runner{Path: os.Args[0]}}
+	t.Setenv("SCREECH_FAKE_YTDLP", "offline")
+	if _, err := yt.Songs(context.Background(), "x", 1); !errors.Is(err, discover.ErrNetwork) {
+		t.Errorf("Songs offline = %v, want it marked discover.ErrNetwork", err)
+	}
+	if _, err := yt.Resolve(context.Background(), "https://www.youtube.com/watch?v=abcdefghijk"); !errors.Is(err, discover.ErrNetwork) {
+		t.Errorf("Resolve offline = %v, want it marked discover.ErrNetwork", err)
+	}
+	t.Setenv("SCREECH_FAKE_YTDLP", "fail")
+	if _, err := yt.Resolve(context.Background(), "https://www.youtube.com/watch?v=gone"); err == nil || errors.Is(err, discover.ErrNetwork) {
+		t.Errorf("a gone video = %v, want an ordinary error", err)
 	}
 }
