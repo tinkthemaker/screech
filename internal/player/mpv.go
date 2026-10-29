@@ -462,9 +462,21 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 			switch msg.Reason {
 			case "stop":
 				// mpv's `stop` command — the OS media flyout's Stop
-				// button sends it. Screech never does. Nothing is loaded
-				// any more, so a discovery walk must not load behind it.
+				// button sends it. Screech sends one only to silence the
+				// old station while a discovery station's first song is
+				// found (playQueue). loadPending can't vouch for that one:
+				// the old file's late start-file clears it before the stop
+				// takes effect. So while a queue is still looking for its
+				// first song, this end-file is that stop, never the
+				// listener's: dropping the queue for it would cancel the
+				// lookup and read as a failed station.
 				m.mu.Lock()
+				if q := m.queue; q != nil && !q.haveCur && !q.dead {
+					m.mu.Unlock()
+					continue
+				}
+				// Otherwise nothing is loaded any more, so a discovery walk
+				// must not load behind it.
 				m.dropQueueLocked()
 				m.mu.Unlock()
 				emit(events, Event{Type: EventStopped})
