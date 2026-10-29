@@ -641,6 +641,91 @@ func TestQueueExternalStopEndsQueue(t *testing.T) {
 	}
 }
 
+// Play(discover) right on the heels of another Play: the first file's
+// start-file lands after the queue sent its own stop, so it clears
+// loadPending and the stop's end-file is no longer swallowed by that flag.
+// While the first song is still being looked for, that end-file is the
+// queue's own silencing stop, never the listener's: it must not drop the
+// queue (which cancels the lookup and reads as a failed station), and it
+// must not tell the session playback was stopped from the media controls.
+func TestQueueOwnStopSurvivesLateStartFile(t *testing.T) {
+	gate := make(chan struct{})
+	src := &scriptSource{songs: []Song{song("one", "ok")}, gates: map[int]chan struct{}{0: gate}}
+	m, logPath, _ := startQueueMPV(t, src)
+	rec := record(m)
+
+	if err := m.Play("http://stream.test/late"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- m.Play("discover:x") }()
+	deadline := time.Now().Add(3 * time.Second)
+	for src.nextCalls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The fake answers the queue's stop with the radio's late start-file
+	// and then end-file stop, while the lookup is still blocked.
+	waitForLog(t, logPath, `"stop"`)
+	settle()
+	if n := rec.count(EventStopped); n != 0 {
+		t.Fatalf("%d EventStopped: the queue's own stop reached the session as the listener's", n)
+	}
+	m.mu.Lock()
+	alive := m.queue != nil && !m.queue.dead
+	m.mu.Unlock()
+	if !alive {
+		t.Fatal("the queue's own stop dropped the queue it was silencing for")
+	}
+
+	close(gate)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Play = %v, want the first song loaded (an error here strikes the station)", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Play never returned")
+	}
+	first := src.songs[0]
+	waitForLog(t, logPath, loadLine(first))
+	rec.waitTitle(t, titleOf(first))
+	if n := rec.count(EventStopped); n != 0 {
+		t.Fatalf("%d EventStopped", n)
+	}
+}
+
+// A queue that is dropped while its first song is still being found (the
+// backend died, or playback was stopped from outside) leaves Play with a
+// cancelled lookup. That is not a station that failed to resolve: Play
+// answers ErrSuperseded, so the session leaves no strike.
+func TestQueueDroppedWhileResolvingIsSuperseded(t *testing.T) {
+	gate := make(chan struct{})
+	src := &scriptSource{songs: []Song{song("late", "ok")}, gates: map[int]chan struct{}{0: gate}}
+	m, logPath, _ := startQueueMPV(t, src)
+	done := make(chan error, 1)
+	go func() { done <- m.Play("discover:x") }()
+	deadline := time.Now().Add(3 * time.Second)
+	for src.nextCalls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.mu.Lock()
+	m.dropQueueLocked()
+	m.mu.Unlock()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSuperseded) || errors.Is(err, ErrResolve) {
+			t.Fatalf("Play = %v, want ErrSuperseded only", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Play never returned: the dropped queue's lookup was not cancelled")
+	}
+	close(gate)
+	settle()
+	if strings.Contains(logText(t, logPath), "stream.test/late") {
+		t.Fatalf("a dropped queue's song was loaded:\n%s", logText(t, logPath))
+	}
+}
+
 // A prefetched URL is signed and goes stale (a song longer than an hour
 // outlives its successor's link): it is dropped and asked for afresh.
 func TestQueueStalePrefetchIsAskedAgain(t *testing.T) {

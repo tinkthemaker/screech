@@ -173,7 +173,10 @@ func (m *MPV) playQueue(seed string) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.playSeq != seq {
+	// A queue dropped under the lookup (the backend died, playback was
+	// stopped from outside) cancelled it: that is no verdict on the station,
+	// so it must not read as a failed resolve and earn a strike.
+	if m.playSeq != seq || m.queue != q {
 		return ErrSuperseded
 	}
 	if err == nil && !validStreamURL(first.URL) {
