@@ -36,12 +36,9 @@ func (m Model) mainRows(iw int, compact bool, contentH int) []string {
 		rows = append(rows, m.bandRow(iw, m.idle()))
 	}
 
-	switch {
-	case m.prompt:
-		rows = append(rows, m.promptRow(iw))
-	case m.volumeOpen:
+	if m.volumeOpen {
 		rows = append(rows, m.volumeRow(iw))
-	default:
+	} else {
 		rows = append(rows, m.reasonRow(iw))
 	}
 	return rows
@@ -224,15 +221,11 @@ func (m Model) receiverRows(iw, contentH int) []string {
 		stationCell = m.stDecrypt.Render(m.now, pt, plateText(station, leftW, m.th.G.Ellipsis), leftW)
 	}
 
-	// The bottom readout row doubles as the overlay bay: the seed prompt or
-	// the volume slider takes it over while open, exactly as promptRow and
-	// volumeRow replace the reason line in the compact layout. Precedence
-	// matches the Update dispatch and the compact switch: prompt first.
+	// The bottom readout row doubles as the overlay bay: the volume slider
+	// takes it over while open, exactly as volumeRow replaces the reason
+	// line in the compact layout.
 	bottomRow := m.receiverStatusRow(iw)
-	switch {
-	case m.prompt:
-		bottomRow = m.receiverPromptRow(iw)
-	case m.volumeOpen:
+	if m.volumeOpen {
 		bottomRow = m.receiverVolumeRow(iw)
 	}
 
@@ -515,39 +508,6 @@ func (m Model) receiverVolumeRow(iw int) string {
 	return m.panelFull(content, iw, raised)
 }
 
-// receiverPromptRow is the seed prompt seated on the raised readout
-// surface — the wide faceplate's counterpart of promptRow, keeping its
-// accent chevron, bright query, blinking cursor, and dim empty-hint.
-func (m Model) receiverPromptRow(iw int) string {
-	width := maxI(1, iw-4)
-	raised := m.th.PanelRaised
-	bg := raised.GetBackground()
-	labelStyle := m.th.Accent.Bold(true).Background(bg)
-	accent := m.th.Accent.Background(bg)
-	bright := m.th.Bright.Background(bg)
-	dim := m.th.Dim.Background(bg)
-
-	cur := m.cursorGlyph()
-	const label = "SEED"
-	chev := accent.Render("> ")
-	// Room left for the query after label, gap, chevron, and cursor.
-	tail := maxI(0, width-runewidth.StringWidth(label)-2-runewidth.StringWidth("> ")-1)
-	content := labelStyle.Render(label) + raised.Render("  ") + chev
-	if len(m.buf) == 0 {
-		hint := "genre or artist " + m.th.G.Dot + " esc cancels"
-		if m.s.Virgin {
-			hint = "type a genre or artist " + m.th.G.Dot + " space for a wildcard"
-		}
-		hint = runewidth.Truncate(hint, maxI(0, tail-1), m.th.G.Ellipsis)
-		return m.panelFull(content+accent.Render(cur)+raised.Render(" ")+dim.Render(hint), iw, raised)
-	}
-	buf := string(m.buf)
-	if bw := runewidth.StringWidth(buf); bw > tail {
-		buf = sliceCols(buf, bw-tail, tail)
-	}
-	return m.panelFull(content+bright.Render(buf)+accent.Render(cur), iw, raised)
-}
-
 func whyDetail(reason string) string {
 	switch {
 	case reason == "where you left off":
@@ -749,27 +709,6 @@ func statusReason(reason string) string {
 	default:
 		return "SELECTED  " + reason
 	}
-}
-
-// promptRow renders the seed input: accent chevron, bright query, blinking
-// cursor, dim hint while empty.
-func (m Model) promptRow(iw int) string {
-	cur := m.cursorGlyph()
-	prefix := m.th.Accent.Render("> ")
-	if len(m.buf) == 0 {
-		hint := "genre or artist " + m.th.G.Dot + " esc cancels"
-		if m.s.Virgin {
-			hint = "type a genre or artist " + m.th.G.Dot + " space for a wildcard"
-		}
-		hint = runewidth.Truncate(hint, maxI(0, iw-5), m.th.G.Ellipsis)
-		return clip(prefix+m.th.Accent.Render(cur)+"  "+m.th.Dim.Render(hint), iw)
-	}
-	buf := string(m.buf)
-	avail := iw - 3
-	if bw := runewidth.StringWidth(buf); bw > avail {
-		buf = sliceCols(buf, bw-avail, avail)
-	}
-	return clip(prefix+m.th.Bright.Render(buf)+m.th.Accent.Render(cur), iw)
 }
 
 func (m Model) volumeRow(iw int) string {

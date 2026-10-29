@@ -135,7 +135,30 @@ func TestViewFitsEveryTerminalSize(t *testing.T) {
 		}},
 		{"seed-prompt", func(m *Model) {
 			m.prompt = true
+			m.promptMode = radioMode
 			m.buf = []rune("corridos")
+		}},
+		{"find-prompt", func(m *Model) {
+			m.prompt = true
+			m.buf = []rune("swedish death metal")
+		}},
+		{"find-link", func(m *Model) {
+			m.prompt = true
+			m.buf = []rune("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ")
+		}},
+		{"find-recents", func(m *Model) {
+			m.prompt = true
+			m.finds = []core.DiscoveryRow{
+				{UUID: "disc:a", Name: "jazz piano"},
+				{UUID: "disc:b", Name: "A Discovery Whose Song Title Runs Far Past Any Sensible Width"},
+				{UUID: "disc:c", Name: "lofi hip hop"},
+			}
+			m.findPos = 1
+		}},
+		{"radio-prompt-empty", func(m *Model) {
+			m.prompt = true
+			m.promptMode = radioMode
+			m.finds = []core.DiscoveryRow{{UUID: "disc:a", Name: "jazz piano"}}
 		}},
 		{"volume", func(m *Model) {
 			m.volumeOpen = true
@@ -660,9 +683,22 @@ func TestASCIIModeIsSevenBit(t *testing.T) {
 			m.historyView = historyTaste
 		},
 		func(m *Model) { m.themeOpen = true }, // theme picker
-		func(m *Model) { // seed prompt
+		func(m *Model) { // radio prompt
 			m.prompt = true
+			m.promptMode = radioMode
 			m.buf = []rune("corridos")
+		},
+		func(m *Model) { // find prompt with its recent list
+			m.prompt = true
+			m.finds = []core.DiscoveryRow{
+				{UUID: "disc:a", Name: "jazz piano"},
+				{UUID: "disc:b", Name: "swedish death metal"},
+				{UUID: "disc:c", Name: "lofi hip hop"},
+			}
+		},
+		func(m *Model) { // find prompt, a link typed
+			m.prompt = true
+			m.buf = []rune("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 		},
 		func(m *Model) { // volume strip
 			m.volumeOpen = true
