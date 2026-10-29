@@ -31,6 +31,9 @@ two controls:
 
 - **next** (`space` or `n`) — pressed fast (<90s) it's a skip (negative). Pressed
   after a long listen it's a variety request (listen credit already banked, no penalty).
+  On a discovery station it asks the player for the next song, and the
+  station is never charged a skip; a second next within 3 s changes station
+  (see Discovery songs).
 - **love** (`l`) — strong positive on the track's artist + station + tags.
   Toggle: loving the same track (or, trackless, *that same station*) a
   second time returns the boosts. Returning is floored at the (1,1) prior:
@@ -55,7 +58,8 @@ Shipped in v0.2, still within the austerity budget:
   saved station lives at that position but never which key returns to it.
   Nine slots stay nine: presets are muscle memory, not a list. Everything past
   that lives in the library's saved-stations view (below).
-- **seeding** (`/`): type a genre or artist. Genres resolve strongest: a tag
+- **seeding** (radio search: `/`, then Tab in the FIND bar; the window's RADIO
+  tab): type a genre or artist. Genres resolve strongest: a tag
   in the local cache tunes instantly, and a tag the cache doesn't carry
   (e.g. "corridos" on a thin global-pop cache) is searched against the
   directory, upserted, and tuned. Artists are honest-best-effort: the name
@@ -143,6 +147,21 @@ face either. A face imports `session` and draws it:
     core -> session -> faces: tui (terminal), gui (Windows window)
     app  = the shared startup both programs call first
 
+Two packages sit beside the engine. `internal/ytdlp` is the one place yt-dlp runs: discovery, a tune's page link
+and `screech doctor` all come through it, so its rules hold app-wide. It
+finds the executable from `ytdlp_path` (`""`: PATH, then beside the
+executable, then the data folder; `"off"` disables it; anything else is used
+as given). It hands yt-dlp a JavaScript runtime (Deno on PATH is used as is,
+else the first of node and bun on PATH, as `--js-runtimes <name>:<path>`),
+runs one yt-dlp process at a time for the whole app with a tune's lookups
+ahead of prefetches, works in the data folder, and passes `--no-warnings`.
+`internal/discover` is the discovery song queue: it mixes discoveries and
+anchors from YouTube Music (through `internal/ytdlp`) and Bandcamp genre
+tags, never repeats a song within its last 200, never plays one artist twice
+in a row, and puts new-to-you bands first among the discoveries. The player
+walks that queue behind a `discover:` sentinel (see Playback and Discovery
+songs).
+
 `cmd/screech` runs `app.Start`, then the Bubble Tea faceplate over a
 `session.State`. `cmd/screech-gui` (Windows only; every file in it is
 `//go:build windows`) runs the same `app.Start`, then a frameless Wails v2
@@ -158,8 +177,13 @@ programs, so only one of them plays at a time. The window's own design
 record is `docs/superpowers/specs/2026-10-18-lcars-gui-design.md`.
 
 The strip keeps familiar player controls in reading order: PAUSE/RESUME,
-NEXT/RETRY NOW, LOVE, MORE/LESS, then a permanent EXIT at the far right.
-EXIT calls the same bridge quit path as `q`. Station and track text that
+NEXT/RETRY NOW, LOVE, MORE/LESS. The close control is a red `✕` cap in the
+top bar's right segment (`432-480 x 0-20`, radius `0 10px 10px 0`, colour
+`#FF5555`, black text; the tan segment widens to `332-428`). It calls the
+same bridge quit path as `q`, and EXIT is gone. On a discovery station the
+track row shows the song, the status shows `NEW TO YOU` when the band has
+never been heard on Screech before, and the reason line reads
+`discovering · <phrase>`. Station and track text that
 exceeds its row makes one measured pass after a reading pause, then returns
 to the start; reduced motion leaves it still. The frameless HWND gets a
 DPI-scaled window region on restore and each fold change, following the
@@ -187,6 +211,45 @@ come from `Bridge.Prefs()`. Two tests pin the surface from both sides:
 `TestBoundSurface` lists the exported methods, and `TestBridgeJSContract`
 requires `bridge.js` to name exactly those, so a method can't exist on one
 side only.
+
+**The console's tabs** are, in order: FIND (the front door, selected by
+default), RADIO, RECENT, LOVED, STATIONS, TASTE and MORE. The tab geometry is
+unchanged: seven 28 px slots from y 156. MORE holds what INFO and SLEEP held,
+the station sheet and a SLEEP pill that cycles the timer and shows
+`SLEEP nn`. The MORE button opens the console on FIND, and so does `/`; `H`
+still opens LOVED, and `I` opens MORE. With no history at all, the window
+opens unfolded on FIND; otherwise it starts folded and playing, as before.
+
+**FIND** is a bar at `136-464 x 148-184` (36 px tall, radius 18) in three
+parts: an orange `FIND` cap 52 px wide, a black field with a 2 px orange
+border, and an orange `GO` cap 52 px wide in the same colour as FIND. The
+placeholder, lilac at 15 px, reads `Artist, song, genre or YouTube link` and
+must fit the field. Typed text is ice at 16 px, and a long link scrolls inside
+the field. Enter or GO starts a discovery station from what was typed, folds
+the console, and sends the strip to `TUNING`. A label at y 204 (peach,
+11 px) reads `PICK UP WHERE YOU LEFT OFF`, above up to four rows from y 220,
+each 28 px tall: your most recent discovery stations, shown as the phrase (or
+the song a link started from) with a relative time on the right. A click, or
+the down arrow then Enter, resumes one. With none, the label and rows are absent. The hint,
+centred at y 348 in grey `#777` at 11 px, reads `ESC TO CLOSE · TAB FOR
+RADIO`, with the key names in ice. There is no heading and no other text.
+
+**RADIO** is the same bar in blue, with a `RADIO` cap and the placeholder
+`Station, genre or country`. Enter tunes the best radio-browser match, which
+is today's search (`Seed`). Below the bar the rows are the listener's
+most-listened radio stations, laid out as in STATIONS; a click or Enter tunes
+one. A full results list needs an async radio-browser search, since nothing
+slow may run on a Wails call path, so it is a follow-up.
+
+The bridge gains four methods for these views. `Discover(query)` is FIND's
+Enter, a `session.Discover` intent: the core decides whether the text is a
+link and whether the station already exists. `ResumeDiscovery(uuid)` is a
+click or Enter on a FIND row, a plain `TuneTo` with the reason `discovering`,
+since the station is already in the database. `RecentDiscoveries()` (a core
+read of up to four discovery stations, newest first) feeds FIND's list, and
+`RadioTop()` (a core read of the most-listened radio stations, the listener's
+own stations and discoveries left out) feeds RADIO's rows. A failed read comes
+back as an empty list, so the bar still opens.
 
 **The layout guard.** The front end is plain ES modules served from
 `embed.FS` with no build step, so nothing but a test stands between a CSS
@@ -229,11 +292,11 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   `--ytdl=no`: mpv's hook would otherwise run yt-dlp on every URL that
   fails to load, delaying the failure everything below keys on. Page links
   are resolved by screech itself instead (next item).
-- **Page links (optional, off by default).** A listener's own station may
-  be a page (YouTube, SoundCloud, Vimeo, Mixcloud, Bandcamp or Twitch,
-  matched by host in `streamurl.IsPage`). With `ytdlp_path` set, `Play`
-  runs `yt-dlp -f bestaudio/best --no-playlist --playlist-items 1 --get-url`
-  plus `--print` lines for artist, track and title before `loadfile`, under
+- **Page links.** A listener's own station may be a page (YouTube,
+  SoundCloud, Vimeo, Mixcloud, Bandcamp or Twitch, matched by host in
+  `streamurl.IsPage`). With yt-dlp found (see yt-dlp under Discovery songs),
+  `Play` runs `yt-dlp -f bestaudio/best --no-playlist --playlist-items 1
+  --get-url` plus `--print` lines for artist, track and title before `loadfile`, under
   a hard 6 s timeout: the tune watchdog allows 12 s from the pick, so mpv
   keeps half. `/best` is there because YouTube live streams offer only muxed
   HLS, which mpv plays audio-only under `--no-video`. The old station is
@@ -255,8 +318,27 @@ leave `LIVE` on screen over silence. The rules, verified against mpv 0.41:
   "artist - track" when yt-dlp knows both, else the page title, else none,
   leaving the filename filter to keep the URL out of the heard list. The
   extractor is an interface (`player.Extractor`), so unit tests run a
-  scripted yt-dlp and never the network. Without `ytdlp_path`, a page link
-  goes to mpv as-is and fails there, as before.
+  scripted yt-dlp and never the network. With yt-dlp off or missing, a page
+  link goes to mpv as-is and fails there, as before.
+- **Discovery stations (`discover:`).** A discovery station's `StreamURL` is
+  the sentinel `discover:<seed>`, where the seed is the phrase or link it was
+  started from; only the player resolves it, and `Play` still rejects every
+  other non-http(s) URL. The player holds the station's song queue behind the
+  sentinel and walks it itself. It resolves the first song, then prefetches
+  one ahead while the current song plays. Songs advance by themselves: the
+  next song loads with `force-media-title` set to `Artist - Title` (the
+  `loadfile ... replace -1 force-media-title=%n%...` path that page links use) and
+  emits a title event, and it never emits `EventStreamEnded` between songs, so
+  a song change is never read as a dropped stream. The first song must play
+  inside the tune watchdog's 12 s, so its lookups are capped at 8 s in total:
+  Bandcamp first when it has a cached tag result, since that needs no yt-dlp,
+  and YouTube otherwise. Background prefetch calls get up to 20 s each. A
+  prefetched media URL older than 1 h is resolved again before it loads. A
+  song that won't resolve or play is skipped; three in a row raise
+  `PlayFailed`, so the existing strike-and-move-on path runs. A lookup that
+  fails because the network is down takes the existing offline path and never
+  strikes the station: network trouble is not a bad station. The strip clock
+  counts the station, not the song.
 - Personal `mpv.conf` still applies (audio device, exclusive mode — the
   parts worth keeping), but options that break live radio are pinned at
   spawn: `keep-open` and `loop-*` would swallow the eof that drop
@@ -338,6 +420,108 @@ for a synced cache. `screech add`/`remove` edit config.toml as text, so
 comments, order and spacing survive; each edit is re-read and checked before
 it replaces the file, and neither command opens the database. A running
 instance picks the change up on its next launch.
+
+**Discovery stations (`disc:`).** A station started from a phrase or a
+YouTube link is a namespace of its own. Its id is `disc:` plus the first 16
+hex digits of the SHA-256 of `"discover:"` followed by its identity key: the
+trimmed, lower-cased phrase, or the canonical video URL for a link. A watch
+page with a playlist along for the ride, a `youtu.be` share, the music site
+and the short form all name the same video, so they name the same station,
+and starting the same phrase again resumes it with its history. Startup
+deletes `custom:` rows that have left the config, but never `disc:` rows:
+stations started from FIND are history, not config. `PruneStale`, `NeedsSync`
+and the click report treat `disc:` like `custom:`. Config-defined discovery
+stations are upserted at every launch, as links are. Stations started from
+FIND live in the database, and the FIND list shows the most recent of them.
+Pressing F (preset), or `screech add --discover`, keeps one for good. The
+picker sees a discovery station as one of the listener's own stations (the
+4-seat custom slice), and never charges it a skip for a song change.
+
+## Discovery songs
+
+**Where a station starts.** FIND is the one bar that starts a discovery
+station in both faces. In the window it is the console's first tab. In the
+terminal, `/` opens it as a full sheet in place of the faceplate, like help and
+the theme picker, with the hint `esc close · tab radio`. Enter starts a station
+from what was typed, a phrase or a link (a link is keyed by its video, see
+Station data), and Tab switches the bar to radio search. Your recent discovery
+stations sit under the bar, to pick up where you left off.
+
+A discovery station's queue (`internal/discover`) mixes **discoveries**, bands
+the listener has probably not heard, smaller and newer, with **anchors**, the
+genre's well-known tracks. The anchor share starts at about one in five and
+stays between one in eight and one in three. Three quick skips in a row (each
+within 60 s of its song starting) raise it for the next ten songs, and a LOVE
+on a discovery lowers it. The two sources take turns for discoveries, with
+Bandcamp and YouTube at about half each. Either source can be missing, and the
+station carries on with the other.
+
+**YouTube Music, through yt-dlp.**
+
+- **Search:** `https://music.youtube.com/search?q=<query>#songs` with
+  `--flat-playlist` returns real songs: titles and ids, no views or durations.
+- **Anchors** come from the first 5 results for the phrase. **Discoveries**
+  come from results 10 to 50, and from variant queries (the phrase plus
+  `underground`, `demo`, `new`, or a neighbouring tag).
+- **Resolving** gets the media URL, artist, track, duration and view count. A
+  discovery that resolves with over 1 M views is re-labelled as an anchor.
+- **Songs only:** anything outside 90 s to 12 min is skipped (no mixes, no full
+  albums).
+- A YouTube link seeds from its own Mix (`list=RD<id>`) for related songs. Its
+  title and tags supply the phrase for the Bandcamp side.
+
+**Bandcamp genre tags, with no yt-dlp needed.**
+
+- **The request:** `POST https://bandcamp.com/api/discover/1/discover_web` with
+  JSON `{"category_id":0,"tag_norm_names":[<tag>],"geoname_id":0,
+  "slice":<"new"|"rand"|"top">,"cursor":"*","size":60,"include_result_types":["a"]}`.
+  It is undocumented, and it can break.
+- **The response:** each result carries `band_name`, `title` (the release) and
+  `featured_track{title, duration, stream_url}`. `stream_url` is a signed MP3
+  that mpv plays directly. Results without a `featured_track` are skipped.
+- **Slices:** `new` and `rand` give discoveries, and `top` gives anchors.
+- **Tags from the phrase:** lower-cased and hyphenated (`swedish death metal`
+  -> `swedish-death-metal`). If that returns nothing, leading words are dropped
+  (`death-metal`). If nothing ever matches, as with an artist name, Bandcamp
+  sits out and YouTube carries the station.
+- **Pacing:** at most one Bandcamp request per 10 s per station, with a
+  `screech/<version>` User-Agent. Results are cached for 30 min.
+
+**New to you.** A discovery whose artist key appears in neither `tracks_heard`
+nor the loves is new. New artists come first among discoveries, and the strip
+shows `NEW TO YOU`.
+
+**No repeats.** A song (video id or Bandcamp track id) never repeats on a
+station within its last 200 songs, and the same artist never plays twice in a
+row.
+
+**Titles.** Cleanup applies only to discovery songs. Bracketed or parenthesised
+packaging is removed: Official (Music) Video/Audio, Official Visualizer,
+Lyric(s) Video, Audio, Video, HD, HQ and 4K. Remaster and live notes stay.
+Trailing `ft.`, `feat.` and `featuring` credits are removed, and ` - Topic` is
+removed from a channel name used as the artist; then `core.CleanText` runs.
+yt-dlp's `artist` and `track` are used when present, otherwise the cleaned
+video title through the existing split. Bandcamp gives `band_name` and
+`featured_track.title`.
+
+**yt-dlp.**
+
+- **Lookup order:** `ytdlp_path = ""` (the default) means find it: PATH, then
+  beside the executable, then the data folder. `"off"` disables it, and any
+  other value is used as given.
+- **JS runtime:** Deno on PATH is used as is. Otherwise the first of node and
+  bun on PATH is passed as `--js-runtimes <name>:<path>`.
+- **Process rules:** one yt-dlp process at a time, app-wide, with a tune's
+  lookups ahead of prefetches; the working directory is the data folder; and
+  `--no-warnings`.
+- **Caches,** in memory only: search results for 6 h, media URLs for 1 h. Media
+  URLs are never written to the database, the config or the log.
+- **Without yt-dlp,** discovery stations still play from Bandcamp. A YouTube
+  link station can't start, and says why on the strip.
+- **`screech doctor`** reports the yt-dlp it found, where, and its version, and
+  suggests `yt-dlp -U` when that release is over 60 days old. It also reports
+  the JS runtime it will hand yt-dlp, whether Bandcamp's discover feed answered,
+  and how many discovery stations the config carries.
 
 ## The algorithm
 
@@ -790,29 +974,33 @@ and `NOW PLAYING` as the artist.
 
 One TOML at `os.UserConfigDir()/screech/config.toml`, created with commented
 defaults on first run: `accent`, `ascii`, `mpv_path`, `data_dir`, `auto_hop_ads`,
-`sync_limit`, `ytdlp_path` (empty: page links off), and a commented example
-of `[[stations]]`. `data_dir` expands
+`sync_limit`, `ytdlp_path` (empty: find yt-dlp; `"off"`: never use it), and
+commented examples of `[[stations]]` and a discovery station. `data_dir` expands
 `~` and resolves relative paths against the config directory (a
 double-click launch has a different CWD than a shell).
 Bad values never stop the radio: unknown keys, a malformed accent, and an
 out-of-range `sync_limit` (1–50,000) are repaired with a warning in the log
 and in `screech doctor`; only invalid TOML is fatal.
 
-`[[stations]]` tables (see Station data) take `name` and `url` (required)
-and `tags` (a string or a list), `codec`, `bitrate`, `country`, `homepage`.
+`[[stations]]` tables (see Station data) take `name` and exactly one of `url`
+or `discover` (required), and `tags` (a string or a list), `codec`, `bitrate`,
+`country`, `homepage`. `discover` is a phrase or a YouTube link that starts a
+discovery station, and it takes the place of `url`.
 They are decoded in a second pass of their own, field by field, because
 decoding them into the config struct would turn one wrong type into a fatal
 load. Every text field goes through `core.CleanText`; tags are lowercased
 and comma-joined; the url must pass the player's own rule (http or https,
-with a host). A table missing its name or url, with a link that fails the
-rule, or repeating an earlier table's link (by `custom:` id) is skipped, and
+with a host). A table missing its name, with neither or both of `url` and
+`discover`, with a link that fails the rule, or repeating an earlier table's
+link (by `custom:` id) is skipped, and
 an unknown key or a wrongly typed field is dropped, each with a warning that
 names the table. A top-level setting written below a `[[stations]]` header
 belongs to that table in TOML; its warning says so and where to move it,
-rather than calling it unknown. A page link while `ytdlp_path` is empty
-loads but is warned about, since it can't play. `screech doctor` reports
-how many stations the config carries, and checks yt-dlp when `ytdlp_path`
-is set (exit bit 32 when it won't run).
+rather than calling it unknown. A page link with yt-dlp off or not found loads
+but is warned about, since it can't play. `screech doctor` reports how many
+stations the config carries and how many of them are discovery stations, and
+checks yt-dlp (exit bit 32 when it won't run) and Bandcamp's discover feed
+(exit bit 64 when it doesn't answer).
 
 ## Stack
 
