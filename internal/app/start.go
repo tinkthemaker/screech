@@ -71,7 +71,10 @@ type Runtime struct {
 	// Notice reports a recovered database: "database was damaged; moved
 	// aside to <file> and started fresh", or "".
 	Notice string
-	Log    *Log
+	// NoYtdlp is true when startup found no yt-dlp (off, or nowhere to be
+	// found): YouTube links cannot start a station, phrases still can.
+	NoYtdlp bool
+	Log     *Log
 
 	release func() // single-instance lock
 }
@@ -145,7 +148,7 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 		return nil, failStage(log, StageMpv, err)
 	}
 	log.Linef("mpv connected over IPC")
-	wireDiscovery(pl, discoveryDeps{Config: cfg, ExeDir: executableDir(), Known: c.KnownArtist, Log: log})
+	haveYtdlp := wireDiscovery(pl, discoveryDeps{Config: cfg, ExeDir: executableDir(), Known: c.KnownArtist, Log: log})
 
 	// mpv boots at --volume=100; restore the persisted level now, on this
 	// thread, so the first Play can't beat the face's async volume command
@@ -154,7 +157,7 @@ func StartFrom(log *Log, load func() (config.Config, string, error)) (*Runtime, 
 		log.Linef("volume restore failed: %v", err)
 	}
 
-	return &Runtime{Config: cfg, DBPath: dbPath, Core: c, Player: pl, Notice: notice, Log: log, release: release}, nil
+	return &Runtime{Config: cfg, DBPath: dbPath, Core: c, Player: pl, Notice: notice, NoYtdlp: !haveYtdlp, Log: log, release: release}, nil
 }
 
 // executableDir is the folder holding the running screech, one of the places

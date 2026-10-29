@@ -101,6 +101,7 @@ func main() {
 		SyncLimit:  rt.Config.SyncLimit,
 		AutoHopAds: rt.Config.AutoHopAds,
 		Notice:     rt.Notice,
+		NoYtdlp:    rt.NoYtdlp,
 		Dot:        "·",
 	})
 	sh := newShell(rt)

@@ -99,6 +99,10 @@ type Options struct {
 	Notice string
 	// Dot is the separator in notes and feedback; "" means "·".
 	Dot string
+	// NoYtdlp says this machine has no usable yt-dlp (off, or not found), so
+	// a YouTube link cannot start a station. The zero value assumes there is
+	// one; phrases never need it, since Bandcamp carries them.
+	NoYtdlp bool
 }
 
 // State is the whole listening session in one value. Faces read the

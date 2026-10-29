@@ -246,7 +246,7 @@ func run() (exit int) {
 	defer rt.Close()
 
 	opts := tui.Options{Accent: rt.Config.Accent, ASCII: rt.Config.ASCII, ReducedMotion: reducedMotion,
-		Session: session.Options{SyncLimit: rt.Config.SyncLimit, AutoHopAds: rt.Config.AutoHopAds, Notice: rt.Notice}}
+		Session: session.Options{SyncLimit: rt.Config.SyncLimit, AutoHopAds: rt.Config.AutoHopAds, Notice: rt.Notice, NoYtdlp: rt.NoYtdlp}}
 	if os.Getenv("SCREECH_REDUCED_MOTION") != "" {
 		reducedMotion = true
 		opts.ReducedMotion = true

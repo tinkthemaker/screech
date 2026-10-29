@@ -62,7 +62,9 @@ func newBandcamp() discover.Bandcamp {
 // do with it: page links resolve through it, and the discover: sentinel opens
 // song queues that use it when it is there and play from Bandcamp when it is
 // not. Nothing here fails startup; at worst a station can't start and says so.
-func wireDiscovery(sink discoverySink, d discoveryDeps) {
+// It reports whether there is a yt-dlp to use, which the faces need in order
+// to say why a YouTube link cannot start a station.
+func wireDiscovery(sink discoverySink, d discoveryDeps) (haveYtdlp bool) {
 	cfg := d.Config
 	path, haveYt := ytdlp.Find(cfg.YtdlpPath, d.ExeDir, cfg.DataDir)
 
@@ -102,6 +104,7 @@ func wireDiscovery(sink discoverySink, d discoveryDeps) {
 	sink.SetSongSources(newSongSources(yt, bc, d.Known).open)
 	// Never a media URL: they are signed, and a log gets pasted.
 	d.Log.Linef("discovery: %s, bandcamp on", state)
+	return haveYt
 }
 
 // songSources opens a discovery station's songs.

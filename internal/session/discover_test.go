@@ -462,3 +462,215 @@ func TestPlayFailedNetworkTakesOfflinePath(t *testing.T) {
 		}
 	})
 }
+
+// NEXT while paused on a discovery station is still next-song, not a station
+// skip: it resumes, and what plays is the next song.
+func TestNextWhilePausedOnDiscoveryResumesWithTheNextSong(t *testing.T) {
+	s, pl := testState(t)
+	s = playingDiscovery(t, s, "swedish death metal")
+	s = paused(t, s)
+	uuid, seq, plays := s.Station.UUID, s.PickSeq, pl.playCount()
+	s.Now = s.Now.Add(10 * time.Second) // a short pause: the song is still loaded
+
+	s = drive(t, s, Next{})
+
+	if n := pl.nextSongCount(); n != 1 {
+		t.Fatalf("NextSong should be called once, got %d (calls %v)", n, pl.callsList())
+	}
+	if s.Station.UUID != uuid || s.PickSeq != seq {
+		t.Fatalf("NEXT while paused changed the station: seq %d->%d", seq, s.PickSeq)
+	}
+	if s.Phase != Tuning || !s.Resuming {
+		t.Fatalf("want a resuming tune, got phase=%v resuming=%v", s.Phase, s.Resuming)
+	}
+	if s.Feedback != nextSongFeedback {
+		t.Fatalf("feedback = %q, want %q", s.Feedback, nextSongFeedback)
+	}
+	if pl.playCount() != plays {
+		t.Fatalf("a short pause resumes in place and must not reload: calls %v", pl.callsList())
+	}
+	// The old song stays held until its successor is on its way: asking for
+	// the next song comes before the unpause.
+	calls := pl.callsList()
+	if len(calls) < 2 || calls[len(calls)-2] != "next-song" || calls[len(calls)-1] != "pause false" {
+		t.Fatalf("want next-song then pause false, calls %v", calls)
+	}
+	if !s.core.ListenOpen() {
+		t.Fatal("the listen must reopen as a continuation, so the station is not charged a skip")
+	}
+
+	s = drive(t, s, PlayerEvent(player.Event{Type: player.EventPlaying}))
+	if s.Phase != Playing || s.Resuming {
+		t.Fatalf("stream lock should land Playing, got %v resuming=%v", s.Phase, s.Resuming)
+	}
+}
+
+// After a long pause the song is stale and resume reloads the station; a
+// reload of a discovery station opens at the next song (the queue never
+// repeats), so NEXT has nothing more to ask for.
+func TestNextWhilePausedLongOnDiscoveryReloadsAtTheNextSong(t *testing.T) {
+	s, pl := testState(t)
+	s = playingDiscovery(t, s, "swedish death metal")
+	s = paused(t, s)
+	url, uuid, seq := s.Station.StreamURL(), s.Station.UUID, s.PickSeq
+	s.Now = s.Now.Add(resumeInPlace + time.Second)
+
+	s = drive(t, s, Next{})
+
+	if lastCall(pl) != "play "+url {
+		t.Fatalf("a long pause reloads the station, calls %v", pl.callsList())
+	}
+	if s.Station.UUID != uuid || s.PickSeq != seq {
+		t.Fatalf("NEXT while paused changed the station: seq %d->%d", seq, s.PickSeq)
+	}
+	if s.Phase != Tuning || s.Feedback != nextSongFeedback {
+		t.Fatalf("phase=%v feedback=%q", s.Phase, s.Feedback)
+	}
+	if !s.core.ListenOpen() {
+		t.Fatal("the listen must reopen")
+	}
+}
+
+// A refused NEXT SONG while paused still resumes: the listener pressed a key
+// to hear something, and the refusal is a note.
+func TestNextWhilePausedSongFailureStillResumes(t *testing.T) {
+	s, pl := testState(t)
+	pl.failNextSong(errors.New("no queue"))
+	s = playingDiscovery(t, s, "swedish death metal")
+	s = paused(t, s)
+	s.Now = s.Now.Add(10 * time.Second)
+	s = drive(t, s, Next{})
+	if lastCall(pl) != "pause false" {
+		t.Fatalf("calls %v", pl.callsList())
+	}
+	if !strings.Contains(s.Note, "no queue") {
+		t.Fatalf("a refused NEXT SONG should say so, note=%q", s.Note)
+	}
+}
+
+// On radio, and for a pause that is not on a discovery station, NEXT keeps
+// its meaning: a station skip.
+func TestNextWhilePausedOnRadioStillSkipsTheStation(t *testing.T) {
+	s, pl := testState(t)
+	s = playing(t, s)
+	s = paused(t, s)
+	seq := s.PickSeq
+	s = drive(t, s, Next{})
+	if pl.nextSongCount() != 0 {
+		t.Fatal("a radio station has no queue to advance")
+	}
+	if s.PickSeq == seq {
+		t.Fatal("NEXT on paused radio should still change station")
+	}
+}
+
+// --- seeds that cannot start (F7) -----------------------------------------------------
+
+// stationRows is how many stations the library holds: a refused seed must not
+// add one, or it would sit in "pick up where you left off" with a strike.
+func stationRows(s State) int { return s.core.StationCount() }
+
+func TestDiscoverRefusesLinksThatAreNotAVideo(t *testing.T) {
+	for _, seed := range []string{
+		"https://www.youtube.com/playlist?list=PL1234567890",
+		"https://www.youtube.com/@somechannel",
+		"https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv",
+		"https://soundcloud.com/some/song",
+		"https://example.com/stream.mp3",
+		"ftp://example.com/x",
+	} {
+		t.Run(seed, func(t *testing.T) {
+			s, pl := testState(t)
+			rows := stationRows(s)
+
+			s = drive(t, s, Discover{Query: seed})
+
+			want := "can't start from that link · paste a YouTube video, or type a genre or artist"
+			if s.Note != want {
+				t.Errorf("note = %q, want %q", s.Note, want)
+			}
+			if s.Phase != Idle || s.HaveStation || pl.playCount() != 0 {
+				t.Errorf("nothing may start: phase=%v station=%v plays=%d", s.Phase, s.HaveStation, pl.playCount())
+			}
+			if n := stationRows(s); n != rows {
+				t.Errorf("a refused seed left a station row behind (%d -> %d)", rows, n)
+			}
+			if _, ok := s.core.StationByUUID(core.DiscoveryUUID(seed)); ok {
+				t.Error("the refused seed has a station")
+			}
+		})
+	}
+}
+
+func TestDiscoverYouTubeLinkNeedsYtdlp(t *testing.T) {
+	const link = "https://www.youtube.com/watch?v=abcdefghijk&list=PL1"
+	c, err := core.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	pl := newStubPlayer()
+	s := New(c, pl, Options{NoYtdlp: true})
+	rows := stationRows(s)
+
+	s = drive(t, s, Discover{Query: link})
+
+	want := "YouTube links need yt-dlp · see screech doctor"
+	if s.Note != want {
+		t.Errorf("note = %q, want %q", s.Note, want)
+	}
+	if s.Phase != Idle || s.HaveStation || pl.playCount() != 0 {
+		t.Errorf("nothing may start: phase=%v station=%v plays=%d", s.Phase, s.HaveStation, pl.playCount())
+	}
+	if n := stationRows(s); n != rows {
+		t.Errorf("a refused link left a station row behind (%d -> %d)", rows, n)
+	}
+	// Every spelling of a video link is a YouTube link.
+	for _, spelled := range []string{"https://youtu.be/abcdefghijk?t=3", "music.youtube.com/watch?v=abcdefghijk", "https://www.youtube.com/shorts/abcdefghijk"} {
+		s.Note = ""
+		s = drive(t, s, Discover{Query: spelled})
+		if s.Note != want || s.HaveStation {
+			t.Errorf("%q: note=%q station=%v", spelled, s.Note, s.HaveStation)
+		}
+	}
+
+	// A phrase needs no yt-dlp: Bandcamp carries it.
+	s.Note = ""
+	s = drive(t, s, Discover{Query: "swedish death metal"})
+	if s.Note != "" || !s.HaveStation || s.Phase != Tuning {
+		t.Errorf("a phrase without yt-dlp should still start: note=%q phase=%v", s.Note, s.Phase)
+	}
+}
+
+func TestDiscoverYouTubeLinkStartsWithYtdlp(t *testing.T) {
+	s, pl := testState(t)
+	s = drive(t, s, Discover{Query: "https://youtu.be/abcdefghijk"})
+	if s.Note != "" || !s.HaveStation || !core.IsDiscovery(s.Station.UUID) {
+		t.Fatalf("a video link with yt-dlp should start: note=%q station=%v", s.Note, s.HaveStation)
+	}
+	if got := pl.lastPlay(); !strings.HasPrefix(got, core.DiscoverScheme) {
+		t.Errorf("the player should be pointed at the sentinel, got %q", got)
+	}
+}
+
+// The terminal's ASCII mode stays 7-bit: the notes ride the session's dot.
+func TestDiscoverRefusalNotesUseTheSessionDot(t *testing.T) {
+	c, err := core.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	s := New(c, newStubPlayer(), Options{Dot: "-", NoYtdlp: true})
+	for _, seed := range []string{"https://example.com/x", "https://youtu.be/abcdefghijk"} {
+		s.Note = ""
+		s = drive(t, s, Discover{Query: seed})
+		if s.Note == "" || !strings.Contains(s.Note, " - ") {
+			t.Errorf("%q: note = %q, want the session's dot in it", seed, s.Note)
+		}
+		for _, r := range s.Note {
+			if r > 0x7f {
+				t.Errorf("%q: note %q leaks a non-ASCII rune into ascii mode", seed, s.Note)
+			}
+		}
+	}
+}

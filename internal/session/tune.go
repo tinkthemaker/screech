@@ -8,6 +8,7 @@ import (
 
 	"github.com/tinkthemaker/screech/internal/core"
 	"github.com/tinkthemaker/screech/internal/player"
+	"github.com/tinkthemaker/screech/internal/streamurl"
 )
 
 // tick runs the frame-clock watchdogs: a tune that never locks fails
@@ -100,6 +101,9 @@ func (s State) next() (State, []Cmd) {
 		// early rather than tuning away from the outage.
 		return s.offlineRetry()
 	}
+	if s2, cmds, ok := s.nextSongFromPause(); ok {
+		return s2, cmds
+	}
 	if cmd, ok := s.beginNextSong(); ok {
 		return s, []Cmd{cmd}
 	}
@@ -148,6 +152,51 @@ func (s *State) beginNextSong() (Cmd, bool) {
 	}, true
 }
 
+// nextSongFromPause is NEXT on a discovery station that is paused: the same
+// next-song a playing one gets, which also resumes, since a listener who
+// presses NEXT wants to hear it. Without it NEXT would tune a different
+// station out from under the pause. It reports false where beginNextSong
+// does: not a discovery station, no queue behind the player, or a second NEXT
+// inside songNextWindow.
+//
+// A short pause leaves the song loaded: the next song is asked for first and
+// the unpause follows in the same command, so the old song is not heard to
+// start again while its successor is already on its way. A long pause is
+// resumed by reloading the station, which opens at the next song on its own
+// (the queue never serves a song twice), so there is nothing more to ask.
+func (s State) nextSongFromPause() (State, []Cmd, bool) {
+	if s.Phase != Paused || !s.discovery() {
+		return s, nil, false
+	}
+	sq, ok := s.pl.(player.SongQueue)
+	if !ok {
+		return s, nil, false
+	}
+	if !s.lastSongNextAt.IsZero() && s.Now.Sub(s.lastSongNextAt) < songNextWindow {
+		s.lastSongNextAt = time.Time{} // the skip ends this run of NEXTs
+		return s, nil, false
+	}
+	inPlace := s.Now.Sub(s.PausedAt) < resumeInPlace && !s.pauseReload
+	pl, c, uuid, dot := s.pl, s.core, s.Station.UUID, s.dot()
+	s, cmds := s.resume(false)
+	s.lastSongNextAt = s.Now
+	s.setFeedback("NEXT SONG  Again for a new station")
+	if inPlace {
+		cmds = []Cmd{func() Msg {
+			nextErr := sq.NextSong()
+			if err := pl.SetPaused(false); err != nil {
+				return PauseSet{Err: err}
+			}
+			c.ResumeListen(uuid, time.Now())
+			if nextErr != nil {
+				return Notify{Note: "next song failed " + dot + " " + nextErr.Error()}
+			}
+			return nil
+		}}
+	}
+	return s, cmds, true
+}
+
 // tuneTo plays a station by identity — library rows and preset recall all
 // land here.
 func (s State) tuneTo(msg TuneTo) (State, []Cmd) {
@@ -177,7 +226,29 @@ func (s State) discover(msg Discover) (State, []Cmd) {
 	if seed == "" {
 		return s, nil
 	}
+	if why := s.cannotStart(seed); why != "" {
+		s.Note = why
+		return s, nil
+	}
 	return s, []Cmd{s.discoverCmd(seed)}
+}
+
+// cannotStart says why a seed cannot start a station, or "" when it can. It
+// runs before the station exists: a seed that is refused later, at the first
+// song, would already have a row, a strike and a place under "pick up where
+// you left off" for something that never played. A link is a YouTube video
+// or nothing; a playlist, a channel and every other site have no songs to
+// find, and a video needs yt-dlp. A phrase needs neither, and that includes
+// one that merely mentions a site.
+func (s State) cannotStart(seed string) string {
+	_, video := streamurl.YouTubeID(seed)
+	switch {
+	case !video && strings.Contains(seed, "://"):
+		return "can't start from that link " + s.dot() + " paste a YouTube video, or type a genre or artist"
+	case video && s.opts.NoYtdlp:
+		return "YouTube links need yt-dlp " + s.dot() + " see screech doctor"
+	}
+	return ""
 }
 
 // discoverCmd starts the station in core, which ends the current listen the

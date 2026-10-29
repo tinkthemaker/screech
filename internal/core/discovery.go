@@ -94,6 +94,12 @@ func (c *Core) StartDiscovery(seed string, now time.Time) (Pick, error) {
 	if !ok {
 		return Pick{}, errors.New("nothing to discover from")
 	}
+	// A link that isn't a YouTube video has no songs to find. Refused here as
+	// well as by the session, so no caller can leave behind a row that would
+	// only ever fail its first song and earn a strike.
+	if clean := CleanText(seed); !isYouTubeVideo(clean) && strings.Contains(clean, "://") {
+		return Pick{}, errors.New("not a YouTube video link")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	have := c.stationByUUIDLocked(st.UUID)
@@ -188,4 +194,9 @@ func (c *Core) KnownArtist(artistKey string) bool {
 	}
 	known, err := c.store.HeardArtistKey(artistKey)
 	return err == nil && known
+}
+
+func isYouTubeVideo(link string) bool {
+	_, ok := streamurl.YouTubeID(link)
+	return ok
 }

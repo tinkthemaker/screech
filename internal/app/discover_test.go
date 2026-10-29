@@ -107,8 +107,9 @@ func cleanPath(t *testing.T) {
 
 // fakeSink stands in for the player: it keeps what the app hands it.
 type fakeSink struct {
-	ex   player.Extractor
-	open func(seed string) (player.SongSource, error)
+	haveYtdlp bool // what wireDiscovery reported
+	ex        player.Extractor
+	open      func(seed string) (player.SongSource, error)
 }
 
 func (f *fakeSink) SetExtractor(ex player.Extractor) { f.ex = ex }
@@ -139,7 +140,7 @@ func wire(t *testing.T, sink *fakeSink, cfg config.Config, exeDir string, bc dis
 	logPath := filepath.Join(t.TempDir(), "screech.log")
 	log := NewLog(logPath)
 	log.Open()
-	wireDiscovery(sink, discoveryDeps{Config: cfg, ExeDir: exeDir, Known: func(string) bool { return false }, Bandcamp: bc, Log: log})
+	sink.haveYtdlp = wireDiscovery(sink, discoveryDeps{Config: cfg, ExeDir: exeDir, Known: func(string) bool { return false }, Bandcamp: bc, Log: log})
 	log.Close()
 	b, _ := os.ReadFile(logPath)
 	return string(b)
@@ -160,6 +161,9 @@ func TestStartWiresSongSources(t *testing.T) {
 
 	if want := "discovery: yt-dlp " + ytPath + " (node), bandcamp on"; !strings.Contains(logText, want) {
 		t.Errorf("log lacks %q:\n%s", want, logText)
+	}
+	if !sink.haveYtdlp {
+		t.Error("wireDiscovery did not report the yt-dlp it found")
 	}
 	if strings.Contains(logText, "googlevideo") || strings.Contains(logText, "bc.example") {
 		t.Errorf("a media URL reached the log:\n%s", logText)
@@ -226,6 +230,9 @@ func TestWiringWithoutYtdlp(t *testing.T) {
 	if sink.ex != nil {
 		t.Errorf("an extractor was installed with yt-dlp off: %T", sink.ex)
 	}
+	if sink.haveYtdlp {
+		t.Error("wireDiscovery reported a yt-dlp with yt-dlp off: the faces would offer YouTube links")
+	}
 	if sink.open == nil {
 		t.Fatal("discover: must still be taught: Bandcamp needs no yt-dlp")
 	}
@@ -252,6 +259,9 @@ func TestWiringWithoutYtdlp(t *testing.T) {
 	logText = wire(t, sink, config.Config{DataDir: empty}, t.TempDir(), fakeBandcamp{n: 1})
 	if !strings.Contains(logText, "discovery: yt-dlp not found, bandcamp on") || sink.ex != nil || sink.open == nil {
 		t.Errorf("nothing found: log = %q, extractor %T, open set %v", logText, sink.ex, sink.open != nil)
+	}
+	if sink.haveYtdlp {
+		t.Error("wireDiscovery reported a yt-dlp when none was found")
 	}
 
 	// A path the listener wrote down is used as given, and the log says if

@@ -434,3 +434,28 @@ func TestClickSkipsDiscovery(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// A seed that is a link but not a YouTube video is not something discovery
+// can start from: it would only strike a station that was never real.
+func TestStartDiscoveryRefusesLinksThatAreNotAVideo(t *testing.T) {
+	c := openTestCore(t)
+	rows := c.StationCount()
+	for _, seed := range []string{
+		"https://www.youtube.com/playlist?list=PL1234567890",
+		"https://soundcloud.com/some/song",
+		"ftp://example.com/x",
+	} {
+		if _, err := c.StartDiscovery(seed, time.Now()); err == nil {
+			t.Errorf("StartDiscovery(%q) succeeded", seed)
+		}
+	}
+	if n := c.StationCount(); n != rows {
+		t.Errorf("refused seeds left %d station rows behind", n-rows)
+	}
+	// A video link and a phrase still start.
+	for _, seed := range []string{"https://youtu.be/abcdefghijk", "swedish death metal"} {
+		if _, err := c.StartDiscovery(seed, time.Now()); err != nil {
+			t.Errorf("StartDiscovery(%q): %v", seed, err)
+		}
+	}
+}
