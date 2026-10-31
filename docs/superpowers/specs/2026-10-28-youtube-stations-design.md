@@ -293,6 +293,106 @@ in a row.
   present, otherwise the cleaned video title through the existing split.
   Bandcamp gives `band_name` and `featured_track.title`.
 
+## Revision, 2026-10-31: song radio, resume, diagnostics
+
+After a day of listening, the owner reported two problems.
+
+**Name matching.** Searching for the song "engorged in putrescence" kept
+playing songs with "putrescence" in the title. The owner's words: "It
+first should try to play the song typed then it should auto shuffle similar
+styles of songs just like any algo radio."
+
+**Cut-off songs.** Songs from FIND sometimes play shortened. Investigation
+ruled out each of these:
+- YouTube throttling: a full 399 s song played in real time.
+- Truncated YouTube content: seeking near the end of the owner's songs
+  worked.
+- Bandcamp: 12 of 12 streams were complete.
+- Dropped connections: mpv resumes from a `Range` offset.
+- A personal `mpv.conf`: there is none.
+
+A 14-minute probe of the real player played every song to its length.
+What remains in our own code: any session reconnect on a discovery station
+(a buffering stall over 20 s, a network blip, an mpv restart) calls `Play`
+on the station, and the player starts the **next** song, so the current
+song is cut. Nothing logs why a song ended.
+
+### What a typed phrase becomes
+
+FIND classifies a phrase with Bandcamp's public search,
+`POST https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic`
+with JSON `{"search_text":<phrase>,"search_filter":"","full_page":false,"fan_id":null}`,
+in parallel with the first YouTube lookup and capped at 2 s. Names are
+compared case-, space- and punctuation-insensitively. In order:
+
+1. **An exact artist match** (a result of `type` `b` whose `name` equals the
+   phrase): **artist radio**. The first song is that artist's top YouTube
+   Music song. The style tags are that band's `tag_names`.
+2. **An exact song or album match** (`type` `t` or `a` whose `name` equals the
+   phrase): **song radio**. The first song is that song. It comes from YouTube
+   Music (`"<band> <name>"`, the first hit whose artist is the band), or else
+   from the Bandcamp page itself through yt-dlp. The style tags are the
+   band's.
+3. **An exact tag match** (`tag.matches[].norm_name` equals the hyphenated
+   phrase): **genre station**. This is today's behaviour.
+4. **Anything else:** **song radio** from YouTube Music's top song hit for
+   the phrase. Its style tags come from a Bandcamp search for that song's
+   artist.
+
+A pasted YouTube link is song radio from that video. Its style tags come
+from its artist's Bandcamp band, or else from its own tags.
+
+If Bandcamp can't be reached, the phrase falls through to step 4. If an
+artist has no Bandcamp page, song radio uses the tags of other artists
+found in the seed's Mix, the three most common.
+
+### Where song radio finds songs
+
+- **First,** the seed song: the one typed, or the artist's top song.
+- **Discoveries** come from three places:
+  - the Bandcamp feeds (`new`, `rand`) for the style tags;
+  - YouTube's Mix of the seed, plus the Mixes of songs by other artists
+    found in it (one hop, so the station leaves the seed band);
+  - YouTube Music song searches on the style tags, results 10–50.
+- **Anchors:** Bandcamp `top` for the style tags, and the first 5 YouTube
+  Music results for the style tags.
+- **Not used:** the typed phrase is used only to find the seed song. It is
+  never searched again, and words are never dropped from it to make a tag.
+- **Style tags:** up to three. Drop a band's top-level genre (its
+  `genre_name`, e.g. "Metal") when more specific tags exist, and drop tags
+  that name its location. Hyphenate the rest for Bandcamp's feed.
+- **Artist spacing:** on song or artist radio, an artist plays at most once
+  in any 8 songs in a row. A song's Mix is mostly its own band (45 of 50 for
+  a Topic track), and this is what turns it into a radio. Genre stations
+  keep "never the same artist twice in a row".
+- **Unchanged:** the anchor share, new-to-you first, no repeats within 200,
+  the 90 s – 12 min rule, and Bandcamp pacing.
+
+### Reconnects resume the song
+
+- **The player keeps each song's duration** and roughly where it is in it:
+  wall time since its load, minus pauses.
+- **Same station, same song:** when `Play` is called for the discovery
+  station already playing (a session reconnect) and a song is in progress
+  and not near its end, the player reloads that song from where it was.
+  It uses mpv's per-file `start=<seconds>`, and resolves the song again if
+  its URL is over an hour old. It does not start the next song.
+- **At most twice** per song. After that, the next song plays.
+
+### Diagnostics
+
+When a discovery song ends, `screech.log` gets one line:
+`song <key> <source> expected <d>s played <p>s ended <why>`.
+- `<why>` is `eof`, `error: <mpv's reason>`, `next`, `new station` or
+  `resumed`.
+- The source is `bandcamp`, or the YouTube client (`c=…`).
+- No URL is logged.
+
+### Titles
+
+- A literal `null`, `NA` or `None` from a source counts as empty.
+- Trailing commas and separators are trimmed from artist names.
+
 ## Retiring the pilot
 
 - **yt-dlp:** the pilot's `yt-dlp.exe` is copied into `%APPDATA%\screech\`,
