@@ -64,7 +64,9 @@ type Event struct {
 
 type Player interface {
 	// Play switches to the given stream URL. Returns quickly; progress
-	// arrives as events.
+	// arrives as events. Playing a discovery station that is already
+	// playing is a reconnect, and picks its current song up where it stopped
+	// instead of starting the next (see reconnectLocked).
 	Play(url string) error
 	// SetVolume changes this player's output only, from silent (0) to full (100).
 	SetVolume(percent int) error

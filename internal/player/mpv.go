@@ -68,6 +68,15 @@ type MPV struct {
 	// through them while one plays, nil for radio. See queue.go.
 	openSource func(seed string) (SongSource, error)
 	queue      *songQueue
+	// carried is the queue whose mpv died while it had a song in progress,
+	// waiting for the session's Play of the same station on the new process
+	// to take the song up where it stopped. Any other Play forgets it.
+	carried *songQueue
+	// songLog says how each discovery song ended (nil: nothing is said).
+	songLog func(format string, args ...any)
+	// now is the clock the queue's reasoning about time reads (nil: the real
+	// one); a test sets it.
+	now func() time.Time
 
 	mpvPath string
 	dataDir string
@@ -231,8 +240,9 @@ func (m *MPV) spawn() error {
 	m.reqID = reqID
 	m.loadPending = false
 	// A walk through songs belongs to the process that was playing it; the
-	// session re-plays the station on the new one.
-	m.dropQueueLocked()
+	// session re-plays the station on the new one, and the song it was in
+	// the middle of is carried over for that Play to pick up.
+	m.dropQueueLocked(endDied)
 	m.sawIcy, m.sawL, m.sawR = false, false, false
 	m.junkTitles, m.mpvFilename = nil, ""
 	m.paused, m.coreIdle = false, true
@@ -269,7 +279,8 @@ func (m *MPV) Play(streamURL string) error {
 	seq, pages := m.playSeq, m.pages
 	// A radio station ends any discovery walk: its songs must stop
 	// advancing, and its stream's end is a dropped stream again.
-	m.dropQueueLocked()
+	m.carried = nil
+	m.dropQueueLocked(endNewStation)
 	m.mu.Unlock()
 
 	target, title, page := streamURL, "", ""
@@ -383,7 +394,8 @@ func (m *MPV) Close() error {
 		return nil
 	}
 	m.closed = true
-	m.dropQueueLocked()
+	m.carried = nil
+	m.dropQueueLocked(endStopped)
 	conn, cmd, path := m.conn, m.cmd, m.ipcPath
 	m.mu.Unlock()
 	_ = m.send("quit")
@@ -482,7 +494,8 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 				}
 				// Otherwise nothing is loaded any more, so a discovery walk
 				// must not load behind it.
-				m.dropQueueLocked()
+				m.carried = nil
+				m.dropQueueLocked(endStopped)
 				m.mu.Unlock()
 				emit(events, Event{Type: EventStopped})
 			case "error":
@@ -512,7 +525,7 @@ func (m *MPV) readLoop(conn net.Conn, events chan Event, stderr *tailBuf, exited
 	if m.events == events {
 		// Before the channel closes: a lookup running for the queue emits
 		// only while the queue is registered, under this lock.
-		m.dropQueueLocked()
+		m.dropQueueLocked(endDied)
 	}
 	m.mu.Unlock()
 	if !closed {
@@ -613,6 +626,7 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 			return
 		}
 		m.paused = paused
+		m.syncSongClockLocked()
 		idle := m.coreIdle
 		m.mu.Unlock()
 		if paused {
@@ -632,6 +646,7 @@ func (m *MPV) handleProperty(events chan Event, msg mpvMsg) {
 		}
 		m.mu.Lock()
 		m.coreIdle = idle
+		m.syncSongClockLocked()
 		paused := m.paused
 		if !idle && m.queue != nil {
 			// Audio is flowing: the song got past resolving and opening, so

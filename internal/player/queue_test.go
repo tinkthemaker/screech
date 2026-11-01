@@ -709,7 +709,7 @@ func TestQueueDroppedWhileResolvingIsSuperseded(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	m.mu.Lock()
-	m.dropQueueLocked()
+	m.dropQueueLocked(endStopped)
 	m.mu.Unlock()
 	select {
 	case err := <-done:

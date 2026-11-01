@@ -144,18 +144,12 @@ func runFakeMPV(args []string) int {
 		case "loadfile":
 			url, _ := msg.Command[1].(string)
 			base := url[strings.LastIndex(url, "/")+1:]
-			// loadfile <url> replace -1 force-media-title=%n%<title>: the
-			// forced title replaces the ICY one, as mpv's media-title does.
+			// loadfile <url> replace -1 [start=<s>,]force-media-title=%n%<title>:
+			// the forced title replaces the ICY one, as mpv's media-title does.
 			forced := ""
 			if len(msg.Command) > 4 {
 				opt, _ := msg.Command[4].(string)
-				if v, ok := strings.CutPrefix(opt, "force-media-title=%"); ok {
-					if n, rest, ok := strings.Cut(v, "%"); ok {
-						if size, err := strconv.Atoi(n); err == nil && size <= len(rest) {
-							forced = rest[:size]
-						}
-					}
-				}
+				forced = fakeLoadOptions(opt)["force-media-title"]
 			}
 			if lateStart {
 				// Replaced before it ever started: mpv reports nothing for
@@ -255,6 +249,33 @@ func runFakeMPV(args []string) int {
 		}
 	}
 	return 0
+}
+
+// fakeLoadOptions reads loadfile's per-file option list the way mpv does:
+// key=value pairs split on commas, except that a value opening with %n% is
+// exactly the next n bytes, whatever they hold.
+func fakeLoadOptions(opts string) map[string]string {
+	out := map[string]string{}
+	for opts != "" {
+		key, rest, ok := strings.Cut(opts, "=")
+		if !ok {
+			break
+		}
+		var val string
+		if quoted, ok := strings.CutPrefix(rest, "%"); ok {
+			n, tail, ok := strings.Cut(quoted, "%")
+			size, err := strconv.Atoi(n)
+			if !ok || err != nil || size > len(tail) {
+				break
+			}
+			val, opts = tail[:size], tail[size:]
+		} else {
+			val, opts, _ = strings.Cut(rest, ",")
+		}
+		out[key] = val
+		opts = strings.TrimPrefix(opts, ",")
+	}
+	return out
 }
 
 // startFakeMPV launches the test binary back at itself through the real

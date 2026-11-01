@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +37,8 @@ type Song struct {
 	Key, Artist, Title string
 	URL                string // the direct media URL: signed and short-lived, so never stored or logged
 	NewToYou           bool
-	Anchor             bool // a well-known track, not a find: loving it says nothing about the finds
+	Anchor             bool          // a well-known track, not a find: loving it says nothing about the finds
+	Duration           time.Duration // how long the song runs; 0 when the source doesn't know
 }
 
 // SongSource is the endless supply behind a discovery station. Next gets
@@ -86,6 +89,25 @@ const (
 	// still end the walk. The prefetch starts when a song loads and is read
 	// when it ends, minutes later; an outage verdict that old is asked again.
 	oldNetworkError = 5 * time.Second
+	// maxResumes is how many times one song is picked up again after a
+	// reconnect. A song that cannot be kept playing after two is not worth a
+	// third: the next one plays.
+	maxResumes = 2
+	// resumeNearEnd is how close to its end a song must be for a reconnect to
+	// move on instead: a reload would be a second of silence for nothing.
+	resumeNearEnd = 15 * time.Second
+)
+
+// How a discovery song ended, as the song log says it. A song also ends in
+// "error: <mpv's reason>", which carries its reason with it.
+const (
+	endEOF        = "eof"         // it played out
+	endNext       = "next"        // the listener pressed NEXT
+	endReconnect  = "reconnect"   // a reconnect found it too near its end, or too often reloaded, to resume
+	endResumed    = "resumed"     // a reconnect reloaded it where it had stopped; it plays on
+	endNewStation = "new station" // another station was chosen
+	endStopped    = "stopped"     // playback was stopped, from outside or by closing
+	endDied       = "died"        // mpv went away under it
 )
 
 // firstSongWait is the budget playQueue applies; a variable only so a test can
@@ -102,7 +124,8 @@ var (
 // songQueue is one discovery station's walk, from the Play that opened it to
 // the next Play (or a stop, or the backend's death) that ends it.
 type songQueue struct {
-	src SongSource
+	seed string
+	src  SongSource
 	// events is the channel of the mpv generation this queue plays into. A
 	// goroutine other than readLoop may emit on it only under MPV.mu while
 	// MPV.queue is still this queue: readLoop drops the queue under that
@@ -116,10 +139,64 @@ type songQueue struct {
 	cur       Song
 	haveCur   bool
 	loadedAt  time.Time
+	urlAt     time.Time // when cur's URL was handed out: a signed URL ages from here
+	clock     songClock // where in cur the listener is
+	resumes   int       // times cur has been reloaded where it stopped
+	curDone   bool      // cur has ended and its ending is logged; its successor is on the way
+	nextWhy   string    // why the next song replaces cur, when it isn't the listener's NEXT
 	next      *prefetch // the lookup for the song after cur, if one has started
 	advancing bool      // a goroutine is on its way to the next song
 	fails     int       // songs that failed in a row; audio flowing resets it
 	dead      bool      // gave up: the station has been reported failed
+}
+
+// songClock is where the listener is in a song: the time audio has been
+// flowing, from wherever the song began. Wall time since the load would also
+// count a pause and every second mpv sat waiting on its cache, and a
+// reconnect that follows a 20 s stall would then resume 20 s too far on.
+type songClock struct {
+	base  time.Duration // where in the song the running spells before this one add up to
+	since time.Time     // when the current spell began; zero while audio isn't flowing
+}
+
+// pos is how far into the song the listener is as of now.
+func (c *songClock) pos(now time.Time) time.Duration {
+	if c.since.IsZero() {
+		return c.base
+	}
+	return c.base + max(0, now.Sub(c.since))
+}
+
+// flowing records whether audio is flowing as of now. Saying the same thing
+// twice changes nothing.
+func (c *songClock) flowing(on bool, now time.Time) {
+	switch {
+	case on && c.since.IsZero():
+		c.since = now
+	case !on && !c.since.IsZero():
+		c.base = c.pos(now)
+		c.since = time.Time{}
+	}
+}
+
+// restart puts the clock at start with the audio not yet flowing.
+func (c *songClock) restart(start time.Duration) { *c = songClock{base: start} }
+
+// resumePoint says whether cur should be picked up where it stopped when the
+// station is played again, and where that is. Not when it has ended, has been
+// reloaded twice already, or its URL is too old to trust (the source can only
+// hand out what comes next, not re-resolve a song it already gave); and not
+// when it is within its last seconds, or, if its length is unknown, hasn't
+// played at all.
+func (q *songQueue) resumePoint(now time.Time) (time.Duration, bool) {
+	if !q.haveCur || q.curDone || q.resumes >= maxResumes || now.Sub(q.urlAt) >= songURLTTL {
+		return 0, false
+	}
+	pos := q.clock.pos(now)
+	if q.cur.Duration > 0 {
+		return pos, pos < q.cur.Duration-resumeNearEnd
+	}
+	return pos, pos > 0
 }
 
 // prefetch is one Next call running ahead of need. song, err and at are
@@ -140,8 +217,22 @@ func (m *MPV) SetSongSources(open func(seed string) (SongSource, error)) {
 	m.openSource = open
 }
 
-// playQueue is Play for discover:<seed>: find the first song under the
-// tune budget and load it, then start looking for the second.
+// SetSongLog makes the player say how each discovery song ended, one line
+// per song: its key, where its audio came from, the length it was expected to
+// have, how much of it played, and why it ended. Never the URL. logf is
+// called with the player's lock held, so it must not call back into the
+// player; a nil logf (the default) says nothing.
+func (m *MPV) SetSongLog(logf func(format string, args ...any)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.songLog = logf
+}
+
+// playQueue is Play for discover:<seed>. A station already playing is
+// reconnected, not restarted (reconnectLocked); otherwise find the first song
+// under the tune budget and load it, then start looking for the second. After
+// an mpv restart the first song is the one the dead process was playing,
+// from where it stopped.
 func (m *MPV) playQueue(seed string) error {
 	m.mu.Lock()
 	open := m.openSource
@@ -151,7 +242,13 @@ func (m *MPV) playQueue(seed string) error {
 	}
 	m.playSeq++
 	seq := m.playSeq
-	m.dropQueueLocked()
+	if handled, err := m.reconnectLocked(seed); handled {
+		m.mu.Unlock()
+		return err
+	}
+	carried := m.carried
+	m.carried = nil
+	m.dropQueueLocked(endNewStation)
 	m.mu.Unlock()
 
 	src, err := open(seed)
@@ -168,8 +265,15 @@ func (m *MPV) playQueue(seed string) error {
 		return songErr(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	q := &songQueue{src: src, events: m.events, ctx: ctx, cancel: cancel}
+	q := &songQueue{seed: seed, src: src, events: m.events, ctx: ctx, cancel: cancel}
 	m.queue = q
+	if carried != nil && carried.seed == seed {
+		if start, ok := carried.resumePoint(m.clockNow()); ok {
+			err := m.resumeCarriedLocked(q, carried, start)
+			m.mu.Unlock()
+			return err
+		}
+	}
 	// Silence the old station before the seconds a lookup takes: its titles
 	// would otherwise land on the new station's listen. The stop's end-file
 	// falls inside loadPending and is dropped, so it never reads as the
@@ -204,15 +308,78 @@ func (m *MPV) playQueue(seed string) error {
 		err = fmt.Errorf("%w: no song within %v: %w", ErrSourceNetwork, firstSongWait, err)
 	}
 	if err != nil {
-		m.dropQueueLocked()
+		m.dropQueueLocked(endNewStation)
 		return songErr(err)
 	}
-	if err := m.loadSongLocked(q, first); err != nil {
-		m.dropQueueLocked()
+	if err := m.loadSongLocked(q, first, m.clockNow()); err != nil {
+		m.dropQueueLocked(endNewStation)
 		return err
 	}
 	// mpv's pause survives loadfile; choosing a station must never start
 	// silent, whoever paused it.
+	return m.sendLocked("set_property", "pause", false)
+}
+
+// reconnectLocked answers a Play of the station that is already playing: the
+// session reconnecting it after a buffering stall, a dropped network or a
+// pause too long to unpause in place. It reports whether it took the Play;
+// a station that isn't playing, or is playing another seed, or has no song
+// yet, is for playQueue to start.
+//
+// The song the listener was in the middle of must not be lost to the
+// reconnect, so it is loaded again from where it stopped, with the queue, its
+// prefetch and what it has played kept. A song that can't be resumed (near
+// its end, reloaded twice already, URL too old) is replaced by the next, which
+// the prefetch usually has ready; the source is not told of a skip, because
+// no one pressed NEXT. While a next song is already on its way, the Play
+// changes nothing: that song replaces this one in a moment.
+func (m *MPV) reconnectLocked(seed string) (handled bool, err error) {
+	q := m.queue
+	if q == nil || q.dead || !q.haveCur || q.seed != seed {
+		return false, nil
+	}
+	if !q.advancing {
+		if start, ok := q.resumePoint(m.clockNow()); ok {
+			if err := m.resumeLocked(q, start); err != nil {
+				return true, err
+			}
+		} else {
+			q.advancing = true
+			q.nextWhy = endReconnect
+			go m.advance(q)
+		}
+	}
+	// mpv's pause survives loadfile, and a reconnect after a long pause is
+	// this very call: the station must come back audible.
+	return true, m.sendLocked("set_property", "pause", false)
+}
+
+// resumeLocked loads q's current song again from start.
+func (m *MPV) resumeLocked(q *songQueue, start time.Duration) error {
+	if err := m.sendSongLocked(q.cur, start); err != nil {
+		return err
+	}
+	m.logSongLocked(q, endResumed)
+	q.resumes++
+	q.clock.restart(start)
+	m.syncSongClockLocked()
+	return nil
+}
+
+// resumeCarriedLocked is playQueue's answer after an mpv restart, when the
+// song the dead process was playing can go on: q, the new process's queue,
+// takes it over at start, and looks ahead from there. Nothing is stopped
+// first: the new process has nothing loaded.
+func (m *MPV) resumeCarriedLocked(q, old *songQueue, start time.Duration) error {
+	if err := m.sendSongLocked(old.cur, start); err != nil {
+		m.dropQueueLocked(endNewStation)
+		return err
+	}
+	q.cur, q.haveCur, q.loadedAt, q.urlAt = old.cur, true, old.loadedAt, old.urlAt
+	q.resumes = old.resumes + 1
+	q.clock.restart(start)
+	m.syncSongClockLocked()
+	m.startPrefetchLocked(q)
 	return m.sendLocked("set_property", "pause", false)
 }
 
@@ -240,10 +407,10 @@ func songTitle(s Song) string {
 	}
 }
 
-// loadSongLocked sends one song to mpv and starts looking for the next. The
+// sendSongLocked sends one song to mpv, to start start seconds in. The
 // per-song state Play resets for a new station is reset here too: each song
 // is its own stream as far as titles, filenames and channels go.
-func (m *MPV) loadSongLocked(q *songQueue, s Song) error {
+func (m *MPV) sendSongLocked(s Song, start time.Duration) error {
 	m.sawIcy = false
 	m.sawL, m.sawR = false, false
 	m.loadPending = true
@@ -251,28 +418,138 @@ func (m *MPV) loadSongLocked(q *songQueue, s Song) error {
 	m.mpvFilename = ""
 	m.page = ""
 	load := []any{"loadfile", s.URL}
-	if title := songTitle(s); title != "" {
-		// A song's URL carries no ICY metadata and its filename is junk, so
-		// the source's own artist and title ride media-title instead.
-		load = append(load, "replace", -1, forceTitleOption(title))
+	// A song's URL carries no ICY metadata and its filename is junk, so the
+	// source's own artist and title ride media-title instead.
+	if opts := songOptions(songTitle(s), start); opts != "" {
+		load = append(load, "replace", -1, opts)
 	}
-	if err := m.sendLocked(load...); err != nil {
+	return m.sendLocked(load...)
+}
+
+// songOptions is loadfile's per-file option list for a song: where to start,
+// if that is worth a seek, and what to call it. The title goes last and
+// length-quoted, so nothing in it can end the list early.
+func songOptions(title string, start time.Duration) string {
+	var opts []string
+	if start >= time.Second {
+		opts = append(opts, "start="+strconv.FormatFloat(start.Round(time.Millisecond).Seconds(), 'f', -1, 64))
+	}
+	if title != "" {
+		opts = append(opts, forceTitleOption(title))
+	}
+	return strings.Join(opts, ",")
+}
+
+// loadSongLocked sends a song q has not played to mpv, ends the one it
+// replaces in the log if that had not already ended, and starts looking for
+// the next. got is when the song's URL was handed out.
+func (m *MPV) loadSongLocked(q *songQueue, s Song, got time.Time) error {
+	if err := m.sendSongLocked(s, 0); err != nil {
 		return err
 	}
-	q.cur, q.haveCur, q.loadedAt = s, true, time.Now()
+	why := q.nextWhy
+	if why == "" {
+		why = endNext
+	}
+	m.finishSongLocked(q, why)
+	q.cur, q.haveCur, q.loadedAt, q.urlAt = s, true, m.clockNow(), got
+	q.curDone, q.resumes, q.nextWhy = false, 0, ""
+	q.clock.restart(0)
+	m.syncSongClockLocked()
 	m.startPrefetchLocked(q)
 	return nil
+}
+
+// syncSongClockLocked starts or stops the current song's clock to match mpv:
+// audio is flowing when it is neither paused nor idle. core-idle is also true
+// while mpv waits on its cache, so a stall stops the clock too.
+func (m *MPV) syncSongClockLocked() {
+	if q := m.queue; q != nil && q.haveCur {
+		q.clock.flowing(!m.paused && !m.coreIdle, m.clockNow())
+	}
+}
+
+// clockNow is the time the player reasons in; a test's own clock stands in for
+// the real one so it can say how long a song has played without waiting.
+func (m *MPV) clockNow() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// finishSongLocked ends q's current song in the log, once. A song whose end
+// was already logged (it played out, or mpv failed it) says nothing more when
+// its successor replaces it.
+func (m *MPV) finishSongLocked(q *songQueue, why string) {
+	if !q.haveCur || q.curDone {
+		return
+	}
+	q.curDone = true
+	m.logSongLocked(q, why)
+}
+
+// logSongLocked writes the song log's line for q's current song.
+func (m *MPV) logSongLocked(q *songQueue, why string) {
+	if m.songLog == nil {
+		return
+	}
+	s := q.cur
+	expected := "?s"
+	if s.Duration > 0 {
+		expected = fmt.Sprintf("%ds", wholeSeconds(s.Duration))
+	}
+	m.songLog("%s", fmt.Sprintf("song %s %s expected %s played %ds ended %s",
+		plainToken(s.Key), songSource(s), expected, wholeSeconds(q.clock.pos(m.clockNow())), why))
+}
+
+func wholeSeconds(d time.Duration) int { return int(d.Round(time.Second) / time.Second) }
+
+// songSource says where a song's audio came from, for the song log: Bandcamp,
+// or the YouTube client whose stream URL it is (the URL's c= parameter, which
+// tells the clients apart when one of them proves unreliable). Never the URL.
+func songSource(s Song) string {
+	if strings.HasPrefix(s.Key, "bc:") {
+		return "bandcamp"
+	}
+	if u, err := url.Parse(s.URL); err == nil {
+		if c := u.Query().Get("c"); c != "" && len(c) <= 24 && plainToken(c) == c {
+			return "c=" + c
+		}
+	}
+	return "youtube"
+}
+
+// plainToken is s if it is one plain word, and "?" if it is empty or could
+// carry anything else, a URL above all: a log gets pasted.
+func plainToken(s string) string {
+	if s == "" {
+		return "?"
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == ':' || r == '-' || r == '_' || r == '.':
+		default:
+			return "?"
+		}
+	}
+	return s
 }
 
 // startPrefetchLocked begins the lookup of the song after the current one.
 func (m *MPV) startPrefetchLocked(q *songQueue) {
 	p := &prefetch{done: make(chan struct{})}
 	q.next = p
+	now := m.now
+	if now == nil {
+		now = time.Now
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(q.ctx, prefetchBudget)
 		defer cancel()
 		p.song, p.err = q.src.Next(ctx)
-		p.at = time.Now()
+		p.at = now()
 		close(p.done)
 	}()
 }
@@ -322,7 +599,7 @@ func (m *MPV) advance(q *songQueue) {
 		if err == nil && !validStreamURL(p.song.URL) {
 			err = errBadSongURL
 		}
-		if err == nil && time.Since(p.at) >= songURLTTL {
+		if err == nil && m.clockNow().Sub(p.at) >= songURLTTL {
 			// The source can only hand out what comes next, not re-resolve
 			// one it already gave, so a stale answer is dropped and asked
 			// for afresh.
@@ -330,7 +607,7 @@ func (m *MPV) advance(q *songQueue) {
 			continue
 		}
 		if err != nil {
-			if !askedAgain && errors.Is(err, ErrSourceNetwork) && time.Since(p.at) > oldNetworkError {
+			if !askedAgain && errors.Is(err, ErrSourceNetwork) && m.clockNow().Sub(p.at) > oldNetworkError {
 				askedAgain = true
 				m.mu.Unlock()
 				continue
@@ -342,7 +619,7 @@ func (m *MPV) advance(q *songQueue) {
 			}
 			return
 		}
-		if err := m.loadSongLocked(q, p.song); err != nil {
+		if err := m.loadSongLocked(q, p.song, p.at); err != nil {
 			// mpv's pipe is gone; readLoop reports EventDied and the session
 			// brings up a new process and a new queue.
 			q.advancing = false
@@ -383,12 +660,29 @@ func (m *MPV) killQueueLocked(q *songQueue) {
 }
 
 // dropQueueLocked ends whatever queue is registered: a radio station took
-// over, the listener stopped playback, or the backend is gone.
-func (m *MPV) dropQueueLocked() {
-	if m.queue != nil {
-		m.queue.cancel()
-		m.queue = nil
+// over, the listener stopped playback, or the backend is gone. why is what
+// the song log says ended the song that was playing.
+//
+// When the backend is gone, the song it was playing is kept (m.carried), with
+// the position it had reached: the session starts a new process and plays the
+// station again, and that Play can pick the song up.
+func (m *MPV) dropQueueLocked(why string) {
+	q := m.queue
+	if q == nil {
+		return
 	}
+	q.cancel()
+	m.queue = nil
+	if why == endDied && q.haveCur && !q.curDone && !q.dead {
+		// The song is not over, only its process: the log says so, and the
+		// song stays as it was for the next Play to take up. However long
+		// the session takes to notice, no audio is flowing.
+		m.logSongLocked(q, why)
+		q.clock.flowing(false, m.clockNow())
+		m.carried = q
+		return
+	}
+	m.finishSongLocked(q, why)
 }
 
 // queueSongEnded is readLoop's answer to an end-file while a queue may be
@@ -408,6 +702,7 @@ func (m *MPV) queueSongEnded(events chan Event, failed bool, why string) bool {
 		return true
 	}
 	if failed {
+		m.finishSongLocked(q, errorEnd(why))
 		q.fails++
 		if q.fails >= maxSongFails {
 			m.killQueueLocked(q)
@@ -419,6 +714,8 @@ func (m *MPV) queueSongEnded(events chan Event, failed bool, why string) bool {
 			emit(events, Event{Type: EventStreamError, Err: err})
 			return true
 		}
+	} else {
+		m.finishSongLocked(q, endEOF)
 	}
 	start := !q.advancing
 	q.advancing = true
@@ -427,6 +724,16 @@ func (m *MPV) queueSongEnded(events chan Event, failed bool, why string) bool {
 		go m.advance(q)
 	}
 	return true
+}
+
+// errorEnd is how the song log says mpv failed a song: with mpv's own reason,
+// unless that could be a URL.
+func errorEnd(why string) string {
+	why = strings.TrimSpace(why)
+	if why == "" || strings.Contains(why, "://") {
+		return "error"
+	}
+	return "error: " + why
 }
 
 // NextSong is NEXT on a discovery station. It charges the song just heard to
@@ -448,7 +755,7 @@ func (m *MPV) NextSong() error {
 		return nil
 	}
 	q.advancing = true
-	quick := time.Since(q.loadedAt) < quickSkip
+	quick := m.clockNow().Sub(q.loadedAt) < quickSkip
 	m.mu.Unlock()
 	q.src.Skipped(quick)
 	go m.advance(q)
