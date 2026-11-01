@@ -42,13 +42,26 @@ var (
 //
 // It only ever shortens: if cleaning would leave a title or an artist empty,
 // the original (just made safe) is kept, so a song called "(Official Audio)"
-// still shows something.
+// still shows something. The one exception is a field that was never a name: a
+// literal null, NA or None comes back empty, so the caller can fall back to
+// something better than printing "NA".
 func CleanTitle(artist, title string) (string, string) {
 	return cleanName(artist, false), cleanName(title, true)
 }
 
+// nullWords are what a source prints for a field it has not got: yt-dlp's NA,
+// and the null or None a JSON or Python layer made of a missing value. Only the
+// whole field counts; "None More Black" is a band.
+var nullWords = map[string]bool{"null": true, "NA": true, "None": true}
+
+// noName reports a field that holds no name at all.
+func noName(s string) bool { return nullWords[strings.TrimSpace(s)] }
+
 func cleanName(s string, isTitle bool) string {
 	orig := core.CleanText(s)
+	if noName(orig) {
+		return ""
+	}
 	out := orig
 	if isTitle {
 		out = bracketed.ReplaceAllStringFunc(out, func(m string) string {
@@ -65,7 +78,13 @@ func cleanName(s string, isTitle bool) string {
 	// the match, and what follows it (a kept note) must not run into the title.
 	out = featTrail.ReplaceAllString(out, " ")
 	out = strings.Join(strings.Fields(out), " ")
-	if out != orig {
+	switch {
+	case !isTitle:
+		// A comma is what a cut credit leaves behind ("X, ft. Y" is "X,"), and
+		// a source with no second artist sometimes sends one anyway. An artist
+		// is never meant to end on a separator; a title may ("Hello,").
+		out = strings.TrimRight(out, " ,;-–—|:~")
+	case out != orig:
 		// A separator the packaging hung from ("Song - (Official Video)").
 		out = strings.TrimRight(out, " -–—|:~")
 	}

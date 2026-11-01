@@ -8,6 +8,12 @@
 // running. It knows nothing of mpv or the session: the player asks it for a
 // song with Next and tells it how the listener took the last one.
 //
+// What the listener typed decides what the station is. A genre ("swedish death
+// metal") is searched for, as above. A band or a song ("chelsea wolfe",
+// "engorged in putrescence") is where a radio starts: that song plays first,
+// then songs that sound like it, with each band spaced eight songs apart. See
+// radio.go.
+//
 // Both sources are interfaces defined here, so the queue imports neither
 // yt-dlp nor an HTTP client and its tests run with no process and no network.
 package discover
@@ -18,6 +24,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +75,7 @@ type Song struct {
 	Anchor        bool   // a well-known track, not a find
 	NewToYou      bool   // a discovery by a band the listener has never heard here
 	Resolved      time.Time
+	Duration      time.Duration // how long the source says it is; 0 when it did not say
 }
 
 // Known reports whether the listener has heard an artist, or loved them.
@@ -155,13 +163,14 @@ type run struct {
 
 // Queue is the endless song queue of one discovery station.
 type Queue struct {
-	seed  string
-	yt    YouTube
-	bc    Bandcamp
-	known Known
-	rng   *rand.Rand
-	now   func() time.Time
-	sleep func(context.Context, time.Duration) error // waits out the Bandcamp gap; tests replace it
+	seed     string
+	yt       YouTube
+	bc       Bandcamp
+	searcher Searcher // bc, when it can search; nil when it cannot, which makes every phrase a genre
+	known    Known
+	rng      *rand.Rand
+	now      func() time.Time
+	sleep    func(context.Context, time.Duration) error // waits out the Bandcamp gap; tests replace it
 
 	bcFirst time.Duration // how long a first ask gives Bandcamp; tests shorten it
 
@@ -188,7 +197,13 @@ type Queue struct {
 	phrase   string // the YouTube search phrase; "" if the seed gave none
 	linkID   string // the video id, when the seed is a YouTube link
 	seedFail int
-	seedSong *Song // the linked song, played first
+	seedSong *Song // the linked or typed song, played first
+
+	// cls is what Bandcamp made of a typed phrase, kept once it has an answer
+	// worth keeping (see prepareTyped). radio is non-nil when the station is
+	// song or artist radio; see radio.go.
+	cls   *classification
+	radio *radio
 
 	bcProbes []bcProbe
 	bcNext   int
@@ -200,13 +215,14 @@ type Queue struct {
 	ytCache  map[string]ytEntry
 	media    map[string]ytMemo // video id: what resolving it said, for mediaTTL
 
-	recent     []string
-	seen       map[string]struct{}
-	bad        map[string]struct{} // out of range or unusable: never offered again
-	fails      map[string]int
-	lastArtist string
-	ytFirst    [2]bool // per kind (discovery, anchor): YouTube goes first this time
-	memo       map[string]bool
+	recent  []string
+	seen    map[string]struct{}
+	bad     map[string]struct{} // out of range or unusable: never offered again
+	fails   map[string]int
+	artists []string // who played in the last span-1 songs, oldest first
+	span    int      // an artist plays at most once in any span songs in a row; see spanOf
+	ytFirst [2]bool  // per kind (discovery, anchor): YouTube goes first this time
+	memo    map[string]bool
 }
 
 // NewQueue makes the queue for one station. seed is what the listener typed:
@@ -222,23 +238,26 @@ func NewQueue(seed string, yt YouTube, bc Bandcamp, known Known, rng *rand.Rand,
 	if known == nil {
 		known = func(string) bool { return false }
 	}
+	s, _ := bc.(Searcher)
 	return &Queue{
-		seed:    seed,
-		yt:      yt,
-		bc:      bc,
-		known:   known,
-		rng:     rng,
-		now:     now,
-		sleep:   sleepCtx,
-		bcFirst: bcFirstTry,
-		base:    anchorStart,
-		slot:    make(chan struct{}, 1),
-		bcCache: map[string]bcEntry{},
-		ytCache: map[string]ytEntry{},
-		media:   map[string]ytMemo{},
-		seen:    map[string]struct{}{},
-		bad:     map[string]struct{}{},
-		fails:   map[string]int{},
+		seed:     seed,
+		yt:       yt,
+		bc:       bc,
+		searcher: s,
+		known:    known,
+		rng:      rng,
+		now:      now,
+		sleep:    sleepCtx,
+		bcFirst:  bcFirstTry,
+		span:     genreSpan,
+		base:     anchorStart,
+		slot:     make(chan struct{}, 1),
+		bcCache:  map[string]bcEntry{},
+		ytCache:  map[string]ytEntry{},
+		media:    map[string]ytMemo{},
+		seen:     map[string]struct{}{},
+		bad:      map[string]struct{}{},
+		fails:    map[string]int{},
 	}
 }
 
@@ -280,21 +299,25 @@ func (q *Queue) Next(ctx context.Context) (Song, error) {
 	}
 
 	q.memo = map[string]bool{}
-	r := &run{left: maxResolves}
+	q.span = q.spanOf()
+	// A radio's style may not be known yet; this asks, and does not mind
+	// being told no. The songs are the point, and they have their own sources.
+	q.ensureStyle(ctx)
+
+	r := &run{left: q.resolveBudget()}
 	anchor := q.rng.Float64() < share
-	for waits := 0; ; waits++ {
-		r.held = false
-		for _, kind := range [2]bool{anchor, !anchor} {
-			if s, ok := q.pick(ctx, kind, r); ok {
-				return q.serve(s), nil
-			}
-			if ctx.Err() != nil {
-				break
-			}
-		}
-		if !q.waitOutGap(ctx, r, waits) {
-			break
-		}
+	s, ok := q.find(ctx, r, anchor)
+	if !ok && q.span > genreSpan && ctx.Err() == nil && len(r.errs) == 0 && !r.held {
+		// Every song there is belongs to an artist who played lately. Spacing
+		// is what makes song radio a radio, but it is a preference: a station
+		// with a thin Mix would otherwise go quiet seven songs in. Fall back
+		// to the genre rule, never twice running, for this song.
+		q.span = genreSpan
+		r = &run{left: q.resolveBudget()}
+		s, ok = q.find(ctx, r, anchor)
+	}
+	if ok {
+		return q.serve(s), nil
 	}
 	if err := ctx.Err(); err != nil {
 		return Song{}, fmt.Errorf("discover: %w", errors.Join(append(r.errs, err)...))
@@ -306,6 +329,25 @@ func (q *Queue) Next(ctx context.Context) (Song, error) {
 		return Song{}, ErrPaced
 	}
 	return Song{}, ErrNoSources
+}
+
+// find looks for the next song in each kind in turn, waiting out the Bandcamp
+// gap when that is all that stands between Next and a song.
+func (q *Queue) find(ctx context.Context, r *run, anchor bool) (Song, bool) {
+	for waits := 0; ; waits++ {
+		r.held = false
+		for _, kind := range [2]bool{anchor, !anchor} {
+			if s, ok := q.pick(ctx, kind, r); ok {
+				return s, true
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if !q.waitOutGap(ctx, r, waits) {
+			return Song{}, false
+		}
+	}
 }
 
 // waitOutGap decides whether a Next that found nothing should try again after
@@ -356,7 +398,8 @@ func (q *Queue) ytLeads(k int) bool {
 // Bandcamp tag settled and a YouTube to fall back on: the one ask that gets
 // Bandcamp's short first try instead of its tag walk.
 func (q *Queue) firstAsk() bool {
-	return q.yt != nil && q.bc != nil && len(q.recent) == 0 && q.bcTag == "" && !q.bcOut
+	// A radio has no tag to walk down to: its style is Bandcamp's own tags.
+	return q.radio == nil && q.yt != nil && q.bc != nil && len(q.recent) == 0 && q.bcTag == "" && !q.bcOut
 }
 
 // bcContext is the context Bandcamp is asked under. A first try gets bcFirst,
@@ -444,8 +487,44 @@ func (q *Queue) serve(s Song) Song {
 		delete(q.seen, q.recent[0])
 		q.recent = q.recent[1:]
 	}
-	q.lastArtist = core.NormalizeArtist(s.Artist)
+	q.artists = append(q.artists, core.NormalizeArtist(s.Artist))
+	if n := q.spanOf() - 1; len(q.artists) > n {
+		q.artists = q.artists[len(q.artists)-n:]
+	}
 	return s
+}
+
+const (
+	// A genre station never plays one band twice running: an artist plays at
+	// most once in any two songs.
+	genreSpan = 2
+
+	// Song and artist radio spaces its artists wider, at most once in any
+	// eight. A song's Mix is mostly its own band (45 of 50 for a Topic track)
+	// and this is what turns it into a radio.
+	radioSpan = 8
+)
+
+// spanOf is the spacing the station is meant to keep.
+func (q *Queue) spanOf() int {
+	if q.radio != nil {
+		return radioSpan
+	}
+	return genreSpan
+}
+
+// blocked reports an artist (a NormalizeArtist key) who played too lately to
+// play again: within the last span-1 songs. An unknown artist is never held
+// back; there is no telling who it is.
+func (q *Queue) blocked(artistKey string) bool {
+	if artistKey == "" {
+		return false
+	}
+	recent := q.artists
+	if n := q.span - 1; len(recent) > n {
+		recent = recent[len(recent)-n:]
+	}
+	return slices.Contains(recent, artistKey)
 }
 
 // ruledOut reports a key that has played within the window or been judged
@@ -517,9 +596,11 @@ func (q *Queue) choose(cs []cand, discovery bool) int {
 	return idx[q.rng.Intn(len(idx))]
 }
 
-// prepare does the one-time work a seed needs. A phrase needs none beyond
-// being remembered. A YouTube link is resolved once: its tags say which
-// Bandcamp tags to try, and the song itself is the first one played.
+// prepare does the one-time work a seed needs. A YouTube link is resolved
+// once: the song itself is the first one played, and its artist and tags say
+// what the station sounds like. A phrase is classified by Bandcamp's search
+// when the queue has one (see prepareTyped), and otherwise needs none beyond
+// being remembered: it is a genre, as it was before song radio.
 func (q *Queue) prepare(ctx context.Context) error {
 	if q.prepared {
 		return nil
@@ -559,6 +640,10 @@ func (q *Queue) prepare(ctx context.Context) error {
 		if s, ok := q.ytSong(id, m, true, q.now()); ok {
 			q.seedSong = &s
 		}
+		if q.searcher != nil {
+			q.beginLinkRadio(id, &m)
+			break
+		}
 		q.probesFromTags(m.Tags)
 		if q.phrase == "" {
 			// A video with no tags still names its artist: without a phrase
@@ -568,13 +653,31 @@ func (q *Queue) prepare(ctx context.Context) error {
 		}
 	case !strings.Contains(seed, "://"):
 		// Some other link is not a phrase to search for.
-		q.phrase = core.CleanText(seed)
-		for _, t := range BandcampTags(seed) {
-			q.bcProbes = append(q.bcProbes, bcProbe{tag: t})
+		if q.searcher != nil && seed != "" {
+			if err := q.prepareTyped(ctx, seed); err != nil {
+				return err
+			}
+		} else {
+			q.genrePhrase(seed)
 		}
+	}
+	if isLink && q.searcher != nil && q.radio == nil {
+		// The linked video would not resolve, twice. Its Mix can still carry
+		// the station, without its tags.
+		q.beginLinkRadio(id, nil)
 	}
 	q.prepared = true
 	return nil
+}
+
+// genrePhrase makes the station a genre station for seed: the phrase is what
+// YouTube is searched for, and its tags (with leading words dropped) are what
+// Bandcamp is tried with.
+func (q *Queue) genrePhrase(seed string) {
+	q.phrase = core.CleanText(seed)
+	for _, t := range BandcampTags(seed) {
+		q.bcProbes = append(q.bcProbes, bcProbe{tag: t})
+	}
 }
 
 // probesFromTags makes the Bandcamp probes for a linked video from its tags,

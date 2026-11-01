@@ -35,15 +35,16 @@ type Bandcamp interface {
 // it as one source missing, never as the station failing.
 const defaultEndpoint = "https://bandcamp.com/api/discover/1/discover_web"
 
-// BandcampClient asks the discover feed. The zero value works; set UserAgent
-// to say who is asking.
+// BandcampClient asks the discover feed (Tag) and the search box (Search). The
+// zero value works; set UserAgent to say who is asking.
 type BandcampClient struct {
-	HTTP      *http.Client // nil: a client with a 10 s timeout
-	UserAgent string
-	Endpoint  string // "" = defaultEndpoint; tests point it at httptest
+	HTTP           *http.Client // nil: a client with a 10 s timeout
+	UserAgent      string
+	Endpoint       string // "" = defaultEndpoint; tests point it at httptest
+	SearchEndpoint string // "" = defaultSearchEndpoint
 }
 
-// StatusError is Bandcamp's feed answering with something other than 200:
+// StatusError is Bandcamp answering with something other than 200:
 // 429 when it is throttling, 5xx when it is down, 4xx when the undocumented
 // request has stopped being understood. The caller can tell them apart with
 // errors.As.
@@ -106,37 +107,9 @@ func (c BandcampClient) Tag(ctx context.Context, tag, slice string) ([]BCItem, e
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	if c.UserAgent != "" {
-		req.Header.Set("User-Agent", c.UserAgent)
-	}
-	hc := c.HTTP
-	if hc == nil {
-		hc = fallbackHTTP
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-			// The client's own timeout, with the caller still waiting: the host
-			// never answered, which is the network's doing. A deadline that
-			// came from the caller's context stays a plain deadline.
-			err = fmt.Errorf("%w: %w", ErrNetwork, err)
-		}
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil, &StatusError{Code: resp.StatusCode}
-	}
 	var out bcResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBandcampBody)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("bandcamp discover: unreadable answer: %w", err)
+	if err := c.post(ctx, endpoint, body, &out); err != nil {
+		return nil, err
 	}
 
 	items := make([]BCItem, 0, len(out.Results))
@@ -158,6 +131,45 @@ func (c BandcampClient) Tag(ctx context.Context, tag, slice string) ([]BCItem, e
 		})
 	}
 	return items, nil
+}
+
+// post sends one JSON request to Bandcamp and decodes the answer into out. The
+// feed and the search box fail the same ways and are told apart the same way
+// by the caller: a *StatusError for a refusal, ErrNetwork for a host that never
+// answered, and the context's own error when the caller gave up.
+func (c BandcampClient) post(ctx context.Context, endpoint string, body []byte, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if c.UserAgent != "" {
+		req.Header.Set("User-Agent", c.UserAgent)
+	}
+	hc := c.HTTP
+	if hc == nil {
+		hc = fallbackHTTP
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			// The client's own timeout, with the caller still waiting: the host
+			// never answered, which is the network's doing. A deadline that
+			// came from the caller's context stays a plain deadline.
+			err = fmt.Errorf("%w: %w", ErrNetwork, err)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return &StatusError{Code: resp.StatusCode}
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBandcampBody)).Decode(out); err != nil {
+		return fmt.Errorf("bandcamp: unreadable answer: %w", err)
+	}
+	return nil
 }
 
 // BandcampTags turns a phrase into the tags to try on Bandcamp, longest
@@ -298,6 +310,9 @@ func (q *Queue) pickBC(ctx context.Context, anchor, first bool) (Song, bool, err
 	if q.bc == nil {
 		return Song{}, false, nil
 	}
+	if q.radio != nil {
+		return q.pickBCRadio(ctx, anchor)
+	}
 	probes := bcProbeCap
 	if first {
 		probes, anchor = 1, false
@@ -317,6 +332,20 @@ func (q *Queue) pickBC(ctx context.Context, anchor, first bool) (Song, bool, err
 		slices = []string{"top"}
 	}
 
+	cands, firstErr := q.bcCandidates(ctx, tag, slices)
+	if len(cands) == 0 {
+		// One slice answering with nothing is not a failure; every slice
+		// failing is.
+		return Song{}, false, firstErr
+	}
+	return q.bcChoose(cands, anchor), true, nil
+}
+
+// bcCandidates lists the songs of one tag's slices that may be played now: not
+// played lately, in song length, and not by an artist the spacing rule holds
+// back. The error is the first slice's failure, which matters only if no slice
+// gave anything.
+func (q *Queue) bcCandidates(ctx context.Context, tag string, slices []string) ([]cand, error) {
 	var cands []cand
 	have := map[string]bool{}
 	var firstErr error
@@ -341,21 +370,30 @@ func (q *Queue) pickBC(ctx context.Context, anchor, first bool) (Song, bool, err
 			have[key] = true
 			artist, title := CleanTitle(it.Artist, it.Title)
 			ak := core.NormalizeArtist(artist)
-			if title == "" || (ak != "" && ak == q.lastArtist) {
+			if title == "" || q.blocked(ak) {
 				continue
 			}
 			cands = append(cands, cand{key: key, artist: ak, song: Song{
 				Key: key, Artist: artist, Title: title, URL: it.StreamURL, Resolved: at,
+				Duration: seconds(it.Duration),
 			}})
 		}
 	}
-	if len(cands) == 0 {
-		// One slice answering with nothing is not a failure; every slice
-		// failing is.
-		return Song{}, false, firstErr
-	}
+	return cands, firstErr
+}
+
+// bcChoose picks one of the candidates and labels it.
+func (q *Queue) bcChoose(cands []cand, anchor bool) Song {
 	s := cands[q.choose(cands, !anchor)].song
 	s.Anchor = anchor
 	s.NewToYou = !anchor && q.isNew(core.NormalizeArtist(s.Artist))
-	return s, true, nil
+	return s
+}
+
+// seconds is a length a source reported, as a Duration; 0 for unknown.
+func seconds(d float64) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return time.Duration(d * float64(time.Second))
 }

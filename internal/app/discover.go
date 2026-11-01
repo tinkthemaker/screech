@@ -45,12 +45,15 @@ type discoveryDeps struct {
 
 // bandcampTimeout bounds one request to Bandcamp. A tune gives the whole
 // first-song lookup 8 s, and the queue hands Bandcamp a quarter of that when
-// YouTube is waiting; a request that can outlast the whole budget would make
-// the budget the thing that fails.
+// YouTube is waiting (the search that says what a typed phrase is gets 2 s of
+// it, beside the first YouTube Music lookup); a request that can outlast the
+// whole budget would make the budget the thing that fails.
 const bandcampTimeout = 4 * time.Second
 
-// newBandcamp is the client discovery stations ask Bandcamp's genre pages
-// with.
+// newBandcamp is the client discovery stations ask Bandcamp with: its genre
+// pages, and its search, which is how a typed phrase is told to be a band, a
+// song or a genre. The queue classifies only if this client can search, which
+// a discover.BandcampClient can, so it must stay one.
 func newBandcamp() discover.Bandcamp {
 	return discover.BandcampClient{
 		HTTP:      &http.Client{Timeout: bandcampTimeout},

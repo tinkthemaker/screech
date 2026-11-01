@@ -476,6 +476,91 @@ func TestNewBandcampClient(t *testing.T) {
 	}
 }
 
+// What makes a typed phrase a band, a song or a genre is Bandcamp's search, and
+// the queue only classifies when the Bandcamp it is given can search. The
+// client the app hands out must be one, or every phrase would be a genre again.
+func TestNewBandcampCanSearch(t *testing.T) {
+	if _, ok := newBandcamp().(discover.Searcher); !ok {
+		t.Fatalf("newBandcamp() = %T: it cannot search, so no phrase could be told from a genre", newBandcamp())
+	}
+}
+
+// searchingBandcamp is fakeBandcamp that can also search: every phrase is the
+// band Chelsea Wolfe.
+type searchingBandcamp struct {
+	fakeBandcamp
+	mu       sync.Mutex
+	searches []string
+}
+
+func (b *searchingBandcamp) Search(ctx context.Context, text string) (discover.SearchResult, error) {
+	b.mu.Lock()
+	b.searches = append(b.searches, text)
+	b.mu.Unlock()
+	return discover.SearchResult{Bands: []discover.SearchBand{{
+		Name: "Chelsea Wolfe", Genre: "Alternative", Tags: []string{"Alternative", "Folk"},
+	}}}, nil
+}
+
+// fakeYouTube finds one song, "Feral Love" by Chelsea Wolfe, for any search.
+type fakeYouTube struct {
+	mu      sync.Mutex
+	queries []string
+}
+
+func (f *fakeYouTube) Songs(ctx context.Context, query string, n int) ([]discover.YTHit, error) {
+	f.mu.Lock()
+	f.queries = append(f.queries, query)
+	f.mu.Unlock()
+	return []discover.YTHit{{ID: "wolfe000001", Title: "Feral Love"}}, nil
+}
+
+func (f *fakeYouTube) Mix(ctx context.Context, id string, n int) ([]discover.YTHit, error) {
+	return nil, nil
+}
+
+func (f *fakeYouTube) Resolve(ctx context.Context, page string) (discover.YTMedia, error) {
+	return discover.YTMedia{URL: "https://media.example/wolfe", Artist: "Chelsea Wolfe", Track: "Feral Love", Duration: 212}, nil
+}
+
+// A station opened through the app's own wiring plays the band typed first,
+// and then Bandcamp's songs in the band's style. The queue lives per seed, so a
+// reconnect does not ask Bandcamp what the phrase is a second time.
+func TestSongSourcesPlayWhatWasTypedFirst(t *testing.T) {
+	bc := &searchingBandcamp{fakeBandcamp: fakeBandcamp{n: 3}}
+	yt := &fakeYouTube{}
+	s := newSongSources(yt, bc, nil)
+
+	src, err := s.open("chelsea wolfe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := src.Next(context.Background())
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if first.Key != "yt:wolfe000001" || first.Artist != "Chelsea Wolfe" || first.Title != "Feral Love" {
+		t.Errorf("first song = %+v, want the band's top song", first)
+	}
+
+	again, err := s.open("Chelsea Wolfe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := again.Next(context.Background())
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if second.Key == first.Key || !strings.HasPrefix(second.Key, "bc:") {
+		t.Errorf("second song = %+v, want a Bandcamp song in the band's style, not a repeat", second)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.searches) != 1 {
+		t.Errorf("Bandcamp was searched %v; the station is classified once", bc.searches)
+	}
+}
+
 // yt-dlp reports a dead connection only in words on its last stderr line.
 // The YouTube adapter marks those with discover.ErrNetwork, so the queue
 // doesn't count them against a video and the session goes offline instead of
