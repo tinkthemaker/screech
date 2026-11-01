@@ -247,7 +247,8 @@ func normTag(s string) string {
 	return b.String()
 }
 
-// The four things a typed phrase can be, in the order they are tried.
+// The four things a typed phrase can be, in the order they are tried (except
+// that a single word that is both a band and a tag is the tag; see classify).
 const (
 	stepArtist = iota + 1 // a band by that name: artist radio
 	stepGenre             // a tag by that name: a genre station, as it always was
@@ -257,13 +258,15 @@ const (
 
 // classification is what a phrase turned out to be.
 type classification struct {
-	step  int
-	band  *SearchBand  // stepArtist: the band
-	track *SearchTrack // stepSong: the song, or the album when that is all there is
+	step     int
+	band     *SearchBand  // stepArtist: the band
+	track    *SearchTrack // stepSong: the song, or the album when that is all there is
+	answered bool         // Bandcamp answered; if not, step is stepTopHit for want of knowing
 }
 
 // classify reads Bandcamp's answer for a phrase. answered is false when
-// Bandcamp could not be asked, which reads like an answer that matched nothing.
+// Bandcamp could not be asked, which reads like an answer that matched nothing
+// (and is remembered as not an answer, so that it can be asked again).
 //
 // Names must match whole, word for word (see matchKey): "swedish death metal"
 // is not the album "Swedish Death Metal Compilation", and a station that took
@@ -271,24 +274,43 @@ type classification struct {
 // ("chelsea wolfe" is a tag too, with 99 releases under it), and a tag beats a
 // song: someone who types a genre wants the genre, and a track that happens to
 // share its name (there is one called "Death Metal") is rarely the point.
+//
+// A single word is the exception to the first of those: "doom" and "ambient"
+// are bands, and are tags with thousands of releases under them, and somebody
+// who types one word is far likelier to want the genre. The tag comes first
+// there.
 func classify(phrase string, res SearchResult, answered bool) classification {
+	cl := classifyAnswer(phrase, res, answered)
+	cl.answered = answered
+	return cl
+}
+
+func classifyAnswer(phrase string, res SearchResult, answered bool) classification {
 	if !answered {
 		return classification{step: stepTopHit}
 	}
 	key := matchKey(phrase)
+
+	want := map[string]bool{normTag(phrase): true}
+	if tags := BandcampTags(phrase); len(tags) > 0 {
+		want[tags[0]] = true
+	}
+	isTag := false
+	for _, t := range res.Tags {
+		isTag = isTag || want[t]
+	}
+	oneWord := !strings.Contains(key, " ")
+
+	if isTag && oneWord {
+		return classification{step: stepGenre}
+	}
 	for i := range res.Bands {
 		if matchKey(res.Bands[i].Name) == key {
 			return classification{step: stepArtist, band: &res.Bands[i]}
 		}
 	}
-	want := map[string]bool{normTag(phrase): true}
-	if tags := BandcampTags(phrase); len(tags) > 0 {
-		want[tags[0]] = true
-	}
-	for _, t := range res.Tags {
-		if want[t] {
-			return classification{step: stepGenre}
-		}
+	if isTag {
+		return classification{step: stepGenre}
 	}
 	// A track is the song; an album of that name is the song only when no
 	// track says so.

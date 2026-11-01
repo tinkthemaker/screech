@@ -521,6 +521,193 @@ func TestClassifyGenreBeatsASongOfTheSameName(t *testing.T) {
 	}
 }
 
+// "doom" is a band, and a tag with a great many releases under it. A single
+// word that is both is the genre; "chelsea wolfe" is both too, and is the band.
+func TestClassifyAOneWordGenreIsNotTheBand(t *testing.T) {
+	for _, tc := range []struct {
+		phrase, tag, band string
+		genre             bool
+	}{
+		{"doom", "doom", "Doom", true},
+		{"ambient", "ambient", "Ambient", true},
+		{"chelsea wolfe", "chelsea-wolfe", "Chelsea Wolfe", false},
+	} {
+		t.Run(tc.phrase, func(t *testing.T) {
+			bc := &fakeSearcher{
+				answers: map[string]SearchResult{matchKey(tc.phrase): {
+					Tags:  []string{tc.tag},
+					Bands: []SearchBand{{Name: tc.band, Genre: "Metal", Tags: []string{"Death Metal", "Slam"}}},
+				}},
+				feed: plentifulBC().items,
+			}
+			yt := radioYT(radioWorld{}, func(query string, n int) []YTHit {
+				if matchKey(query) == matchKey("chelsea wolfe") {
+					return songsBy("chelsea", 5)
+				}
+				return styleSongs(query, n)
+			})
+			q, clk := newRadioQueue(tc.phrase, yt, bc)
+			songs := drain(t, q, clk, 8)
+
+			calls := bc.feedCalls()
+			if tc.genre {
+				if len(calls) == 0 || calls[0] != tc.tag+"|new" {
+					t.Errorf("feed calls = %v, want the genre's own tag first", calls)
+				}
+				if got := bc.searches(); len(got) != 1 {
+					t.Errorf("Bandcamp searches = %v: a genre looks no band up", got)
+				}
+			} else {
+				if songs[0].Key != "yt:chelsea.00" {
+					t.Errorf("first song = %+v, want the artist's top song", songs[0])
+				}
+				for _, c := range calls {
+					if strings.HasPrefix(c, tc.tag+"|") {
+						t.Errorf("feed asked %q: the artist-named tag is not the style", c)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A genre does not need YouTube to start: Bandcamp's tag feed serves the first
+// song in a second. The search for the phrase that was started beside
+// Bandcamp's is stopped and not waited for, or a slow yt-dlp could eat the
+// whole 8 s for a song that was never going to come from it.
+func TestClassifyGenreDoesNotWaitForYouTube(t *testing.T) {
+	started, stopped := make(chan struct{}), make(chan struct{})
+	bc := &fakeSearcher{
+		answers: map[string]SearchResult{matchKey("swedish death metal"): {Tags: []string{"swedish-death-metal"}}},
+		feed:    plentifulBC().items,
+	}
+	yt := &blockingYT{
+		fakeYT: plentifulYT(), phrase: "swedish death metal", started: started, stopped: stopped,
+	}
+	q, _ := newRadioQueue("swedish death metal", yt, bc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	s, err := q.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("the first song of a genre took %v: it waited for YouTube", d)
+	}
+	if !strings.HasPrefix(s.Key, "bc:") {
+		t.Errorf("first song = %+v, want Bandcamp's", s)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Error("the search for the phrase was left running")
+	}
+}
+
+// A classification made when Bandcamp could not answer is top-hit radio, and is
+// not for good: tuning the station again asks again. What was played stays
+// played.
+func TestRetuneClassifiesAgainAfterAnUnansweredSearch(t *testing.T) {
+	for name, fail := range map[string]func(f *fakeSearcher){
+		"a slow search":  func(f *fakeSearcher) { f.hang = true },
+		"an HTTP error":  func(f *fakeSearcher) { f.err = &StatusError{Code: 503} },
+		"a network down": func(f *fakeSearcher) { f.err = fmt.Errorf("dial: %w", ErrNetwork) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bc := &fakeSearcher{
+				answers: map[string]SearchResult{matchKey("swedish death metal"): {Tags: []string{"swedish-death-metal"}}},
+				feed:    plentifulBC().items,
+			}
+			fail(bc)
+			yt := plentifulYT()
+			q, clk := newRadioQueue("swedish death metal", yt, bc)
+			q.bcFirst = 20 * time.Millisecond
+
+			first, err := q.Next(context.Background())
+			if err != nil {
+				t.Fatalf("first Next: %v", err)
+			}
+			if !strings.HasPrefix(first.Key, "yt:") {
+				t.Errorf("first song = %+v, want YouTube Music's top hit for the phrase", first)
+			}
+			for _, c := range bc.feedCalls() {
+				if strings.HasPrefix(c, "swedish-death-metal|") {
+					t.Errorf("feed asked %q before the phrase was known to be a genre", c)
+				}
+			}
+
+			// Bandcamp is back. Without a re-tune nothing changes.
+			bc.mu.Lock()
+			bc.hang, bc.err = false, nil
+			bc.mu.Unlock()
+			clk.Advance(time.Minute)
+			searched := len(bc.searches())
+
+			// Tuning the station again asks again.
+			q.Retune()
+			var songs []Song
+			songs = append(songs, first)
+			for i := 0; i < 12; i++ {
+				s, err := q.Next(context.Background())
+				if err != nil {
+					t.Fatalf("Next after the re-tune #%d: %v", i+1, err)
+				}
+				songs = append(songs, s)
+				clk.Advance(15 * time.Second)
+			}
+			checkNoRepeats(t, songs)
+			got := bc.searches()
+			if len(got) <= searched || got[searched] != "swedish death metal" {
+				t.Errorf("Bandcamp searches = %v: the phrase was not asked about again", got)
+			}
+			if calls := bc.feedCalls(); len(calls) == 0 || calls[0] != "swedish-death-metal|new" {
+				t.Errorf("feed calls = %v, want the genre's own tag after the re-tune", calls)
+			}
+			// And it is settled: a second re-tune asks nothing.
+			before := len(bc.searches())
+			q.Retune()
+			if _, err := q.Next(context.Background()); err != nil {
+				t.Fatalf("Next after a second re-tune: %v", err)
+			}
+			if after := len(bc.searches()); after != before {
+				t.Errorf("a station whose phrase was answered searched Bandcamp again (%d -> %d)", before, after)
+			}
+		})
+	}
+}
+
+// A re-tune of a phrase Bandcamp did answer changes nothing: the station is
+// not started over.
+func TestRetuneKeepsAnAnsweredStation(t *testing.T) {
+	bc := &fakeSearcher{
+		answers: map[string]SearchResult{matchKey("chelsea wolfe"): {Bands: []SearchBand{{Name: "Chelsea Wolfe", Tags: []string{"Darkwave"}}}}},
+		feed:    plentifulBC().items,
+	}
+	yt := radioYT(radioWorld{}, func(query string, n int) []YTHit {
+		if matchKey(query) == matchKey("chelsea wolfe") {
+			return songsBy("chelsea", 5)
+		}
+		return styleSongs(query, n)
+	})
+	q, clk := newRadioQueue("chelsea wolfe", yt, bc)
+	first, err := q.Next(context.Background())
+	if err != nil || first.Key != "yt:chelsea.00" {
+		t.Fatalf("first = %+v, %v", first, err)
+	}
+	searched := len(bc.searches())
+	q.Retune()
+	clk.Advance(15 * time.Second)
+	s, err := q.Next(context.Background())
+	if err != nil || s.Key == first.Key {
+		t.Errorf("after a re-tune: %+v, %v; want the next song, not the first again", s, err)
+	}
+	if got := bc.searches(); len(got) != searched {
+		t.Errorf("Bandcamp searches = %v: nothing was to be asked again", got)
+	}
+}
+
 // A phrase nothing on Bandcamp matches is song radio from YouTube Music's top
 // hit, and its style is the artist's, found by a second search.
 func TestClassifyFallsBackToTopHit(t *testing.T) {

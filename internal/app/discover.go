@@ -150,7 +150,12 @@ func (s *songSources) queue(seed string) *discover.Queue {
 }
 
 func (s *songSources) open(seed string) (player.SongSource, error) {
-	return &songAdapter{q: s.queue(seed)}, nil
+	q := s.queue(seed)
+	// Every open is a tune or a reconnect. If Bandcamp could not say what the
+	// phrase was last time, the queue asks again now rather than stay what that
+	// bad moment made it until the process ends.
+	q.Retune()
+	return &songAdapter{q: q}, nil
 }
 
 // songQueue is the part of discover.Queue the adapter uses.

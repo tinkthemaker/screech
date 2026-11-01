@@ -588,6 +588,58 @@ func TestSongSourcesPlayWhatWasTypedFirst(t *testing.T) {
 	}
 }
 
+// flakyBandcamp can search, but not the first time it is asked: that is the bad
+// moment. After it every phrase is the genre swedish-death-metal.
+type flakyBandcamp struct {
+	fakeBandcamp
+	mu       sync.Mutex
+	searches int
+}
+
+func (b *flakyBandcamp) Search(ctx context.Context, text string) (discover.SearchResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.searches++
+	if b.searches == 1 {
+		return discover.SearchResult{}, &discover.StatusError{Code: 503}
+	}
+	return discover.SearchResult{Tags: []string{"swedish-death-metal"}}, nil
+}
+
+// The queue lives as long as the process, so a phrase Bandcamp could not be
+// asked about once would stay top-hit radio until restart. Opening the station
+// again is a tune, and a tune asks again.
+func TestOpenAgainClassifiesAPhraseBandcampCouldNotAnswer(t *testing.T) {
+	bc := &flakyBandcamp{fakeBandcamp: fakeBandcamp{n: 3}}
+	s := newSongSources(&fakeYouTube{}, bc, nil)
+
+	src, err := s.open("swedish death metal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := src.Next(context.Background())
+	if err != nil || !strings.HasPrefix(first.Key, "yt:") {
+		t.Fatalf("first song = %+v, %v; want YouTube Music's top hit while Bandcamp is out", first, err)
+	}
+
+	again, err := s.open("swedish death metal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := again.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next after the re-tune: %v", err)
+	}
+	if !strings.HasPrefix(second.Key, "bc:") {
+		t.Errorf("second song = %+v, want Bandcamp's tag feed now that the phrase is known to be a genre", second)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if bc.searches != 2 {
+		t.Errorf("Bandcamp was searched %d times, want 2: the failed one and the re-tune's", bc.searches)
+	}
+}
+
 // yt-dlp reports a dead connection only in words on its last stderr line.
 // The YouTube adapter marks those with discover.ErrNetwork, so the queue
 // doesn't count them against a video and the session goes offline instead of

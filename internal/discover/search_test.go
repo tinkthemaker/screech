@@ -219,6 +219,23 @@ func TestClassify(t *testing.T) {
 			SearchResult{Tags: []string{"swedish-death-metal"}, Tracks: []SearchTrack{track("SwedishDeathMetal", "Magmatik", false)}}, true, stepGenre},
 		{"a run-together title is not a song either", "swedish death metal",
 			SearchResult{Tracks: []SearchTrack{track("SwedishDeathMetal", "Magmatik", false)}}, true, stepTopHit},
+		// One word is as likely a genre as a band: "doom" is a band, and a
+		// tag with thousands of releases under it. The tag wins there; two
+		// words or more keep the band first.
+		{"a one-word phrase that is a band and a tag is the tag", "doom",
+			SearchResult{Tags: []string{"doom"}, Bands: []SearchBand{{Name: "Doom"}}}, true, stepGenre},
+		{"ambient is a band too, and a genre first", "ambient",
+			SearchResult{Tags: []string{"ambient"}, Bands: []SearchBand{{Name: "AMBIENT"}}}, true, stepGenre},
+		{"a one-word band that is no tag is still the band", "dismember",
+			SearchResult{Tags: []string{"dismember-fans"}, Bands: []SearchBand{{Name: "Dismember"}}}, true, stepArtist},
+		{"a one-word tag with no band is the tag", "doom",
+			SearchResult{Tags: []string{"doom"}}, true, stepGenre},
+		{"a one-word band with no tag is the band", "doom",
+			SearchResult{Bands: []SearchBand{{Name: "Doom"}}}, true, stepArtist},
+		{"two words keep the band first", "chelsea wolfe",
+			SearchResult{Tags: []string{"chelsea-wolfe"}, Bands: []SearchBand{{Name: "Chelsea Wolfe"}}}, true, stepArtist},
+		{"a hyphenated name is two words", "post-punk",
+			SearchResult{Tags: []string{"post-punk"}, Bands: []SearchBand{{Name: "Post-Punk"}}}, true, stepArtist},
 		{"a band beats a tag and a track", "chelsea wolfe",
 			SearchResult{Tags: []string{"chelsea-wolfe"}, Bands: []SearchBand{chelsea},
 				Tracks: []SearchTrack{track("Chelsea Wolfe", "Someone", false)}}, true, stepArtist},

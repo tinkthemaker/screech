@@ -186,6 +186,9 @@ func (q *Queue) prepareTyped(ctx context.Context, seed string) error {
 			q.cls = &cl
 		}
 	}
+	// Whether this is what Bandcamp said or only what was left of not hearing
+	// it: a later tune of the station starts over if it was the latter.
+	q.unanswered = !cl.answered
 	if cl.step == stepGenre {
 		q.genrePhrase(seed)
 		return nil
@@ -220,8 +223,9 @@ func (q *Queue) prepareTyped(ctx context.Context, seed string) error {
 }
 
 // classifyPhrase asks Bandcamp what the phrase is. keep reports whether the
-// answer is worth keeping for a retry: one made while the network was down is
-// not, it says nothing about the phrase.
+// answer is worth keeping for a retry within this tune: one made while the
+// network was down is not, it says nothing about the phrase. (Whether the
+// phrase was answered at all is in the classification; see Retune.)
 func (q *Queue) classifyPhrase(ctx context.Context, phrase string) (cl classification, keep bool, err error) {
 	type lookup struct {
 		hits []YTHit
@@ -231,21 +235,17 @@ func (q *Queue) classifyPhrase(ctx context.Context, phrase string) (cl classific
 	yctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if q.yt != nil {
-		// Whatever the phrase turns out to be, a search of YouTube Music for
-		// it is the next thing needed unless it names a song, and it takes
-		// seconds. Nothing but the answer comes back across the channel; the
-		// queue's own state is touched only after the join.
+		// A search of YouTube Music for the phrase is what the first song is
+		// made from when the phrase is an artist or nothing at all, and it
+		// takes seconds, so it starts now, beside Bandcamp's. Nothing but its
+		// answer comes back across the channel (buffered, so a search nobody
+		// waits for ends by itself); the queue's own state is touched only
+		// after the join.
 		ahead = make(chan lookup, 1)
 		go func() {
 			hits, err := q.yt.Songs(yctx, phrase, searchSize)
 			ahead <- lookup{hits, err}
 		}()
-	}
-	join := func() (lookup, bool) {
-		if ahead == nil {
-			return lookup{}, false
-		}
-		return <-ahead, true
 	}
 
 	sctx, stop := q.bcContext(ctx, true, false)
@@ -253,22 +253,36 @@ func (q *Queue) classifyPhrase(ctx context.Context, phrase string) (cl classific
 	stop()
 	if serr != nil && ctx.Err() != nil {
 		// The caller gave up; that is no verdict on the phrase.
-		cancel()
-		join()
 		return classification{}, false, ctx.Err()
 	}
 
 	cl = classify(phrase, res, serr == nil)
-	if cl.step == stepSong {
-		// A song is found by its band's name, not by its own: the search for
-		// the phrase has nothing to give, and is stopped so it does not hold
-		// the yt-dlp turn the band's search needs.
+	keep = serr == nil || !isNetworkError(serr)
+	switch {
+	case ahead == nil:
+	case cl.step == stepSong || cl.step == stepGenre:
+		// Neither is made from that search. A song is found by its band's name,
+		// not its own; and a genre starts from Bandcamp's tag feed in a second,
+		// where waiting for yt-dlp could take the whole 8 s. The search is
+		// stopped, so it does not hold the yt-dlp turn the next one needs, and
+		// not waited for. If it has already finished, a genre keeps its answer
+		// (it will search for the phrase itself soon enough).
+		if cl.step == stepGenre {
+			select {
+			case l := <-ahead:
+				if l.err == nil {
+					q.ytCache[phrase] = ytEntry{hits: l.hits, at: q.now(), asked: searchSize}
+				}
+			default:
+			}
+		}
 		cancel()
+	default:
+		if l := <-ahead; l.err == nil {
+			q.ytCache[phrase] = ytEntry{hits: l.hits, at: q.now(), asked: searchSize}
+		}
 	}
-	if l, ok := join(); ok && l.err == nil && cl.step != stepSong {
-		q.ytCache[phrase] = ytEntry{hits: l.hits, at: q.now(), asked: searchSize}
-	}
-	return cl, serr == nil || !isNetworkError(serr), nil
+	return cl, keep, nil
 }
 
 // findSeed finds the song that plays first. A band's is its top song on

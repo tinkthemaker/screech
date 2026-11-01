@@ -336,7 +336,13 @@ name matched the second and made a station of muzak. In order:
 2. **An exact tag match** (`tag.matches[].norm_name` equals the hyphenated
    phrase): **genre station**. This is today's behaviour. A genre beats a
    song that happens to share its name, and an artist beats an
-   artist-named tag (`chelsea wolfe` is both).
+   artist-named tag (`chelsea wolfe` is both). **A single word is the other
+   way round:** when the phrase is one word and matches both an exact band
+   and an exact tag (`doom`, `ambient`: bands, and tags with thousands of
+   releases), the tag wins and it is a genre station. Two words or more
+   (and a hyphenated name is two) keep the band first. The genre station
+   starts from Bandcamp's tag feed without waiting for the YouTube Music
+   search that was started beside Bandcamp's; that search is stopped.
 3. **An exact song or album match** (`type` `t` or `a` whose `name` equals the
    phrase): **song radio**. The first song is that song. It comes from YouTube
    Music (`"<band> <name>"`, the first hit whose artist is the band and whose
@@ -349,9 +355,15 @@ name matched the second and made a station of muzak. In order:
 A pasted YouTube link is song radio from that video. Its style tags come
 from its artist's Bandcamp band, or else from its own tags.
 
-If Bandcamp can't be reached, the phrase falls through to step 4. If an
-artist has no Bandcamp page, song radio uses the tags of other artists
-found in the seed's Mix (see "Style tags").
+If Bandcamp can't be reached, the phrase falls through to step 4. That is
+remembered as *not an answer*: the station is not what the phrase is, only
+what was left of not hearing, and **tuning the station again asks
+Bandcamp again** (the queue lives as long as the process, and the player
+opens the station on every Play). If Bandcamp then answers, the station
+starts over as what the phrase is; what has been played stays played. A
+phrase that was answered is never re-asked. If an artist has no Bandcamp
+page, song radio uses the tags of other artists found in the seed's Mix
+(see "Style tags").
 
 ### Where song radio finds songs
 
@@ -399,12 +411,15 @@ found in the seed's Mix (see "Style tags").
 ### Reconnects resume the song
 
 - **The player keeps each song's duration** and roughly where it is in it:
-  wall time since its load, minus pauses.
+  wall time since its load, **minus pauses and stalls** (time spent paused
+  or buffering is not time played).
 - **Same station, same song:** when `Play` is called for the discovery
   station already playing (a session reconnect) and a song is in progress
   and not near its end, the player reloads that song from where it was.
-  It uses mpv's per-file `start=<seconds>`, and resolves the song again if
-  its URL is over an hour old. It does not start the next song.
+  It uses mpv's per-file `start=<seconds>`. **A song whose URL is over an
+  hour old is not reloaded**: its signed URL has expired and the source
+  cannot resolve it again, so the reconnect advances to the next song
+  instead. It never starts the next song otherwise.
 - **At most twice** per song. After that, the next song plays.
 
 ### Diagnostics

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Log is a buffered last-run log: one launch, one file, easy to paste.
@@ -11,10 +12,16 @@ import (
 // Open proves this process is allowed to write — after the single-instance
 // lock, or when failing for any other reason — so a second screech never
 // truncates the running instance's log.
+//
+// It is safe for concurrent use: the player logs from its own goroutines
+// (how each song ended), the window's webview logs from another, and the app
+// closes the log at exit while any of them may still be writing.
 type Log struct {
 	path string
-	f    *os.File
-	buf  []string
+
+	mu  sync.Mutex // guards f and buf
+	f   *os.File
+	buf []string
 }
 
 func NewLog(path string) *Log { return &Log{path: path} }
@@ -22,6 +29,8 @@ func NewLog(path string) *Log { return &Log{path: path} }
 func (l *Log) Path() string { return l.path }
 
 func (l *Log) Open() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.f != nil {
 		return
 	}
@@ -39,6 +48,8 @@ func (l *Log) Open() {
 }
 
 func (l *Log) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.f != nil {
 		_ = l.f.Close()
 		l.f = nil
@@ -50,6 +61,8 @@ func (l *Log) Close() {
 // proves this process is allowed to write.
 func (l *Log) Linef(format string, args ...any) {
 	line := fmt.Sprintf(format, args...)
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.f == nil {
 		l.buf = append(l.buf, line)
 		return

@@ -186,6 +186,7 @@ type Queue struct {
 	boost   int  // songs left on the raised share
 	quick   int  // quick skips in the current run
 	skipped bool // a Skipped call has come since the last Next
+	retune  bool // a Retune call has come since the last Next
 
 	// Everything below belongs to a running Next, and slot lets one run at a
 	// time: no-repeat, the last artist, the caches and the Bandcamp gap are
@@ -202,8 +203,9 @@ type Queue struct {
 	// cls is what Bandcamp made of a typed phrase, kept once it has an answer
 	// worth keeping (see prepareTyped). radio is non-nil when the station is
 	// song or artist radio; see radio.go.
-	cls   *classification
-	radio *radio
+	cls        *classification
+	radio      *radio
+	unanswered bool // the station is what it is because Bandcamp could not say what the phrase was
 
 	bcProbes []bcProbe
 	bcNext   int
@@ -288,6 +290,9 @@ func (q *Queue) Next(ctx context.Context) (Song, error) {
 	share := q.peekShare()
 	if q.yt == nil && q.bc == nil {
 		return Song{}, ErrNoSources
+	}
+	if q.takeRetune() && q.unanswered {
+		q.startOver()
 	}
 	if err := q.prepare(ctx); err != nil {
 		return Song{}, err
@@ -786,6 +791,42 @@ func (q *Queue) Loved() {
 	q.boost = 0
 	q.quick = 0
 	q.base = max(q.base-lovedBy, anchorMin)
+}
+
+// Retune tells the queue the station has been tuned again (the player opens
+// the station on every Play and every reconnect). A phrase that Bandcamp
+// could not be asked about, or that timed out or failed when asked, was taken
+// for a song to start from, and the queue lives as long as the process; so the
+// next Next asks again and, if Bandcamp answers, starts the station over as
+// what the phrase is. What has been played stays played. A station whose
+// phrase was answered, or that was started from a link, is left as it is.
+//
+// It never waits: it is called from the player's Play, and the work is done
+// by the next Next.
+func (q *Queue) Retune() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.retune = true
+}
+
+// takeRetune reports whether Retune has been called since the last Next.
+func (q *Queue) takeRetune() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	v := q.retune
+	q.retune = false
+	return v
+}
+
+// startOver forgets what the queue made of its seed, so prepare makes it again:
+// the classification, the radio or genre it started, the first song. It keeps
+// what has been played, who played last, and every cache.
+func (q *Queue) startOver() {
+	q.prepared, q.unanswered = false, false
+	q.cls, q.radio, q.seedSong = nil, nil, nil
+	q.phrase, q.bcProbes = "", nil
+	q.bcNext, q.bcTag, q.bcOut = 0, "", false
+	q.seedFail = 0
 }
 
 // AnchorShare is the chance the next song is an anchor.
