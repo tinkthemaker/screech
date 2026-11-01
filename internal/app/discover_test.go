@@ -110,9 +110,13 @@ type fakeSink struct {
 	haveYtdlp bool // what wireDiscovery reported
 	ex        player.Extractor
 	open      func(seed string) (player.SongSource, error)
+	songLog   func(format string, args ...any)
 }
 
 func (f *fakeSink) SetExtractor(ex player.Extractor) { f.ex = ex }
+func (f *fakeSink) SetSongLog(logf func(format string, args ...any)) {
+	f.songLog = logf
+}
 func (f *fakeSink) SetSongSources(open func(string) (player.SongSource, error)) {
 	f.open = open
 }
@@ -144,6 +148,27 @@ func wire(t *testing.T, sink *fakeSink, cfg config.Config, exeDir string, bc dis
 	log.Close()
 	b, _ := os.ReadFile(logPath)
 	return string(b)
+}
+
+// The player's song lines (how each discovery song ended) go to the shared
+// log: they are the evidence when a listener says songs are cut short.
+func TestStartGivesThePlayerTheLog(t *testing.T) {
+	cleanPath(t)
+	sink := &fakeSink{}
+	logPath := filepath.Join(t.TempDir(), "screech.log")
+	log := NewLog(logPath)
+	log.Open()
+	wireDiscovery(sink, discoveryDeps{Config: config.Config{DataDir: t.TempDir()}, Known: func(string) bool { return false }, Bandcamp: fakeBandcamp{n: 1}, Log: log})
+	if sink.songLog == nil {
+		log.Close()
+		t.Fatal("wireDiscovery never called SetSongLog")
+	}
+	sink.songLog("song %s ended %s", "bc:1", "eof")
+	log.Close()
+	b, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(b), "song bc:1 ended eof") {
+		t.Fatalf("song line not in the log:\n%s", b)
+	}
 }
 
 // With yt-dlp in the data folder and nothing configured, startup finds it,
@@ -325,7 +350,7 @@ func (q *stubQueue) Next(ctx context.Context) (discover.Song, error) {
 	if q.err != nil {
 		return discover.Song{}, q.err
 	}
-	return discover.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", NewToYou: !q.anchor, Anchor: q.anchor}, nil
+	return discover.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", NewToYou: !q.anchor, Anchor: q.anchor, Duration: 3 * time.Minute}, nil
 }
 func (q *stubQueue) Skipped(quick bool) { q.mu.Lock(); q.skips = append(q.skips, quick); q.mu.Unlock() }
 func (q *stubQueue) Loved()             { q.mu.Lock(); q.loved++; q.mu.Unlock() }
@@ -355,7 +380,9 @@ func TestAdapterPassesSongsAndFeedback(t *testing.T) {
 	q := &stubQueue{}
 	src := &songAdapter{q: q}
 	s, err := src.Next(context.Background())
-	want := player.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", NewToYou: true}
+	// The song's length rides along: the player resumes a song cut by a
+	// reconnect only when it knows how much of it is left.
+	want := player.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", NewToYou: true, Duration: 3 * time.Minute}
 	if err != nil || s != want {
 		t.Fatalf("Next = %+v, %v; want %+v", s, err, want)
 	}
@@ -370,7 +397,7 @@ func TestAdapterPassesSongsAndFeedback(t *testing.T) {
 	// from lowering the anchor share.
 	qa := &stubQueue{anchor: true}
 	s, err = (&songAdapter{q: qa}).Next(context.Background())
-	want = player.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", Anchor: true}
+	want = player.Song{Key: "yt:abcdefghijk", Artist: "A", Title: "T", URL: "https://media.example/a", Anchor: true, Duration: 3 * time.Minute}
 	if err != nil || s != want {
 		t.Fatalf("Next = %+v, %v; want %+v", s, err, want)
 	}

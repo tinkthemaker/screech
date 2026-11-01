@@ -19,6 +19,18 @@ covers everything since 0.6.1.
   seconds changes station. Every song
   counts: loves, history and taste see all of them. Packaging such as
   "(Official Audio)" and trailing "ft." credits is stripped from titles.
+- **What you type plays first.** Type a song and that song plays first;
+  type a band and their best-known song does. After that the station shuffles
+  music in the same style: the band's genre on Bandcamp, and the songs
+  YouTube relates to it, reaching past the first band to others like it. A
+  band comes round at most once in any eight songs. A genre such as "swedish
+  death metal" still plays as a genre. The words you typed are no longer
+  matched against song titles, so a song called "Engorged in Putrescence" no
+  longer fills the station with songs that have "putrescence" in the name.
+- **A song cut off by a dropped connection picks up where it stopped**
+  instead of skipping to the next one. Screech's log now notes how every
+  discovery song ended and how long it played, so a cut that still happens
+  can be tracked down.
 - **The window's FIND tab.** The console opens on a search bar ("Artist, song,
   genre or YouTube link"), with your recent discovery stations under it and a
   RADIO tab beside it. INFO and SLEEP move under MORE, and a red ✕ in the

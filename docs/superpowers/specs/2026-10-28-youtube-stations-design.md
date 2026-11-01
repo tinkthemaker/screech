@@ -383,8 +383,16 @@ found in the seed's Mix, the three most common.
 
 When a discovery song ends, `screech.log` gets one line:
 `song <key> <source> expected <d>s played <p>s ended <why>`.
-- `<why>` is `eof`, `error: <mpv's reason>`, `next`, `new station` or
-  `resumed`.
+- `<why>` is one of:
+  - `eof`: it played out;
+  - `error: <mpv's reason>`;
+  - `next`: the listener pressed NEXT;
+  - `resumed`: a reconnect reloaded it where it stopped;
+  - `reconnect`: too near its end, or already resumed twice, to resume;
+  - `new station`;
+  - `stopped`: playback stopped, from outside or by quitting;
+  - `died`: mpv went away under it.
+- An unknown length prints as `expected ?s`.
 - The source is `bandcamp`, or the YouTube client (`c=…`).
 - No URL is logged.
 

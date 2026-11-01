@@ -31,6 +31,7 @@ import (
 type discoverySink interface {
 	SetExtractor(ex player.Extractor)
 	SetSongSources(open func(seed string) (player.SongSource, error))
+	SetSongLog(logf func(format string, args ...any))
 }
 
 // discoveryDeps is what wireDiscovery reads. Bandcamp is left nil by the real
@@ -105,6 +106,9 @@ func wireDiscovery(sink discoverySink, d discoveryDeps) (haveYtdlp bool) {
 		bc = newBandcamp()
 	}
 	sink.SetSongSources(newSongSources(yt, bc, d.Known).open)
+	// How each discovery song ended, against how long it should have run:
+	// the evidence when a listener hears songs cut short.
+	sink.SetSongLog(d.Log.Linef)
 	// Never a media URL: they are signed, and a log gets pasted.
 	d.Log.Linef("discovery: %s, bandcamp on", state)
 	return haveYt
@@ -174,7 +178,7 @@ func (a *songAdapter) Next(ctx context.Context) (player.Song, error) {
 	if err != nil {
 		return player.Song{}, sourceError(err)
 	}
-	return player.Song{Key: s.Key, Artist: s.Artist, Title: s.Title, URL: s.URL, NewToYou: s.NewToYou, Anchor: s.Anchor}, nil
+	return player.Song{Key: s.Key, Artist: s.Artist, Title: s.Title, URL: s.URL, NewToYou: s.NewToYou, Anchor: s.Anchor, Duration: s.Duration}, nil
 }
 
 func (a *songAdapter) Skipped(quick bool) { a.q.Skipped(quick) }

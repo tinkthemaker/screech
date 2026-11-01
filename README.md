@@ -167,6 +167,19 @@ stations wait under "pick up where you left off", and a click, or the down
 arrow then Enter, picks one up again. Tab in the terminal, or the RADIO tab in the
 window, switches the bar to radio search instead.
 
+**What you type plays first.** Screech asks Bandcamp's search what your
+words are:
+- **A song:** that song plays first.
+- **A band:** their best-known song plays first.
+- **A genre tag**, like "swedish death metal": the station plays the genre.
+- **Anything else:** YouTube Music's top song for it plays first.
+
+After the first song the station plays music like it. It fills from the
+band's genre tags on Bandcamp and from the songs YouTube relates to it,
+reaching past the first band to others like them. A band plays at most once
+in any eight songs. What you typed is used once, to find that first song, and
+is never matched against song titles again.
+
 The mix is discoveries and anchors. Discoveries are bands you probably
 haven't heard, smaller and newer. Anchors are the genre's well-known tracks,
 about one song in five; a run of quick skips brings more of them for a
@@ -174,6 +187,10 @@ while, and loving a discovery brings fewer (loving an anchor doesn't). A song
 never comes round again on the same station within its last 200 songs, and the
 same band never plays twice in a row. Songs run from 90 seconds to 12 minutes,
 so mixes and full albums are left out.
+
+If the connection drops in the middle of a song, the song picks up where it
+stopped. Each song's end goes into `screech.log` with how long it played,
+which is what to send if songs ever seem cut short.
 
 **NEW TO YOU** marks a band you've never heard or loved on Screech. Those
 bands come first among the discoveries, and the status line shows the
