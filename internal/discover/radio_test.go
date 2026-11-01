@@ -83,14 +83,20 @@ var radioNames = map[string]string{
 	"cenotaph": "Cenotaph", "gorgasm": "Gorgasm", "gutrot": "Gutrot", "pyrexia": "Pyrexia",
 	"chelsea": "Chelsea Wolfe", "wolfeparade": "Wolfe Parade", "obscure": "Obscure Band",
 	"ingurgitating": "Ingurgitating Putrescence",
+	"zola":          "Zola Jesus", "ruth": "Emma Ruth Rundle", "wolves": "Wolves In The Throne Room",
 }
 
 // radioMedia resolves a video named "<slug>.<nn>" to a song by that slug's
-// artist, and anything else to defaultMedia's twelve bands.
+// artist, a slug beginning "act" to an artist of its very own (so a Mix can
+// hold as many different ones as a test needs), and anything else to
+// defaultMedia's twelve bands.
 func radioMedia(page string) YTMedia {
 	id := idOf(page)
 	slug, _, _ := strings.Cut(id, ".")
 	name, ok := radioNames[slug]
+	if !ok && strings.HasPrefix(slug, "act") {
+		name, ok = "Act "+slug, true
+	}
 	if !ok {
 		return defaultMedia(page)
 	}
@@ -114,6 +120,18 @@ func songsBy(slug string, n int) []YTHit {
 func styleSongs(query string, n int) []YTHit {
 	hits := hitsFor(strings.ReplaceAll(query, " ", "_")+"-", 60)
 	return hits[:min(n, len(hits))]
+}
+
+// diverseSongs answers a search of a style with sixty songs by sixty different
+// artists, which is what a tag search looks like to a station that has only a
+// dozen artists to keep apart.
+func diverseSongs(query string, n int) []YTHit {
+	slug := strings.ReplaceAll(query, " ", "")
+	out := make([]YTHit, 60)
+	for i := range out {
+		out[i] = YTHit{ID: fmt.Sprintf("act%s%02d.00", slug, i), Title: fmt.Sprintf("%s song %02d", query, i)}
+	}
+	return out[:min(n, len(out))]
 }
 
 // radioWorld builds Mixes the way the probe found them: mostly the artist of
@@ -154,6 +172,21 @@ func radioYT(w radioWorld, songs func(query string, n int) []YTHit) *fakeYT {
 // newRadioQueue is newTestQueue with the seed 7 every test shares.
 func newRadioQueue(seed string, yt YouTube, bc Bandcamp) (*Queue, *clock) {
 	return newTestQueue(seed, yt, bc, nil)
+}
+
+// newSeededQueue is newRadioQueue with a random source of the test's choosing,
+// for the tests that must hold whatever the dice say.
+func newSeededQueue(rngSeed int64, seed string, yt YouTube, bc Bandcamp) (*Queue, *clock) {
+	clk := newClock()
+	return NewQueue(seed, yt, bc, nil, rand.New(rand.NewSource(rngSeed)), clk.Now), clk
+}
+
+// eachSeed runs a test body under several random sources.
+func eachSeed(t *testing.T, body func(t *testing.T, rngSeed int64)) {
+	t.Helper()
+	for rngSeed := int64(1); rngSeed <= 8; rngSeed++ {
+		t.Run(fmt.Sprintf("rng%d", rngSeed), func(t *testing.T) { body(t, rngSeed) })
+	}
 }
 
 func artistKeys(songs []Song) []string {
@@ -217,13 +250,22 @@ func TestClassifyArtist(t *testing.T) {
 	}
 	checkNoRepeats(t, songs)
 
-	if got := bc.searches(); len(got) != 1 {
-		t.Errorf("Bandcamp was searched %v; the band came with the first answer", got)
+	// The band came with the first answer. What else is searched is the band's
+	// neighbours in the Mix, for their tags, and never the phrase again.
+	searches := bc.searches()
+	if len(searches) == 0 || searches[0] != "chelsea wolfe" {
+		t.Errorf("Bandcamp searches = %v, want the phrase first", searches)
+	}
+	for _, s := range searches[1:] {
+		if matchKey(s) == matchKey("chelsea wolfe") {
+			t.Errorf("Bandcamp was searched for %q again", s)
+		}
 	}
 	tags := bc.feedTags()
 	for tag := range tags {
-		if tag != "folk" && tag != "rock-acoustic-alternative-rock" {
-			t.Errorf("the feed was asked about %q; the style is the band's tags", tag)
+		// "folk" is her tag, but it names half of Bandcamp and its feed plays country.
+		if tag != "rock-acoustic-alternative-rock" {
+			t.Errorf("the feed was asked about %q; the style is the band's particular tags", tag)
 		}
 	}
 	if len(tags) == 0 {
@@ -275,7 +317,8 @@ func TestClassifySong(t *testing.T) {
 	}
 	checkNoRepeats(t, songs)
 
-	if got := bc.searches(); len(got) != 2 || got[1] != "Decarnate" {
+	// The phrase, then the band (neighbours in the Mix come after, for the style).
+	if got := bc.searches(); len(got) < 2 || got[0] != "engorged in putrescence" || got[1] != "Decarnate" {
 		t.Errorf("Bandcamp searches = %v, want the phrase and then the band", got)
 	}
 	tags := bc.feedTags()
@@ -429,6 +472,53 @@ func TestClassifyGenre(t *testing.T) {
 	}
 	// Spacing is the genre's: never twice running, not eight apart.
 	checkNoRepeats(t, got)
+}
+
+// A genre beats a song that happens to share its name. Live, "swedish death
+// metal" came back with its tag and a downtempo track by Magmatik called
+// "SwedishDeathMetal"; taking that for the song typed made a station of
+// downtempo. The same goes for a track that really is called "Death Metal".
+func TestClassifyGenreBeatsASongOfTheSameName(t *testing.T) {
+	for _, tc := range []struct{ phrase, tag, track string }{
+		{"swedish death metal", "swedish-death-metal", "SwedishDeathMetal"},
+		{"death metal", "death-metal", "Death Metal"},
+	} {
+		t.Run(tc.phrase, func(t *testing.T) {
+			bc := &fakeSearcher{
+				answers: map[string]SearchResult{matchKey(tc.phrase): {
+					Tags:   []string{tc.tag},
+					Tracks: []SearchTrack{{Name: tc.track, Band: "Magmatik", URL: "https://magmatik.bandcamp.com/track/x", ID: 7}},
+				}},
+				feed: plentifulBC().items,
+			}
+			yt := plentifulYT()
+			q, clk := newRadioQueue(tc.phrase, yt, bc)
+			songs := drain(t, q, clk, 20)
+
+			if calls := bc.feedCalls(); len(calls) == 0 || calls[0] != tc.tag+"|new" {
+				t.Errorf("feed calls = %v, want the genre's own tag first", calls)
+			}
+			if got := bc.searches(); len(got) != 1 {
+				t.Errorf("Bandcamp searches = %v, want the phrase only: no band was looked up", got)
+			}
+			for _, s := range songs {
+				if s.Artist == "Magmatik" || s.Key == "bc:7" {
+					t.Errorf("the track that shares the genre's name was played: %+v", s)
+				}
+			}
+			// A genre station searches YouTube Music for the genre itself.
+			songsLog, _, _ := yt.logs()
+			found := false
+			for _, c := range songsLog {
+				if strings.HasPrefix(c, strings.ReplaceAll(tc.phrase, " ", "_")) || strings.HasPrefix(c, tc.phrase) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("YouTube searches = %v, want the genre searched for", songsLog)
+			}
+		})
+	}
 }
 
 // A phrase nothing on Bandcamp matches is song radio from YouTube Music's top
@@ -677,7 +767,7 @@ func TestSongRadioSpacesArtists(t *testing.T) {
 		if matchKey(query) == matchKey("decarnate") {
 			return songsBy("decarnate", 10)
 		}
-		return styleSongs(query, n)
+		return diverseSongs(query, n)
 	})
 	for _, seed := range []int64{7, 8, 9} {
 		clk := newClock()
@@ -864,8 +954,8 @@ func TestSongRadioFromLink(t *testing.T) {
 			t.Errorf("first song = %+v, want the linked one", songs[0])
 		}
 		checkNoRepeats(t, songs)
-		if got := bc.searches(); len(got) != 1 || got[0] != "Dismember" {
-			t.Errorf("Bandcamp searches = %v, want the artist", got)
+		if got := bc.searches(); len(got) == 0 || got[0] != "Dismember" {
+			t.Errorf("Bandcamp searches = %v, want the artist first", got)
 		}
 		for tag := range bc.feedTags() {
 			if tag != "death-metal" && tag != "swedish" {
@@ -942,6 +1032,268 @@ func TestSongRadioTagsFromTheMix(t *testing.T) {
 		if seen[s] > 1 {
 			t.Errorf("Bandcamp was searched for %q %d times", s, seen[s])
 		}
+	}
+}
+
+// bandAnswer is Bandcamp's answer for a band with a genre and tags.
+func bandAnswer(name, genre string, tags ...string) SearchResult {
+	return SearchResult{Bands: []SearchBand{{Name: name, Genre: genre, Tags: tags}}}
+}
+
+// chelseaAndNeighbours is Chelsea Wolfe as live testing found her: three tags
+// of her own, of which one is Folk, and three other artists in her Mix whose
+// tags are darkwave, doom and gothic rock.
+func chelseaAndNeighbours(rngSeed int64) (*fakeSearcher, *fakeYT, *Queue, *clock) {
+	bc := &fakeSearcher{
+		answers: map[string]SearchResult{
+			matchKey("chelsea wolfe"): {
+				Tags: []string{"chelsea-wolfe"},
+				Bands: []SearchBand{{Name: "CHELSEA WOLFE", Genre: "Alternative",
+					Tags: []string{"Alternative", "Folk", "rock-acoustic-alternative-rock"}}},
+			},
+			matchKey("Zola Jesus"):                bandAnswer("Zola Jesus", "Electronic", "Darkwave", "Gothic Rock", "Folk"),
+			matchKey("Emma Ruth Rundle"):          bandAnswer("Emma Ruth Rundle", "Rock", "Doom", "Darkwave"),
+			matchKey("Wolves In The Throne Room"): bandAnswer("Wolves In The Throne Room", "Metal", "Gothic Rock", "Doom", "Rock"),
+		},
+		feed: func(tag, slice string) []BCItem {
+			if tag == "rock-acoustic-alternative-rock" {
+				return nil // as nothing on Bandcamp is under a tag no one else uses
+			}
+			return bcItems("S "+tag+slice, 1200, 40)
+		},
+	}
+	// A Mix with more of the neighbours than of her, so that every seed of the
+	// dice finds all three before long.
+	world := radioWorld{
+		own:    map[string]int{"chelsea": 2},
+		others: map[string][]string{"chelsea": {"zola", "ruth", "wolves"}},
+	}
+	yt := radioYT(world, func(query string, n int) []YTHit {
+		if matchKey(query) == matchKey("chelsea wolfe") {
+			return songsBy("chelsea", 5)
+		}
+		return styleSongs(query, n)
+	})
+	q, clk := newSeededQueue(rngSeed, "chelsea wolfe", yt, bc)
+	return bc, yt, q, clk
+}
+
+// The searches that work the style out take seconds, and a Next with a
+// deadline close by is a song being waited for: they wait for one with time.
+func TestSongRadioStyleWaitsForRoom(t *testing.T) {
+	bc, _, q, clk := chelseaAndNeighbours(7)
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	for i := 0; i < 14; i++ {
+		clk.Advance(15 * time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		_, err := q.Next(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("Next #%d under an 8 s deadline: %v", i+2, err)
+		}
+	}
+	if got := bc.searches(); len(got) != 1 {
+		t.Errorf("Bandcamp searches = %v: the neighbours were asked about with a song being waited for", got)
+	}
+
+	// With the deadline of a prefetch, they are asked about.
+	for i := 0; i < 8; i++ {
+		clk.Advance(15 * time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		_, err := q.Next(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("Next under a 20 s deadline: %v", err)
+		}
+	}
+	if got := bc.searches(); len(got) < 2 {
+		t.Errorf("Bandcamp searches = %v: the neighbours were never asked about", got)
+	}
+}
+
+// A band's own tags are a poor description of a station. Chelsea Wolfe lists
+// Alternative, Folk and one odd long tag, and Bandcamp's folk feed is country
+// music. The bands around her in the Mix say what she sounds like: their tags
+// are added to hers, ranked by how many of the bands carry them, and the
+// generic genres go.
+func TestSongRadioStyleCombinesTheBandsAround(t *testing.T) {
+	eachSeed(t, checkStyleCombines)
+}
+
+func checkStyleCombines(t *testing.T, rngSeed int64) {
+	bc, yt, q, clk := chelseaAndNeighbours(rngSeed)
+
+	// The first song costs one search. The neighbours are asked about while it
+	// plays.
+	if _, err := q.Next(context.Background()); err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if got := bc.searches(); len(got) != 1 {
+		t.Fatalf("the first song made Bandcamp searches %v, want only the phrase", got)
+	}
+	clk.Advance(15 * time.Second)
+	drain(t, q, clk, 30)
+
+	tags := bc.feedTags()
+	for _, want := range []string{"darkwave", "gothic-rock", "doom"} {
+		if !tags[want] {
+			t.Errorf("the feed never asked for %q; asked for %v", want, tags)
+		}
+	}
+	for _, bad := range []string{"folk", "alternative", "rock"} {
+		if tags[bad] {
+			t.Errorf("the feed was asked about the generic %q", bad)
+		}
+	}
+	searches := bc.searches()
+	if len(searches) > 4 {
+		t.Errorf("Bandcamp searches = %v: the phrase and three neighbours at most", searches)
+	}
+	songsLog, _, _ := yt.logs()
+	for _, c := range songsLog {
+		if containsAny(c, "folk#", "alternative#", "rock#") && !containsAny(c, "gothic", "acoustic") {
+			t.Errorf("YouTube Music was searched on a generic word: %q", c)
+		}
+	}
+}
+
+// A Mix is what YouTube itself relates to the song, and it is the better
+// radio: a search on a style tag is whatever YouTube Music ranks for the
+// words, playlist farms included. So long as the Mix has songs the station can
+// play, style tags are not searched.
+func TestSongRadioLeansOnTheMix(t *testing.T) {
+	eachSeed(t, checkLeansOnTheMix)
+}
+
+func checkLeansOnTheMix(t *testing.T, rngSeed int64) {
+	var acts []string
+	for i := 0; i < 30; i++ {
+		acts = append(acts, fmt.Sprintf("act%02d", i))
+	}
+	world := radioWorld{
+		own:    map[string]int{"chelsea": 3},
+		others: map[string][]string{"chelsea": acts},
+	}
+	for i := range acts {
+		world.own[acts[i]] = 4
+	}
+	bc := &fakeSearcher{answers: map[string]SearchResult{
+		matchKey("chelsea wolfe"): bandAnswer("Chelsea Wolfe", "Rock", "Darkwave", "Doom"),
+	}}
+	yt := radioYT(world, func(query string, n int) []YTHit {
+		if matchKey(query) == matchKey("chelsea wolfe") {
+			return songsBy("chelsea", 5)
+		}
+		return styleSongs(query, n)
+	})
+	q, clk := newSeededQueue(rngSeed, "chelsea wolfe", yt, bc)
+
+	songs := drain(t, q, clk, 14)
+	checkSpaced(t, songs, 8)
+
+	songsLog, mixes, _ := yt.logs()
+	for _, c := range songsLog {
+		if !strings.HasPrefix(c, "chelsea wolfe#") {
+			t.Errorf("YouTube Music was searched for %q while the Mix had songs to play", c)
+		}
+	}
+	if len(mixes) == 0 {
+		t.Error("the Mix was never asked for")
+	}
+	fromMix := 0
+	for _, s := range songs {
+		if strings.HasPrefix(s.Key, "yt:") {
+			fromMix++
+		}
+	}
+	if fromMix != len(songs) {
+		t.Errorf("%d of %d songs came from YouTube's Mixes; the rest were: %v", fromMix, len(songs), keysOf(songs))
+	}
+}
+
+// Once the Mix has nothing left to play, the style tags are searched, but
+// never a generic word: "folk" gets "Dinner Table Music" and its kind.
+func TestSongRadioSearchesStylesOnlyWhenTheMixIsUsedUp(t *testing.T) {
+	eachSeed(t, checkSearchesWhenTheMixIsUsedUp)
+}
+
+func checkSearchesWhenTheMixIsUsedUp(t *testing.T, rngSeed int64) {
+	world := radioWorld{
+		own:    map[string]int{"chelsea": 2, "act1": 1, "act2": 1},
+		others: map[string][]string{"chelsea": {"act1", "act2"}},
+	}
+	var played int
+	var tagSearchAt []int
+	bc := &fakeSearcher{answers: map[string]SearchResult{
+		matchKey("chelsea wolfe"): bandAnswer("Chelsea Wolfe", "Alternative", "Folk", "Darkwave"),
+	}}
+	yt := radioYT(world, func(query string, n int) []YTHit {
+		switch {
+		case matchKey(query) == matchKey("chelsea wolfe"):
+			return songsBy("chelsea", 5)
+		default:
+			tagSearchAt = append(tagSearchAt, played)
+			return styleSongs(query, n)
+		}
+	})
+	q, clk := newSeededQueue(rngSeed, "chelsea wolfe", yt, bc)
+
+	for i := 0; i < 10; i++ {
+		if _, err := q.Next(context.Background()); err != nil {
+			t.Fatalf("song #%d: %v", i+1, err)
+		}
+		played++
+		clk.Advance(15 * time.Second)
+	}
+
+	// The seed and the two other artists in its Mix play before any search.
+	if len(tagSearchAt) == 0 {
+		t.Fatal("the style was never searched, though the Mix was used up")
+	}
+	if tagSearchAt[0] < 3 {
+		t.Errorf("the style was searched after %d songs, before the Mix's three artists had played", tagSearchAt[0])
+	}
+	songsLog, _, _ := yt.logs()
+	for _, c := range songsLog[1:] {
+		if !strings.HasPrefix(c, "darkwave") {
+			t.Errorf("YouTube Music was searched for %q; only the particular tag is a search", c)
+		}
+	}
+}
+
+// A style that is only generic words (all there is for a band tagged "Folk")
+// is not searched on YouTube Music at all. Bandcamp's feed has the tag, since
+// it is the only thing the station has to go on there.
+func TestSongRadioNeverSearchesAGenericWord(t *testing.T) {
+	world := radioWorld{own: map[string]int{"chelsea": 3}}
+	bc := &fakeSearcher{
+		answers: map[string]SearchResult{matchKey("chelsea wolfe"): bandAnswer("Chelsea Wolfe", "Alternative", "Folk", "Indie")},
+		feed:    func(tag, slice string) []BCItem { return bcItems("G "+tag+slice, 1500, 40) },
+	}
+	yt := radioYT(world, func(query string, n int) []YTHit {
+		if matchKey(query) == matchKey("chelsea wolfe") {
+			return songsBy("chelsea", 5)
+		}
+		return styleSongs(query, n)
+	})
+	q, clk := newRadioQueue("chelsea wolfe", yt, bc)
+
+	// Anchors and discoveries both, many times over.
+	for i := 0; i < 25; i++ {
+		if _, err := q.Next(context.Background()); err != nil {
+			break
+		}
+		clk.Advance(15 * time.Second)
+	}
+	songsLog, _, _ := yt.logs()
+	for _, c := range songsLog[1:] {
+		t.Errorf("YouTube Music was searched for %q, a generic word", c)
+	}
+	tags := bc.feedTags()
+	if !tags["folk"] || !tags["indie"] {
+		t.Errorf("the feed was asked about %v, want the only tags the band has", tags)
 	}
 }
 

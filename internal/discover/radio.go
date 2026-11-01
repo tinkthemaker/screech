@@ -21,8 +21,12 @@ import (
 // tags. A phrase that is a band or a song ("chelsea wolfe", "engorged in
 // putrescence") is not a style to search for, it is a place to start from. The
 // station plays that song or band first, and then songs that sound like it:
-// what YouTube relates to the song (its Mix), the songs of the tags Bandcamp
-// lists the band under, and the occasional famous track of those tags.
+// what YouTube relates to the song (its Mix, and the Mixes of the songs by
+// other artists found in it), the songs of the tags Bandcamp lists the band and
+// its neighbours under, and the occasional famous track of those tags. The Mix
+// leads: YouTube Music searched for a tag is whatever it ranks for the words,
+// playlist farms included, so that is where a station looks only once the Mixes
+// have nothing it can play.
 //
 // The typed phrase is used for the first song and nothing else. Searching it
 // again would find more songs with its words in the title, which is the fault
@@ -39,8 +43,8 @@ const (
 	// many songs by other artists, each found in the seed's own Mix.
 	maxHops = 6
 
-	// How many of those other artists are remembered by name, for the style a
-	// band with no Bandcamp page borrows from them.
+	// How many of those other artists are remembered by name, for the style
+	// they lend the seed.
 	maxOthers = 12
 
 	// Finding the first song may resolve this many videos, which is a yt-dlp
@@ -53,10 +57,11 @@ const (
 	// A radio may spend this many resolves on a song, where a genre station
 	// spends maxResolves. Telling who the songs of a Mix are by costs a resolve
 	// each, and a Mix is mostly one artist, so finding one who may play can
-	// take many. Only the first song of a tune is waited for, and that is the
-	// seed, found by seedResolves; the rest are prefetched behind the
-	// listener's own lookups.
-	radioResolves = 10
+	// take more. It is bounded by time too: the player gives the lookup of the
+	// next song 20 s, and a resolve is a few seconds of yt-dlp. Only the first
+	// song of a tune is waited for more briefly, and that is the seed, found
+	// by seedResolves.
+	radioResolves = 8
 
 	// A Mix that has twice in a row turned out to be an artist who just played
 	// has said what it is; the hunt moves to the next source instead of
@@ -64,16 +69,31 @@ const (
 	// has anything better does it come back and dig.
 	radioStreak = 2
 
+	// Looking through the Mixes leaves this many resolves for the style's
+	// searches, and digging through them leaves the smaller reserve, so that a
+	// Mix that is all one band does not use up the Next that would have found a
+	// song elsewhere. (There can be a Mix for each hop, and each is allowed its
+	// streak.)
+	radioProbe   = 5
+	radioReserve = 3
+
 	// A band's Bandcamp page is looked up this many times before the station
 	// stops asking, a try no sooner than the Bandcamp gap after the last.
 	bandTries = 3
 
-	// A band with no Bandcamp page takes its style from the other artists in
-	// its Mix once this many are known (or one, after mixLate asks), looking at
-	// no more than mixBands of them.
+	// The style is the seed's tags and those of the other artists found in its
+	// Mix (see refineStyle). It waits until this many are known, or one after
+	// mixLate asks, and looks at no more than mixBands of them. Each is a
+	// Bandcamp search, and none is made while the first song is waited for.
 	mixFirst = 3
-	mixLate  = 6
-	mixBands = 4
+	mixLate  = 10
+	mixBands = 3
+
+	// The Bandcamp searches that settle the style take up to 2 s each. A Next
+	// with a deadline closer than this leaves them for one with more time (the
+	// player gives the song after the current one 20 s, and the first song of
+	// a tune 8), since its song is what is being waited for.
+	styleRoom = 15 * time.Second
 )
 
 // radio is what makes a queue song or artist radio: where it started, and what
@@ -83,9 +103,10 @@ type radio struct {
 	seedName string // its artist, as shown
 	seedKey  string // core.NormalizeArtist of seedName
 
-	// Where the style comes from, in order: the band Bandcamp matched to the
-	// phrase, the band of that name on Bandcamp, the tags a linked video
-	// carries, and the other artists found in the seed's Mix.
+	// Where the style comes from: the band Bandcamp matched to the phrase, or
+	// the band of that name on Bandcamp, or the tags a linked video carries,
+	// first; and then, to say what that band sounds like in company, the tags
+	// of the other artists found in the seed's Mix.
 	band      *SearchBand
 	bandName  string // whose Bandcamp page is still to be looked up
 	bandDone  bool   // that lookup has an answer, or is given up on
@@ -93,23 +114,34 @@ type radio struct {
 	bandAt    time.Time
 	ownTags   []string
 
-	tags     []string // the style: Bandcamp tags, hyphenated, at most maxStyleTags
-	styled   bool     // the style is settled, even if it is empty
-	asks     int      // Nexts that have asked for the style
+	tags    []string // the style: Bandcamp tags, hyphenated, at most maxStyleTags
+	styled  bool     // there is a style, if only the seed's own
+	refined bool     // the neighbours have been asked, or there is nothing more to learn
+	asks    int      // Nexts that have asked for the style
+
 	mixTries int
+	mixAt    time.Time
 
 	// What the YouTube side knows. artistOf is who a video turned out to be by,
 	// kept for the life of the station (the media itself goes stale in ten
 	// minutes, who made it never does).
 	artistOf map[string]string
-	mixIDs   map[string]bool // videos listed in the seed's own Mix
-	hops     []string        // videos by other artists found there, whose Mixes are crawled
-	heard    map[string]bool // those artists
-	others   []string        // and their names
+	mixOf    map[string]string  // video -> the Mix (named by its video) that first listed it
+	stat     map[string]mixStat // Mix -> what its resolved songs have turned out to be
+	hops     []string           // videos by other artists found in the seed's Mix, whose Mixes are crawled
+	heard    map[string]bool    // those artists
+	others   []string           // and their names
 }
 
+// mixStat is what is known of how much of a Mix is the artist it is built
+// around: of n songs resolved, own were by that artist.
+type mixStat struct{ n, own int }
+
 func newRadio() *radio {
-	return &radio{artistOf: map[string]string{}, mixIDs: map[string]bool{}, heard: map[string]bool{}}
+	return &radio{
+		artistOf: map[string]string{}, mixOf: map[string]string{}, stat: map[string]mixStat{},
+		heard: map[string]bool{},
+	}
 }
 
 // setSeed names the seed's artist from the media it resolved to.
@@ -292,7 +324,7 @@ func (q *Queue) seedFrom(ctx context.Context, r *run, hits []YTHit, artist, titl
 		if h.ID == "" || q.ruledOut(key) {
 			continue
 		}
-		if titleKey != "" && h.Title != "" && !strings.Contains(matchKey(h.Title), titleKey) {
+		if titleKey != "" && h.Title != "" && !containsName(h.Title, title) {
 			continue
 		}
 		m, at, err := q.resolve(ctx, cand{key: key, id: h.ID}, r)
@@ -466,22 +498,45 @@ var artistSplit = regexp.MustCompile(`(?i)\s*(?:,|;|&|/|\s+and\s+|\s+x\s+|\s+(?:
 // settle it plays on from the Mix, which needs no style. A failure of Bandcamp
 // here costs the style (retried a few times, the Bandcamp gap apart), never a
 // song.
+//
+// The style is settled twice. First comes the seed's own: its band's tags from
+// the answer that classified it or a search for it, or failing both a linked
+// video's tags. That is a thin description, though (Chelsea Wolfe lists
+// Alternative, Folk and one long odd tag), so once the Next calls that follow
+// have turned up some of the other artists in the seed's Mix, the style is
+// worked out again from the seed and up to mixBands of them.
 func (q *Queue) ensureStyle(ctx context.Context) {
 	rd := q.radio
-	if rd == nil || rd.styled || ctx.Err() != nil {
+	if rd == nil || ctx.Err() != nil || rd.styled && rd.refined {
 		return
 	}
 	rd.asks++
+	if !rd.styled {
+		q.seedStyle(ctx)
+	}
+	q.refineStyle(ctx)
+}
 
+// hasRoom reports whether ctx leaves time for the Bandcamp searches that settle
+// a style: it has no deadline, or one at least styleRoom away.
+func hasRoom(ctx context.Context) bool {
+	dl, ok := ctx.Deadline()
+	return !ok || time.Until(dl) >= styleRoom
+}
+
+// seedStyle is the style of the seed alone.
+func (q *Queue) seedStyle(ctx context.Context) {
+	rd := q.radio
 	if rd.band != nil {
+		// Bandcamp has already said whose band this is: nothing to look up.
+		rd.bandDone = true
 		if tags := styleTags(*rd.band); len(tags) > 0 {
 			rd.settle(tags)
 			return
 		}
-		rd.bandDone = true
 	}
 	if rd.bandName != "" && !rd.bandDone {
-		if rd.bandTries > 0 && q.now().Sub(rd.bandAt) < bcGap {
+		if !hasRoom(ctx) || rd.bandTries > 0 && q.now().Sub(rd.bandAt) < bcGap {
 			return
 		}
 		band, err := q.bandFor(ctx, rd.bandName)
@@ -508,10 +563,58 @@ func (q *Queue) ensureStyle(ctx context.Context) {
 		}
 	}
 	if len(rd.ownTags) > 0 {
-		rd.settle(rd.ownTags)
+		rd.settle(styleFrom([]SearchBand{{Tags: rd.ownTags}}))
+	}
+}
+
+// refineStyle works the style out again from the seed and the other artists
+// found in its Mix: a Bandcamp search for each (the first mixBands), and the
+// tags ranked by how many of the bands carry them. It waits until there are
+// enough of them to say something, and tries twice at most. A seed with no
+// style of its own (an artist with no Bandcamp page) has only them.
+func (q *Queue) refineStyle(ctx context.Context) {
+	rd := q.radio
+	if rd.refined || rd.bandName != "" && !rd.bandDone {
 		return
 	}
-	q.styleFromMix(ctx)
+	n := len(rd.others)
+	if n < mixFirst && !(n > 0 && rd.asks >= mixLate) || !hasRoom(ctx) {
+		return
+	}
+	if rd.mixTries > 0 && q.now().Sub(rd.mixAt) < bcGap {
+		return
+	}
+
+	var bands []SearchBand
+	switch {
+	case rd.band != nil:
+		bands = append(bands, *rd.band)
+	case len(rd.ownTags) > 0:
+		bands = append(bands, SearchBand{Tags: rd.ownTags})
+	}
+	failed := false
+	for _, name := range rd.others[:min(n, mixBands)] {
+		band, err := q.bandFor(ctx, name)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			failed = true
+			break
+		}
+		if band != nil {
+			bands = append(bands, *band)
+		}
+	}
+	rd.mixTries++
+	rd.mixAt = q.now()
+	if failed && rd.mixTries < 2 {
+		return
+	}
+	rd.refined, rd.styled = true, true
+	if tags := styleFrom(bands); len(tags) > 0 && !failed {
+		rd.settle(tags)
+	}
 }
 
 func (rd *radio) settle(tags []string) {
@@ -539,41 +642,6 @@ func (q *Queue) bandFor(ctx context.Context, name string) (*SearchBand, error) {
 	return nil, nil
 }
 
-// styleFromMix is the style of an artist with no Bandcamp page: the three tags
-// most common among the other artists found in the seed's Mix. It waits until
-// there are enough of them to say something, and it tries twice at most.
-func (q *Queue) styleFromMix(ctx context.Context) {
-	rd := q.radio
-	if rd.mixTries >= 2 || len(rd.others) < mixFirst && !(len(rd.others) > 0 && rd.asks >= mixLate) {
-		return
-	}
-	counts := map[string]int{}
-	var order []string
-	for _, name := range rd.others[:min(len(rd.others), mixBands)] {
-		band, err := q.bandFor(ctx, name)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			break
-		}
-		if band == nil {
-			continue
-		}
-		for _, t := range styleTags(*band) {
-			if counts[t] == 0 {
-				order = append(order, t)
-			}
-			counts[t]++
-		}
-	}
-	rd.mixTries++
-	sort.SliceStable(order, func(i, j int) bool { return counts[order[i]] > counts[order[j]] })
-	if len(order) > 0 || rd.mixTries >= 2 {
-		rd.settle(order)
-	}
-}
-
 // --- the YouTube side ---------------------------------------------------------------------
 
 // noteResolved learns from a video that was just resolved. Whose it is is
@@ -592,7 +660,16 @@ func (q *Queue) noteResolved(id string, m YTMedia) {
 		return
 	}
 	rd.artistOf[id] = key
-	if !rd.mixIDs[id] || key == rd.seedKey || rd.heard[key] {
+	mix, listed := rd.mixOf[id]
+	if listed {
+		st := rd.stat[mix]
+		st.n++
+		if key == rd.artistOf[mix] {
+			st.own++
+		}
+		rd.stat[mix] = st
+	}
+	if !listed || mix != rd.seedID || key == rd.seedKey || rd.heard[key] {
 		return
 	}
 	rd.heard[key] = true
@@ -612,23 +689,49 @@ type ytGroup struct {
 	words string // a search: what is searched for
 }
 
-// radioGroups lists the places to look, in the order to look. Anchors are the
-// style's famous songs, so only the tag searches; discoveries come from those
-// and from the Mixes. Each group is as likely to be first as another: a Mix of
-// fifty songs holds no more of the station than a search of fifty, and a
-// Mix is mostly one artist.
-func (q *Queue) radioGroups(anchor bool) []ytGroup {
+// mixGroups lists the Mixes to look in: the seed's, and those of the songs by
+// other artists found in it. A Mix is mostly the artist it is built around (45
+// of 50 for a Topic track), so one whose artist has played too lately for a
+// song of theirs to play is a poor place to look, and the more of what has been
+// resolved from it was that artist's, the poorer. Those come last; the rest
+// are in a random order, since each is as likely to be good as another.
+func (q *Queue) mixGroups() []ytGroup {
 	rd := q.radio
 	var gs []ytGroup
-	for _, t := range rd.tags {
-		gs = append(gs, ytGroup{words: strings.ReplaceAll(t, "-", " ")})
+	if rd.seedID != "" {
+		gs = append(gs, ytGroup{mix: true, id: rd.seedID})
 	}
-	if !anchor {
-		if rd.seedID != "" {
-			gs = append(gs, ytGroup{mix: true, id: rd.seedID})
+	for _, id := range rd.hops {
+		gs = append(gs, ytGroup{mix: true, id: id})
+	}
+	q.rng.Shuffle(len(gs), func(i, j int) { gs[i], gs[j] = gs[j], gs[i] })
+	// Cost: 0 when the artist the Mix is built around may play, and otherwise
+	// 1 plus the share of what has been resolved from it that was theirs (an
+	// unknown share is taken for half).
+	cost := func(g ytGroup) float64 {
+		owner := rd.artistOf[g.id]
+		if !q.blocked(owner) {
+			return 0
 		}
-		for _, id := range rd.hops {
-			gs = append(gs, ytGroup{mix: true, id: id})
+		st := rd.stat[g.id]
+		if st.n < 2 {
+			return 1.5
+		}
+		return 1 + float64(st.own)/float64(st.n)
+	}
+	sort.SliceStable(gs, func(i, j int) bool { return cost(gs[i]) < cost(gs[j]) })
+	return gs
+}
+
+// tagGroups lists the style's tags as YouTube Music searches, in a random
+// order. A generic genre is left out: a search for "folk" returns whatever
+// playlist farm has the word in its name, which is the one thing a station
+// that knows better should not play.
+func (q *Queue) tagGroups() []ytGroup {
+	var gs []ytGroup
+	for _, t := range q.radio.tags {
+		if !genericTag(t) {
+			gs = append(gs, ytGroup{words: strings.ReplaceAll(t, "-", " ")})
 		}
 	}
 	q.rng.Shuffle(len(gs), func(i, j int) { gs[i], gs[j] = gs[j], gs[i] })
@@ -643,9 +746,9 @@ func (q *Queue) groupCands(ctx context.Context, g ytGroup, anchor bool) ([]cand,
 		if err != nil {
 			return nil, err
 		}
-		if g.id == q.radio.seedID {
-			for _, h := range hits {
-				q.radio.mixIDs[h.ID] = true
+		for _, h := range hits {
+			if _, ok := q.radio.mixOf[h.ID]; !ok {
+				q.radio.mixOf[h.ID] = g.id
 			}
 		}
 		return q.ytFilter(hits), nil
@@ -659,16 +762,73 @@ func (q *Queue) groupCands(ctx context.Context, g ytGroup, anchor bool) ([]cand,
 	return q.searchStages(ctx, g.words)
 }
 
-// pickRadioYT is pickYT for a radio: it tries each group in turn until one has a
-// song. A group that fails does not fail the rest, only the song if no other
-// group has one.
+// mixHasSongs reports whether any of the Mixes still has a song that could be
+// resolved and tried: not played, not ruled out, and not known to be by an
+// artist the spacing rule holds back. A Mix that cannot be fetched has none.
+func (q *Queue) mixHasSongs(ctx context.Context) bool {
+	rd := q.radio
+	ids := append([]string(nil), rd.hops...)
+	if rd.seedID != "" {
+		ids = append([]string{rd.seedID}, ids...)
+	}
+	for _, id := range ids {
+		cands, err := q.groupCands(ctx, ytGroup{mix: true, id: id}, false)
+		if err == nil && len(cands) > 0 {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// rung is one step of the hunt for a radio's next YouTube song: which places to
+// look in, how many blocked songs in a row end the look in one place (0 never),
+// and how many of the run's resolves it leaves for the steps after it.
+type rung struct {
+	mix           bool
+	streak, floor int
+}
+
+// discoveryLadder is the order a discovery is hunted in. The Mixes lead. The
+// searches of the style come only when the Mixes have given nothing: twice over
+// a Mix said it is all one artist, and then the Mixes were dug through as far
+// as the reserve allows. What is left of the budget goes back to the Mixes,
+// then to the searches without the streak rule.
+var discoveryLadder = []rung{
+	{mix: true, streak: radioStreak, floor: radioProbe},
+	{mix: true, floor: radioReserve},
+	{streak: radioStreak},
+	{mix: true},
+	{},
+}
+
+// anchorLadder is an anchor's: the famous songs of the style, which are
+// searches and only searches.
+var anchorLadder = []rung{{streak: radioStreak}, {}}
+
+// pickRadioYT is pickYT for a radio. It works down a ladder of rungs, each a
+// walk over the places to look until one has a song. A place that fails does
+// not fail the rest, only the song if no other has one.
 func (q *Queue) pickRadioYT(ctx context.Context, anchor bool, r *run) (Song, bool, error) {
 	var firstErr error
-	// The second pass has no streak limit: if the groups tried one after the
-	// other have nothing, the song is in whichever of them has the most still
-	// to resolve.
-	for _, streak := range [2]int{radioStreak, 0} {
-		for _, g := range q.radioGroups(anchor) {
+	ladder := discoveryLadder
+	if anchor {
+		// The famous songs of the style are a search, and a search waits until
+		// the Mixes have nothing to play. Until then an anchor is Bandcamp's top
+		// sellers, or a discovery that turns out to be well known.
+		if q.mixHasSongs(ctx) {
+			return Song{}, false, nil
+		}
+		ladder = anchorLadder
+	}
+	for _, rg := range ladder {
+		groups := q.tagGroups()
+		if rg.mix {
+			groups = q.mixGroups()
+		}
+		for _, g := range groups {
 			if ctx.Err() != nil {
 				return Song{}, false, firstErr
 			}
@@ -680,12 +840,15 @@ func (q *Queue) pickRadioYT(ctx context.Context, anchor bool, r *run) (Song, boo
 			if len(cands) == 0 {
 				continue
 			}
-			if s, ok := q.pickFrom(ctx, cands, anchor, r, streak); ok {
+			if s, ok := q.pickFrom(ctx, cands, anchor, r, rg.streak, rg.floor); ok {
 				return s, true, nil
 			}
-			if r.left <= 0 {
-				return Song{}, false, firstErr
+			if r.left <= rg.floor {
+				break
 			}
+		}
+		if r.left <= 0 {
+			break
 		}
 	}
 	return Song{}, false, firstErr

@@ -323,20 +323,27 @@ FIND classifies a phrase with Bandcamp's public search,
 `POST https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic`
 with JSON `{"search_text":<phrase>,"search_filter":"","full_page":false,"fan_id":null}`,
 in parallel with the first YouTube lookup and capped at 2 s. Names are
-compared case-, space- and punctuation-insensitively. In order:
+compared case- and punctuation-insensitively, **word by word**: punctuation
+is a space, runs of spaces are one, and words keep their boundaries
+(`SwedishDeathMetal` is not `swedish death metal`; an apostrophe joins and
+does not divide, so `Don't` is `dont`). Live, a downtempo track of the first
+name matched the second and made a station of muzak. In order:
 
 1. **An exact artist match** (a result of `type` `b` whose `name` equals the
    phrase): **artist radio**. The first song is that artist's top YouTube
-   Music song. The style tags are that band's `tag_names`.
-2. **An exact song or album match** (`type` `t` or `a` whose `name` equals the
+   Music song. The style is that band's `tag_names` to begin with; see
+   "Style tags".
+2. **An exact tag match** (`tag.matches[].norm_name` equals the hyphenated
+   phrase): **genre station**. This is today's behaviour. A genre beats a
+   song that happens to share its name, and an artist beats an
+   artist-named tag (`chelsea wolfe` is both).
+3. **An exact song or album match** (`type` `t` or `a` whose `name` equals the
    phrase): **song radio**. The first song is that song. It comes from YouTube
-   Music (`"<band> <name>"`, the first hit whose artist is the band), or else
-   from the Bandcamp page itself through yt-dlp. The style tags are the
-   band's.
-3. **An exact tag match** (`tag.matches[].norm_name` equals the hyphenated
-   phrase): **genre station**. This is today's behaviour.
+   Music (`"<band> <name>"`, the first hit whose artist is the band and whose
+   title has the song's name in it), or else from the Bandcamp page itself
+   through yt-dlp. The style begins with the band's tags.
 4. **Anything else:** **song radio** from YouTube Music's top song hit for
-   the phrase. Its style tags come from a Bandcamp search for that song's
+   the phrase. The style begins with a Bandcamp search for that song's
    artist.
 
 A pasted YouTube link is song radio from that video. Its style tags come
@@ -344,7 +351,7 @@ from its artist's Bandcamp band, or else from its own tags.
 
 If Bandcamp can't be reached, the phrase falls through to step 4. If an
 artist has no Bandcamp page, song radio uses the tags of other artists
-found in the seed's Mix, the three most common.
+found in the seed's Mix (see "Style tags").
 
 ### Where song radio finds songs
 
@@ -352,15 +359,36 @@ found in the seed's Mix, the three most common.
 - **Discoveries** come from three places:
   - the Bandcamp feeds (`new`, `rand`) for the style tags;
   - YouTube's Mix of the seed, plus the Mixes of songs by other artists
-    found in it (one hop, so the station leaves the seed band);
-  - YouTube Music song searches on the style tags, results 10–50.
+    found in it (one hop, so the station leaves the seed band). **The Mixes
+    lead:** YouTube Music searched for a tag is whatever it ranks for the
+    words, playlist farms included ("downtempo" gave "Dinner Table Music –
+    Superlative Saxophone Jazz…");
+  - YouTube Music song searches on the style tags, results 10–50, **only
+    once the Mixes have nothing the station can play**. A Mix whose artist
+    has just played is tried last, because a Mix is mostly its own artist.
 - **Anchors:** Bandcamp `top` for the style tags, and the first 5 YouTube
-  Music results for the style tags.
-- **Not used:** the typed phrase is used only to find the seed song. It is
-  never searched again, and words are never dropped from it to make a tag.
-- **Style tags:** up to three. Drop a band's top-level genre (its
-  `genre_name`, e.g. "Metal") when more specific tags exist, and drop tags
-  that name its location. Hyphenate the rest for Bandcamp's feed.
+  Music results for the style tags, the latter only once no Mix has a song
+  left to try (until then an anchor is Bandcamp's, or a discovery that
+  turns out to have over a million views).
+- **Never searched:** the typed phrase, after the seed song is found, and a
+  single generic word (below), on YouTube Music.
+- **Not used:** words are never dropped from the typed phrase to make a tag.
+- **Style tags:** up to three, from the seed's band **and from up to three
+  other artists found in the seed's Mix**. The seed's own tags are used at
+  first. Once the Mix has turned up other artists, a Bandcamp search for each
+  (made while the next song is being prefetched, never inside the wait for the
+  first) gives their tags, and the tags are ranked by how many of those bands
+  (the seed's included) carry them.
+  - Per band: drop its top-level genre (its `genre_name`, e.g. "Metal") when
+    more specific tags exist, and drop tags that name its location.
+    Hyphenate the rest for Bandcamp's feed.
+  - Drop the **generic single-word genres** (alternative, rock, metal, folk,
+    pop, electronic, experimental, indie, ambient, punk, jazz, hip-hop,
+    country, classical and Bandcamp's other top-level genres) whenever at
+    least one more specific tag remains. Chelsea Wolfe lists "Alternative",
+    "Folk" and one long odd tag; the Bandcamp "folk" feed played country.
+    If only generic tags are left they stay for Bandcamp's feed, but they are
+    never what YouTube Music is searched for.
 - **Artist spacing:** on song or artist radio, an artist plays at most once
   in any 8 songs in a row. A song's Mix is mostly its own band (45 of 50 for
   a Topic track), and this is what turns it into a radio. Genre stations

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -188,20 +189,43 @@ func trackPage(root, path string) string {
 
 // --- names and classes -----------------------------------------------------------------
 
-// matchKey is a name stripped to what identifies it: letters and digits,
-// lower case. "Chelsea  Wolfe!" and "CHELSEA WOLFE" are the same name.
+// matchKey is a name as it is compared: lower case, every run of anything but
+// letters and digits one space, so that words keep their boundaries.
+// "Chelsea  Wolfe!" and "CHELSEA WOLFE" are one name; "SwedishDeathMetal" and
+// "swedish death metal" are not, and live, a downtempo track of the first name
+// was taken for the second. An apostrophe joins and does not divide ("Don't"
+// is "dont"), and a combining accent belongs to its letter.
 func matchKey(s string) string {
-	k := strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return unicode.ToLower(r)
+	var b strings.Builder
+	space := false
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			if space && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			space = false
+			b.WriteRune(r)
+		case unicode.IsMark(r):
+			b.WriteRune(r)
+		case r == '\'' || r == '’' || r == '`':
+			// An apostrophe joins; see above.
+		default:
+			space = true
 		}
-		return -1
-	}, s)
-	if k == "" {
+	}
+	if b.Len() == 0 {
 		// A name made only of symbols ("!!!" is a band) still names something.
 		return strings.ToLower(strings.Join(strings.Fields(s), ""))
 	}
-	return k
+	return b.String()
+}
+
+// containsName reports whether name appears in s as whole words: "engorged in
+// putrescence (official audio)" has "engorged in putrescence" in it, "reengorged
+// in putrescence" does not.
+func containsName(s, name string) bool {
+	return strings.Contains(" "+matchKey(s)+" ", " "+matchKey(name)+" ")
 }
 
 // normTag is Bandcamp's spelling of a tag: lower case, every run of anything
@@ -226,8 +250,8 @@ func normTag(s string) string {
 // The four things a typed phrase can be, in the order they are tried.
 const (
 	stepArtist = iota + 1 // a band by that name: artist radio
-	stepSong              // a song or album by that name: song radio
 	stepGenre             // a tag by that name: a genre station, as it always was
+	stepSong              // a song or album by that name: song radio
 	stepTopHit            // none of them: song radio from YouTube Music's top hit
 )
 
@@ -241,11 +265,12 @@ type classification struct {
 // classify reads Bandcamp's answer for a phrase. answered is false when
 // Bandcamp could not be asked, which reads like an answer that matched nothing.
 //
-// Names must match whole (see matchKey): "swedish death metal" is not the
-// album "Swedish Death Metal Compilation", and a station that took it for one
-// would play a record the listener never named. A band beats a song beats a
-// tag, because the more particular a thing is the more likely it is what
-// was meant ("chelsea wolfe" is a tag too, with 99 releases under it).
+// Names must match whole, word for word (see matchKey): "swedish death metal"
+// is not the album "Swedish Death Metal Compilation", and a station that took
+// it for one would play a record the listener never named. A band beats a tag
+// ("chelsea wolfe" is a tag too, with 99 releases under it), and a tag beats a
+// song: someone who types a genre wants the genre, and a track that happens to
+// share its name (there is one called "Death Metal") is rarely the point.
 func classify(phrase string, res SearchResult, answered bool) classification {
 	if !answered {
 		return classification{step: stepTopHit}
@@ -254,6 +279,15 @@ func classify(phrase string, res SearchResult, answered bool) classification {
 	for i := range res.Bands {
 		if matchKey(res.Bands[i].Name) == key {
 			return classification{step: stepArtist, band: &res.Bands[i]}
+		}
+	}
+	want := map[string]bool{normTag(phrase): true}
+	if tags := BandcampTags(phrase); len(tags) > 0 {
+		want[tags[0]] = true
+	}
+	for _, t := range res.Tags {
+		if want[t] {
+			return classification{step: stepGenre}
 		}
 	}
 	// A track is the song; an album of that name is the song only when no
@@ -274,26 +308,30 @@ func classify(phrase string, res SearchResult, answered bool) classification {
 	if album != nil {
 		return classification{step: stepSong, track: album}
 	}
-	want := map[string]bool{normTag(phrase): true}
-	if tags := BandcampTags(phrase); len(tags) > 0 {
-		want[tags[0]] = true
-	}
-	for _, t := range res.Tags {
-		if want[t] {
-			return classification{step: stepGenre}
-		}
-	}
 	return classification{step: stepTopHit}
 }
 
-// styleTags is what a band sounds like, as Bandcamp tags to feed the station:
-// the band's own tags, hyphenated the way Bandcamp spells them, at most three.
-//
-// A band's top-level genre ("Metal") is dropped when it has anything more
-// particular, since it names half of Bandcamp; and a tag that is only the
-// band's place ("Christchurch", "New Zealand") is dropped, since a town is not
-// a sound.
-func styleTags(b SearchBand) []string {
+// genericGenres are Bandcamp's top-level genres, which name half of Bandcamp
+// and say little about a sound: the feed under "folk" is country, "rock" is
+// everything. They are not a style when anything more particular is known,
+// and they are never what YouTube Music is searched for.
+var genericGenres = map[string]bool{
+	"acoustic": true, "alternative": true, "ambient": true, "blues": true,
+	"classical": true, "country": true, "dance": true, "electronic": true,
+	"experimental": true, "folk": true, "funk": true, "hip-hop": true,
+	"hip-hop-rap": true, "indie": true, "instrumental": true, "jazz": true,
+	"latin": true, "metal": true, "pop": true, "punk": true, "rap": true,
+	"reggae": true, "rock": true, "soul": true, "soundtrack": true, "world": true,
+}
+
+// genericTag reports a tag (in Bandcamp's spelling) that is one of those.
+func genericTag(tag string) bool { return genericGenres[tag] }
+
+// bandTags are one band's tags as styles: in Bandcamp's spelling, less the
+// band's top-level genre (its genre_name) when it has anything more particular,
+// and less any tag that is only its place ("Christchurch", "New Zealand"), since
+// a town is not a sound.
+func bandTags(b SearchBand) []string {
 	places := map[string]bool{}
 	if k := normTag(b.Location); k != "" {
 		places[k] = true
@@ -319,10 +357,43 @@ func styleTags(b SearchBand) []string {
 		}
 	}
 	if len(specific) > 0 {
-		all = specific
-	}
-	if len(all) > maxStyleTags {
-		all = all[:maxStyleTags]
+		return specific
 	}
 	return all
 }
+
+// styleFrom is what a group of bands sounds like, as at most maxStyleTags
+// Bandcamp tags: the tags ranked by how many of the bands carry them, the
+// earlier band's order breaking a tie, with the generic genres dropped as long
+// as anything more particular is left. A band alone is a thin description (the
+// seed of a station lists three tags, one of them "Folk"); the bands around it
+// agree on what it is.
+func styleFrom(bands []SearchBand) []string {
+	counts := map[string]int{}
+	var order []string
+	for _, b := range bands {
+		for _, t := range bandTags(b) {
+			if counts[t] == 0 {
+				order = append(order, t)
+			}
+			counts[t]++
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool { return counts[order[i]] > counts[order[j]] })
+	var specific []string
+	for _, t := range order {
+		if !genericTag(t) {
+			specific = append(specific, t)
+		}
+	}
+	if len(specific) > 0 {
+		order = specific
+	}
+	if len(order) > maxStyleTags {
+		order = order[:maxStyleTags]
+	}
+	return order
+}
+
+// styleTags is what one band sounds like, as styleFrom says it.
+func styleTags(b SearchBand) []string { return styleFrom([]SearchBand{b}) }

@@ -306,7 +306,7 @@ func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, er
 	if err != nil {
 		return Song{}, false, err
 	}
-	s, ok := q.pickFrom(ctx, cands, anchor, r, 0)
+	s, ok := q.pickFrom(ctx, cands, anchor, r, 0, 0)
 	return s, ok, nil
 }
 
@@ -314,8 +314,9 @@ func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, er
 // describes. maxBlocked, when it is not 0, ends the hunt after that many
 // resolved songs in a row turned out to be by an artist the spacing rule holds
 // back: a Mix is mostly its own artist, and once it has said so twice, more
-// resolves would only say it again.
-func (q *Queue) pickFrom(ctx context.Context, cands []cand, anchor bool, r *run, maxBlocked int) (Song, bool) {
+// resolves would only say it again. floor is how many of the run's resolves
+// the hunt leaves for whoever comes after it.
+func (q *Queue) pickFrom(ctx context.Context, cands []cand, anchor bool, r *run, maxBlocked, floor int) (Song, bool) {
 	var held *Song
 	hunted := false
 	blocked := 0
@@ -327,7 +328,7 @@ func (q *Queue) pickFrom(ctx context.Context, cands []cand, anchor bool, r *run,
 			break
 		}
 		if !c.cached {
-			if r.left <= 0 {
+			if r.left <= floor {
 				break
 			}
 			if held != nil {

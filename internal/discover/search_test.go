@@ -149,6 +149,10 @@ func TestMatchKey(t *testing.T) {
 		{"Engorged in Putrescence", "engorged in putrescence!"},
 		{"Mr. Bungle", "mr bungle"},
 		{"Sigur Rós", "sigur rós"},
+		{"Death/Metal", "death metal"},
+		// An apostrophe joins a word to its ending; it does not divide.
+		{"Don't Stop", "dont stop"},
+		{"Don’t Stop", "dont stop"},
 	}
 	for _, p := range same {
 		if matchKey(p[0]) != matchKey(p[1]) {
@@ -157,6 +161,22 @@ func TestMatchKey(t *testing.T) {
 	}
 	if matchKey("death metal") == matchKey("death") {
 		t.Error("a prefix is not a match")
+	}
+	// An accent typed as a letter and a combining mark is one word, not two.
+	if got := matchKey("Sigur Rós"); got != "sigur rós" {
+		t.Errorf("matchKey with a combining mark = %q", got)
+	}
+	// Words keep their boundaries: a track called "SwedishDeathMetal" is not
+	// the phrase "swedish death metal", and a station that took it for one
+	// played downtempo.
+	for _, p := range [][2]string{
+		{"SwedishDeathMetal", "swedish death metal"},
+		{"deathmetal", "death metal"},
+		{"Chelsea Wolfe", "ChelseaWolfe"},
+	} {
+		if matchKey(p[0]) == matchKey(p[1]) {
+			t.Errorf("matchKey(%q) = matchKey(%q) = %q: word boundaries were lost", p[0], p[1], matchKey(p[0]))
+		}
 	}
 	// A band named only in punctuation still has a key, and it is not empty:
 	// an empty key would equal every other empty key.
@@ -189,8 +209,19 @@ func TestClassify(t *testing.T) {
 			SearchResult{Tracks: []SearchTrack{track("Engorged in Putrescence", "Decarnate", false)}}, true, stepSong},
 		{"an album alone is a song", "engorged in putrescence",
 			SearchResult{Tracks: []SearchTrack{track("Engorged in Putrescence", "Decarnate", true)}}, true, stepSong},
-		{"a track beats a tag of the same name", "swedish death metal",
-			SearchResult{Tags: []string{"swedish-death-metal"}, Tracks: []SearchTrack{track("Swedish Death Metal", "Someone", false)}}, true, stepSong},
+		// A genre beats a song that happens to share its name: live, the tag
+		// swedish-death-metal came with a downtempo track "SwedishDeathMetal".
+		{"a tag beats a track of the same name", "death metal",
+			SearchResult{Tags: []string{"death-metal"}, Tracks: []SearchTrack{track("Death Metal", "Someone", false)}}, true, stepGenre},
+		{"a tag beats an album of the same name", "death metal",
+			SearchResult{Tags: []string{"death-metal"}, Tracks: []SearchTrack{track("Death Metal", "Someone", true)}}, true, stepGenre},
+		{"a run-together title is not the phrase", "swedish death metal",
+			SearchResult{Tags: []string{"swedish-death-metal"}, Tracks: []SearchTrack{track("SwedishDeathMetal", "Magmatik", false)}}, true, stepGenre},
+		{"a run-together title is not a song either", "swedish death metal",
+			SearchResult{Tracks: []SearchTrack{track("SwedishDeathMetal", "Magmatik", false)}}, true, stepTopHit},
+		{"a band beats a tag and a track", "chelsea wolfe",
+			SearchResult{Tags: []string{"chelsea-wolfe"}, Bands: []SearchBand{chelsea},
+				Tracks: []SearchTrack{track("Chelsea Wolfe", "Someone", false)}}, true, stepArtist},
 		{"results that merely contain the phrase are not matches", "swedish death metal",
 			SearchResult{Tags: []string{"swedish-death-metal"}, Tracks: []SearchTrack{
 				track("Swedish Death Metal Compilation", "Various", true),
@@ -263,9 +294,18 @@ func TestStyleTagFiltering(t *testing.T) {
 		{"a genre tag stays when only places are left besides it",
 			SearchBand{Genre: "Rock", Location: "Oslo, Norway", Tags: []string{"Rock", "Oslo"}},
 			[]string{"rock"}},
-		{"Bandcamp's own spelling is kept hyphenated",
+		{"Bandcamp's own spelling is kept hyphenated, and a generic genre is not a style",
 			SearchBand{Genre: "Alternative", Tags: []string{"Alternative", "Folk", "rock-acoustic-alternative-rock"}},
-			[]string{"folk", "rock-acoustic-alternative-rock"}},
+			[]string{"rock-acoustic-alternative-rock"}},
+		{"generic genres go whenever something more particular is left",
+			SearchBand{Genre: "Rock", Tags: []string{"Rock", "Indie", "Pop", "Shoegaze", "Dream Pop"}},
+			[]string{"shoegaze", "dream-pop"}},
+		{"generic genres stay when they are all there is",
+			SearchBand{Tags: []string{"Folk", "Pop"}},
+			[]string{"folk", "pop"}},
+		{"a generic word inside a longer tag is not a generic tag",
+			SearchBand{Tags: []string{"Folk", "Folk Punk", "Hip-Hop"}},
+			[]string{"folk-punk"}},
 		{"punctuation becomes a single hyphen",
 			SearchBand{Tags: []string{"Drum & Bass", "R&B/Soul"}},
 			[]string{"drum-bass", "r-b-soul"}},
@@ -279,6 +319,59 @@ func TestStyleTagFiltering(t *testing.T) {
 				t.Errorf("styleTags = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A band's own tags are a poor description of a station (Chelsea Wolfe lists
+// Alternative, Folk and one odd long tag, and Bandcamp's folk feed is
+// country). The bands around it say more: the tags are ranked by how many of
+// the bands carry them.
+func TestStyleFromSeveralBands(t *testing.T) {
+	seed := SearchBand{Name: "Chelsea Wolfe", Genre: "Alternative", Tags: []string{"Alternative", "Folk", "rock-acoustic-alternative-rock"}}
+	zola := SearchBand{Name: "Zola Jesus", Genre: "Electronic", Tags: []string{"Darkwave", "Gothic Rock", "Folk"}}
+	ruth := SearchBand{Name: "Emma Ruth Rundle", Genre: "Rock", Tags: []string{"Doom", "Darkwave"}}
+	wolves := SearchBand{Name: "Wolves", Genre: "Metal", Tags: []string{"Gothic Rock", "Doom", "Rock"}}
+
+	cases := []struct {
+		name  string
+		bands []SearchBand
+		want  []string
+	}{
+		{"the neighbours decide, and folk is gone",
+			[]SearchBand{seed, zola, ruth, wolves}, []string{"darkwave", "gothic-rock", "doom"}},
+		{"alone, the seed's particular tag is all that is left",
+			[]SearchBand{seed}, []string{"rock-acoustic-alternative-rock"}},
+		{"a tag two bands carry comes before ones a single band has",
+			[]SearchBand{seed, zola, ruth}, []string{"darkwave", "rock-acoustic-alternative-rock", "gothic-rock"}},
+		{"counted by bands, not by mentions",
+			[]SearchBand{{Tags: []string{"Slam", "Slam", "slam"}}, {Tags: []string{"Death Metal"}}, {Tags: []string{"Death Metal"}}},
+			[]string{"death-metal", "slam"}},
+		{"ties go to the earlier band's order",
+			[]SearchBand{{Tags: []string{"Doom"}}, {Tags: []string{"Drone"}}, {Tags: []string{"Sludge"}}, {Tags: []string{"Funeral Doom"}}},
+			[]string{"doom", "drone", "sludge"}},
+		{"bands with nothing to say", []SearchBand{{}, {Genre: "Metal"}}, nil},
+		{"nothing", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := styleFrom(tc.bands); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("styleFrom = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenericTag(t *testing.T) {
+	for _, g := range []string{"rock", "metal", "folk", "alternative", "pop", "electronic", "experimental", "indie",
+		"ambient", "punk", "jazz", "hip-hop", "country", "classical"} {
+		if !genericTag(g) {
+			t.Errorf("%q should be generic", g)
+		}
+	}
+	for _, s := range []string{"darkwave", "doom", "gothic-rock", "folk-punk", "death-metal", "slam", "shoegaze", "dream-pop", ""} {
+		if genericTag(s) {
+			t.Errorf("%q is a style, not a generic genre", s)
+		}
 	}
 }
 
