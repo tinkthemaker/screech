@@ -202,13 +202,20 @@ func (q *Queue) ytCandidates(ctx context.Context, anchor bool) ([]cand, error) {
 	if q.phrase == "" {
 		return nil, nil
 	}
+	return q.searchStages(ctx, q.phrase)
+}
+
+// searchStages is the discoveries of a search for phrase: the results from the
+// tenth on, and when those are all used up, the phrase widened with each of
+// ytVariants in turn. It returns the first stage that has anything to play.
+func (q *Queue) searchStages(ctx context.Context, phrase string) ([]cand, error) {
 	for stage := 0; stage <= len(ytVariants); stage++ {
 		// Each stage can be a yt-dlp process; a caller who has given up
 		// shouldn't pay for the stages after the one that timed out.
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		query := q.phrase
+		query := phrase
 		if stage > 0 {
 			query += " " + ytVariants[stage-1]
 		}
@@ -231,9 +238,11 @@ func (q *Queue) ytCandidates(ctx context.Context, anchor bool) ([]cand, error) {
 }
 
 // ytFilter drops what has played, what failed, and what is already known to
-// be by the band that just played. A video resolved within mediaTTL carries
-// the band it resolved to, not a guess from its title, and is marked cached:
-// it costs no yt-dlp process to look at again.
+// be by an artist the spacing rule holds back. A video resolved within
+// mediaTTL carries the band it resolved to, not a guess from its title, and is
+// marked cached: it costs no yt-dlp process to look at again. A radio also
+// remembers whose a video is for good (not its media, which goes stale), so
+// a Mix full of one band is not resolved over again.
 func (q *Queue) ytFilter(hits []YTHit) []cand {
 	var out []cand
 	for _, h := range hits {
@@ -245,10 +254,15 @@ func (q *Queue) ytFilter(hits []YTHit) []cand {
 			continue
 		}
 		c := cand{key: key, id: h.ID, artist: guessArtist(h.Title)}
+		if q.radio != nil {
+			if a, ok := q.radio.artistOf[h.ID]; ok {
+				c.artist = a
+			}
+		}
 		if e, ok := q.remembered(h.ID); ok {
 			c.artist, c.cached = e.artist, true
 		}
-		if c.artist != "" && c.artist == q.lastArtist {
+		if q.blocked(c.artist) {
 			continue
 		}
 		out = append(out, c)
@@ -285,12 +299,26 @@ func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, er
 	if q.yt == nil {
 		return Song{}, false, nil
 	}
+	if q.radio != nil {
+		return q.pickRadioYT(ctx, anchor, r)
+	}
 	cands, err := q.ytCandidates(ctx, anchor)
 	if err != nil {
 		return Song{}, false, err
 	}
+	s, ok := q.pickFrom(ctx, cands, anchor, r, 0)
+	return s, ok, nil
+}
+
+// pickFrom resolves candidates until one is a song worth playing, as pickYT
+// describes. maxBlocked, when it is not 0, ends the hunt after that many
+// resolved songs in a row turned out to be by an artist the spacing rule holds
+// back: a Mix is mostly its own artist, and once it has said so twice, more
+// resolves would only say it again.
+func (q *Queue) pickFrom(ctx context.Context, cands []cand, anchor bool, r *run, maxBlocked int) (Song, bool) {
 	var held *Song
 	hunted := false
+	blocked := 0
 	for len(cands) > 0 {
 		i := q.choose(cands, !anchor)
 		c := cands[i]
@@ -328,21 +356,27 @@ func (q *Queue) pickYT(ctx context.Context, anchor bool, r *run) (Song, bool, er
 			q.rule(c.key)
 			continue
 		}
-		if a := core.NormalizeArtist(s.Artist); a != "" && a == q.lastArtist {
-			// Same band as the song just played. It stays a candidate for later.
+		if q.blocked(core.NormalizeArtist(s.Artist)) {
+			// An artist the spacing rule holds back. The song stays a
+			// candidate for later.
+			blocked++
+			if maxBlocked > 0 && blocked >= maxBlocked {
+				break
+			}
 			continue
 		}
+		blocked = 0
 		if s.NewToYou || s.Anchor {
-			return s, true, nil
+			return s, true
 		}
 		if held == nil {
 			held = &s
 		}
 	}
 	if held != nil {
-		return *held, true, nil
+		return *held, true
 	}
-	return Song{}, false, nil
+	return Song{}, false
 }
 
 // resolve returns a candidate's media and when it was resolved, from the
@@ -359,6 +393,7 @@ func (q *Queue) resolve(ctx context.Context, c cand, r *run) (YTMedia, time.Time
 	}
 	at := q.now()
 	q.remember(c.id, m, at)
+	q.noteResolved(c.id, m)
 	return m, at, nil
 }
 
@@ -367,6 +402,12 @@ func (q *Queue) resolve(ctx context.Context, c cand, r *run) (YTMedia, time.Time
 // resolved, which is the age of its signed URL; whether the band is new is
 // judged now, against what the listener has heard by now.
 func (q *Queue) ytSong(id string, m YTMedia, anchor bool, at time.Time) (Song, bool) {
+	return q.songFrom("yt:"+id, m, anchor, at)
+}
+
+// songFrom is ytSong for any key: a Bandcamp page that yt-dlp resolved is a
+// song like a YouTube video is, and is judged by the same length.
+func (q *Queue) songFrom(key string, m YTMedia, anchor bool, at time.Time) (Song, bool) {
 	if m.URL == "" || m.Duration < minSeconds || m.Duration > maxSeconds {
 		return Song{}, false
 	}
@@ -377,13 +418,14 @@ func (q *Queue) ytSong(id string, m YTMedia, anchor bool, at time.Time) (Song, b
 	}
 	anchor = anchor || m.Views > popularViews
 	return Song{
-		Key:      "yt:" + id,
+		Key:      key,
 		Artist:   artist,
 		Title:    title,
 		URL:      m.URL,
 		Anchor:   anchor,
 		NewToYou: !anchor && q.isNew(core.NormalizeArtist(artist)),
 		Resolved: at,
+		Duration: seconds(m.Duration),
 	}, true
 }
 
@@ -392,11 +434,11 @@ func (q *Queue) ytSong(id string, m YTMedia, anchor bool, at time.Time) (Song, b
 // title goes through the same "Artist - Title" split radio titles do, and
 // the channel stands in for an artist the title doesn't name.
 func mediaNames(m YTMedia) (artist, title string) {
-	artist, title = strings.TrimSpace(m.Artist), strings.TrimSpace(m.Track)
+	artist, title = fieldOf(m.Artist), fieldOf(m.Track)
 	if artist != "" && title != "" {
 		return artist, title
 	}
-	if tr, ok := core.ParseTitle(m.Title, ""); ok {
+	if tr, ok := core.ParseTitle(fieldOf(m.Title), ""); ok {
 		if artist == "" {
 			artist = tr.Artist
 		}
@@ -405,10 +447,19 @@ func mediaNames(m YTMedia) (artist, title string) {
 		}
 	}
 	if artist == "" {
-		artist = m.Channel
+		artist = fieldOf(m.Channel)
 	}
 	if title == "" {
-		title = m.Title
+		title = fieldOf(m.Title)
 	}
 	return artist, title
+}
+
+// fieldOf is a metadata field with the padding off and a null (see nullWords)
+// read as the empty it means.
+func fieldOf(s string) string {
+	if s = strings.TrimSpace(s); noName(s) {
+		return ""
+	}
+	return s
 }
